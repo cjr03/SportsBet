@@ -22,7 +22,7 @@ LIVE_SCORES_EVERY = timedelta(minutes=5)
 RUNDOWN_LINES_EVERY = timedelta(minutes=30)
 LINES_HORIZON = timedelta(hours=48)
 # Odds API closing pulls: one per league per fixed 2-hour UTC block that holds a game we care about.
-CLOSE_BLOCK = timedelta(hours=2)
+CLOSE_SLOP = timedelta(minutes=5)  # kickoff times differ slightly between providers
 
 
 def _odds_time(t: datetime) -> str:
@@ -32,11 +32,6 @@ def _odds_time(t: datetime) -> str:
 
 def _in_close_window(kickoff: datetime, now: datetime) -> bool:
     return kickoff - timedelta(minutes=20) <= now <= kickoff - timedelta(minutes=5)
-
-
-def _block_start(t: datetime) -> datetime:
-    u = t.astimezone(UTC)
-    return u.replace(hour=u.hour - u.hour % 2, minute=0, second=0, microsecond=0)
 
 
 @dataclass
@@ -162,21 +157,16 @@ class Scheduler:
                 continue
             if wanted is None:
                 wanted = set(self.close_games())
-            # Closing lines only matter for CLV and last-minute recs: one pull per 2-hour block
-            # that holds a game with a PLACED bet or an active recommendation, timed to the
-            # block's first such kickoff. The args depend only on the block, so it runs once.
-            blocks: dict[datetime, list[datetime]] = {}
-            for g in lg_up:
-                if g.game_id in wanted:
-                    blocks.setdefault(_block_start(g.kickoff), []).append(g.kickoff)
-            for block, kickoffs in sorted(blocks.items()):
-                first = min(kickoffs)
-                if not _in_close_window(first, now):
+            # Closing lines only matter for CLV and last-minute recs: one pull per distinct kickoff
+            # that holds a game with a PLACED bet or an active recommendation, keyed by kickoff so
+            # it runs once. CLV is recorded for bets kicking off within 30 min of the pull.
+            for kickoff in sorted({g.kickoff for g in lg_up if g.game_id in wanted}):
+                if not _in_close_window(kickoff, now):
                     continue
                 job = Job("odds_games", league, {
-                    "window": f"close:{_odds_time(block)}",
-                    "commence_from": _odds_time(block),
-                    "commence_to": _odds_time(block + CLOSE_BLOCK),
+                    "window": f"close:{_odds_time(kickoff)}",
+                    "commence_from": _odds_time(kickoff - CLOSE_SLOP),
+                    "commence_to": _odds_time(kickoff + CLOSE_SLOP),
                 }, essential=league == "nfl")
                 if job.key not in self.state:
                     out.append(job)

@@ -40,6 +40,23 @@ def test_price_move_expires_old(lc):
     assert lc.get_rec(new.id).state == "RECOMMENDED"
 
 
+def test_confirm_texted_id_after_price_tick_resolves_to_live_rec(lc):
+    old, _ = lc.upsert_recommendation(kalshi_rec(price=0.46), NOW)
+    lc.mark_pending(old.id)  # texted
+    new, _ = lc.upsert_recommendation(kalshi_rec(price=0.47), NOW)
+    lc.confirm(old.id, NOW, price=0.46)
+    assert lc.get_rec(new.id).state == "PLACED"
+    assert lc.get_rec(old.id).state == "EXPIRED"
+    assert lc.open_bets()[0]["rec_id"] == new.id and lc.open_bets()[0]["price"] == 0.46
+
+
+def test_confirm_expired_without_successor_raises(lc):
+    old, _ = lc.upsert_recommendation(kalshi_rec(), NOW)
+    lc.expire_due(old.expires_at)
+    with pytest.raises(LifecycleError, match="not pending"):
+        lc.confirm(old.id, NOW)
+
+
 def test_confirm_debits_with_fee(lc):
     rec, _ = lc.upsert_recommendation(kalshi_rec(), NOW)
     lc.mark_pending(rec.id)

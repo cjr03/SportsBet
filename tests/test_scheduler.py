@@ -81,32 +81,35 @@ def _z(t):
     return t.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def test_odds_close_window_once_per_block():
-    k = datetime(2026, 10, 21, 22, 30, tzinfo=timezone.utc)  # block 22:00-24:00 UTC
+def test_odds_close_window_once_per_kickoff():
+    k = datetime(2026, 10, 21, 22, 30, tzinfo=timezone.utc)
     s = sched(FakeRegistry([game("a", k), game("b", k)]), close_games=lambda: {"a"})
     assert not _closes(s.due(T0))
     t = k - timedelta(minutes=10)
     close = _closes(s.due(t))
     assert len(close) == 1 and close[0].essential
-    assert close[0].args["commence_from"] == "2026-10-21T22:00:00Z" == _z(k.replace(minute=0))
-    assert close[0].args["commence_to"] == "2026-10-22T00:00:00Z"
+    assert close[0].args["commence_from"] == "2026-10-21T22:25:00Z"
+    assert close[0].args["commence_to"] == "2026-10-21T22:35:00Z"
     run_all(s, close, t)
     assert not _closes(s.due(t + timedelta(minutes=1)))
 
 
-def test_odds_close_one_job_for_kickoffs_in_same_block():
+def test_odds_close_one_job_per_wanted_kickoff():
     k1 = datetime(2026, 10, 24, 16, 0, tzinfo=timezone.utc)
     k2 = k1 + timedelta(minutes=30)
     k3 = k1 + timedelta(hours=1, minutes=30)
-    games = [game("a", k1, "cfb"), game("b", k2, "cfb"), game("c", k3, "cfb")]
-    s = sched(FakeRegistry(games), close_games=lambda: {"a", "b", "c"})
+    games = [game("a", k1, "cfb"), game("b", k2, "cfb"), game("c", k3, "cfb"), game("d", k3, "cfb")]
+    s = sched(FakeRegistry(games), close_games=lambda: {"a", "c", "d"})
     t = k1 - timedelta(minutes=10)
     close = _closes(s.due(t))
     assert len(close) == 1 and not close[0].essential  # CFB closes never dip into the reserve
-    assert close[0].args["commence_from"] == _z(k1) and close[0].args["commence_to"] == _z(k1 + timedelta(hours=2))
+    assert close[0].args["commence_from"] == _z(k1 - timedelta(minutes=5))
     run_all(s, close, t)
-    for later in (k2 - timedelta(minutes=10), k3 - timedelta(minutes=10)):
-        assert not _closes(s.due(later))
+    assert not _closes(s.due(k2 - timedelta(minutes=10)))  # no bet or rec on b
+    later = _closes(s.due(k3 - timedelta(minutes=10)))
+    assert len(later) == 1 and later[0].args["commence_to"] == _z(k3 + timedelta(minutes=5))
+    run_all(s, later, k3 - timedelta(minutes=10))
+    assert not _closes(s.due(k3 - timedelta(minutes=9)))
 
 
 def test_odds_close_skipped_without_bet_or_rec():

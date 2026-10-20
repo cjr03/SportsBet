@@ -113,6 +113,9 @@ class Lifecycle:
         rec = self.get_rec(rec_id)
         if rec is None:
             raise LifecycleError("unknown id")
+        if rec.state == "EXPIRED":
+            # a price tick re-issues the rec under a new id; the id in the text should still work
+            rec = self._live_successor(rec, now) or rec
         if rec.state not in ("RECOMMENDED", "PENDING"):
             raise LifecycleError("not pending")
         if now >= rec.expires_at:
@@ -150,6 +153,15 @@ class Lifecycle:
                 raise
             self.conn.execute("RELEASE confirm_bet")
         return bet_id
+
+    def _live_successor(self, rec: Recommendation, now: datetime) -> Recommendation | None:
+        for r in self.conn.execute(
+                "SELECT * FROM recommendations WHERE leg_key=? AND id>? "
+                "AND state IN ('RECOMMENDED','PENDING') ORDER BY id DESC", (rec.leg_key, rec.id)):
+            live = _row_to_rec(r)
+            if now < live.expires_at:
+                return live
+        return None
 
     def pending(self) -> list[Recommendation]:
         return [_row_to_rec(r) for r in self.conn.execute(
