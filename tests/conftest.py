@@ -21,3 +21,12 @@ def settings(tmp_path):
 @pytest.fixture
 def now():
     return datetime(2026, 10, 25, 17, 0, tzinfo=timezone.utc)
+
+
+@pytest.fixture
+def conn(tmp_path):
+    from gridiron_edge.db import connect
+
+    c = connect(tmp_path / "t.db")
+    yield c
+    c.close()
