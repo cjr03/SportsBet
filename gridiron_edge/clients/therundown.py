@@ -1,12 +1,14 @@
 """TheRundown client: delayed live scores and main-line prices for DK/FD/BetMGM/Kalshi."""
+import logging
 from collections.abc import Callable
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 
 from gridiron_edge.budget import BudgetGuard
 from gridiron_edge.clients.http import AuthError, RateLimitedClient
 from gridiron_edge.strategy.odds import american_to_decimal
 from gridiron_edge.types import Game, League, Quote
 
+log = logging.getLogger(__name__)
 BASE_URL = "https://therundown.io/api/v2"
 SPORT_ID = {"cfb": 1, "nfl": 2}
 MONTHLY_CAP = 200_000
@@ -55,6 +57,7 @@ class TheRundownClient:
         self.budget = BudgetGuard(conn, "therundown", MONTHLY_CAP, RESERVE_FRAC)
         self.disabled = False
         self.unmatched = 0
+        self.malformed = 0
         self.last_status = ""
         self.delay_seconds: int | None = None
         self.tier: str | None = None
@@ -90,7 +93,12 @@ class TheRundownClient:
         away = next((t for t in ev.get("teams", []) if t.get("is_away")), None)
         game_id = None
         if home and away:
-            game_id = self.resolve(league, _team_name(home), _team_name(away), _kickoff(ev))
+            try:
+                game_id = self.resolve(league, _team_name(home), _team_name(away), _kickoff(ev))
+            except (KeyError, ValueError, TypeError, AttributeError) as e:
+                log.warning("therundown: skipping malformed event %s: %r", ev.get("event_id"), e)
+                self.malformed += 1
+                return None
         if game_id is None:
             self.unmatched += 1
             return None
@@ -104,8 +112,13 @@ class TheRundownClient:
                 continue
             game_id, _, _ = m
             sc = ev.get("score") or {}
-            kickoff = _kickoff(ev)
-            away_code, home_code = game_id.split(":")[-1].split("@")
+            kickoff = _kickoff(ev)  # _match already parsed it successfully
+            codes = game_id.split(":")[-1].split("@")
+            if len(codes) != 2 or not all(codes):
+                log.warning("therundown: unrecognised game_id %r (want ...:AWAY@HOME), skipping", game_id)
+                self.malformed += 1
+                continue
+            away_code, home_code = codes
             period = sc.get("game_period")
             out.append(Game(
                 game_id, league, kickoff.year if kickoff.month >= 7 else kickoff.year - 1,
@@ -123,28 +136,43 @@ class TheRundownClient:
             if m is None:
                 continue
             game_id, home, away = m
-            team_side = {home["team_id"]: "home", away["team_id"]: "away"}
-            for mk in ev.get("markets", []):
-                market = MARKET.get(mk.get("market_id"))
-                if market is None or mk.get("period_id", 0) != 0:
+            try:
+                out.extend(self._event_quotes(ev, game_id, home, away))
+            except (KeyError, ValueError, TypeError, AttributeError) as e:
+                log.warning("therundown: skipping malformed event %s: %r", ev.get("event_id"), e)
+                self.malformed += 1
+        return out
+
+    def _event_quotes(self, ev: dict, game_id: str, home: dict, away: dict) -> list[Quote]:
+        out: list[Quote] = []
+        fetched = datetime.now(UTC)
+        team_side = {home["team_id"]: "home", away["team_id"]: "away"}
+        for mk in ev.get("markets", []):
+            market = MARKET.get(mk.get("market_id"))
+            if market is None or mk.get("period_id", 0) != 0:
+                continue
+            for part in mk.get("participants", []):
+                if part.get("type") == "TYPE_TEAM":
+                    side = team_side.get(part.get("id"))
+                else:
+                    side = {"Over": "over", "Under": "under"}.get(part.get("name"))
+                if side is None or (market == "totals") != (side in ("over", "under")):
                     continue
-                for part in mk.get("participants", []):
-                    if part.get("type") == "TYPE_TEAM":
-                        side = team_side.get(part.get("id"))
-                    else:
-                        side = {"Over": "over", "Under": "under"}.get(part.get("name"))
-                    if side is None or (market == "totals") != (side in ("over", "under")):
-                        continue
-                    for line in part.get("lines", []):
-                        for aff, price in line.get("prices", {}).items():
-                            book = AFFILIATE.get(_int(aff))
-                            p = price.get("price")
-                            if book is None or price.get("closed_at") or p is None or p == SENTINEL or p == 0:
-                                continue
+                for line in part.get("lines", []):
+                    for aff, price in line.get("prices", {}).items():
+                        book = AFFILIATE.get(_int(aff))
+                        p = price.get("price")
+                        if book is None or price.get("closed_at") or p is None or p == SENTINEL or p == 0:
+                            continue
+                        try:
                             value = None if market == "h2h" or line.get("value") is None else float(line["value"])
+                            ts = price.get("updated_at")
+                            at = datetime.fromisoformat(ts.replace("Z", "+00:00")) if ts else fetched
                             out.append(Quote("therundown", book, game_id, market, side, value,
-                                             american_to_decimal(float(p)),
-                                             datetime.fromisoformat(price["updated_at"].replace("Z", "+00:00"))))
+                                             american_to_decimal(float(p)), at))
+                        except (ValueError, TypeError, AttributeError) as e:
+                            log.warning("therundown: skipping malformed price %s/%s: %r", game_id, book, e)
+                            self.malformed += 1
         return out
 
     async def aclose(self) -> None:

@@ -60,3 +60,35 @@ async def test_unmatched_game_skipped(respx_mock, rd, load):
     rd.resolve = lambda *a: None
     respx_mock.get(url__regex=r".*/events/.*").mock(return_value=_ok(load))
     assert await rd.scores("nfl", date(2026, 11, 1)) == [] and rd.unmatched == 3
+
+
+async def test_malformed_items_skipped_not_fatal(respx_mock, rd, load):
+    import copy
+    body = copy.deepcopy(load("therundown_events.json"))
+    evs = body["events"] if isinstance(body, dict) else body
+    good = copy.deepcopy(evs[0])
+    bad_date = copy.deepcopy(evs[0]); bad_date.pop("event_date")
+    bad_team = copy.deepcopy(evs[0])
+    for t in bad_team["teams"]:
+        t.pop("team_id", None)
+    bad_price = copy.deepcopy(evs[0])
+    for mk in bad_price.get("markets", []):
+        for part in mk.get("participants", []):
+            for line in part.get("lines", []):
+                if line.get("value") is not None:
+                    line["value"] = "n/a"
+                for pr in line.get("prices", {}).values():
+                    pr.pop("updated_at", None)
+    body2 = {"events": [bad_date, bad_team, bad_price, good]}
+    respx_mock.get(url__regex=r".*/events/.*").mock(return_value=httpx.Response(200, json=body2))
+    qs = await rd.lines("nfl", date(2026, 11, 1))
+    assert qs and rd.malformed >= 2
+    games = await rd.scores("nfl", date(2026, 11, 1))
+    assert len(games) >= 1
+
+
+async def test_scores_bad_game_id_skipped(respx_mock, rd, load):
+    rd.resolve = lambda *a: "weird-id"
+    respx_mock.get(url__regex=r".*/events/.*").mock(return_value=_ok(load))
+    assert await rd.scores("nfl", date(2026, 11, 1)) == []
+    assert rd.malformed >= 1

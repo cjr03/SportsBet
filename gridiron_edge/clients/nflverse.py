@@ -19,8 +19,10 @@ class NflverseSource:
         try:
             return getattr(nflreadpy, loader)(seasons)
         except Exception:  # nflreadpy failed (network, upstream format): read the release assets directly
-            frames = [pl.read_parquet(f"{RELEASES}/{tag}/{file_fmt.format(season=s)}.parquet") for s in seasons]
-            return pl.concat(frames, how="diagonal_relaxed")
+            urls = list(dict.fromkeys(  # constant file names (schedules) collapse to one download
+                f"{RELEASES}/{tag}/{file_fmt.format(season=s)}.parquet" for s in seasons))
+            df = pl.concat([pl.read_parquet(u) for u in urls], how="diagonal_relaxed")
+            return df.filter(pl.col("season").is_in(seasons)) if "season" in df.columns else df
 
     def schedules(self, seasons: list[int]) -> pl.DataFrame:
         df = self._load("load_schedules", "schedules", "games", seasons)
