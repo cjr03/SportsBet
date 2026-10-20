@@ -1,0 +1,25 @@
+{
+  "markets": [
+    {
+      "ticker": "KXNFLSPREAD-26OCT26DALPHI-PHI8",
+      "event_ticker": "KXNFLSPREAD-26OCT26DALPHI",
+      "yes_sub_title": "Philadelphia",
+      "no_sub_title": "Philadelphia",
+      "status": "active",
+      "result": "",
+      "yes_bid_dollars": "0.1300",
+      "yes_ask_dollars": "0.1400",
+      "no_bid_dollars": "0.8600",
+      "no_ask_dollars": "0.8700",
+      "yes_bid_size_fp": "3200.00",
+      "yes_ask_size_fp": "500.00",
+      "no_bid_size_fp": "200.00",
+      "no_ask_size_fp": "900.00",
+      "last_price_dollars": "0.7200",
+      "notional_value_dollars": "1.0000",
+      "strike_type": "greater",
+      "floor_strike": 7.5
+    }
+  ],
+  "cursor": ""
+}

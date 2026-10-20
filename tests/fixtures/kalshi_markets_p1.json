@@ -1,0 +1,43 @@
+{
+  "markets": [
+    {
+      "ticker": "KXNFLGAME-26NOV02CHISEA-SEA",
+      "event_ticker": "KXNFLGAME-26NOV02CHISEA",
+      "yes_sub_title": "Seattle",
+      "no_sub_title": "Seattle",
+      "status": "active",
+      "result": "",
+      "yes_bid_dollars": "0.5800",
+      "yes_ask_dollars": "0.6200",
+      "no_bid_dollars": "0.3800",
+      "no_ask_dollars": "0.4200",
+      "yes_bid_size_fp": "3200.00",
+      "yes_ask_size_fp": "200.00",
+      "no_bid_size_fp": "200.00",
+      "no_ask_size_fp": "3200.00",
+      "last_price_dollars": "0.7200",
+      "notional_value_dollars": "1.0000",
+      "strike_type": "greater"
+    },
+    {
+      "ticker": "KXNFLGAME-26NOV02CHISEA-CHI",
+      "event_ticker": "KXNFLGAME-26NOV02CHISEA",
+      "yes_sub_title": "Chicago",
+      "no_sub_title": "Chicago",
+      "status": "active",
+      "result": "",
+      "yes_bid_dollars": "0.3800",
+      "yes_ask_dollars": "0.4200",
+      "no_bid_dollars": "0.5800",
+      "no_ask_dollars": "0.6200",
+      "yes_bid_size_fp": "3200.00",
+      "yes_ask_size_fp": "150.00",
+      "no_bid_size_fp": "200.00",
+      "no_ask_size_fp": "3200.00",
+      "last_price_dollars": "0.7200",
+      "notional_value_dollars": "1.0000",
+      "strike_type": "greater"
+    }
+  ],
+  "cursor": "abc123"
+}
