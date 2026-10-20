@@ -11,7 +11,8 @@ _SCHEMA = [
     """CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY, value TEXT NOT NULL)""",
     """CREATE TABLE IF NOT EXISTS quota (
-        api TEXT PRIMARY KEY, remaining INTEGER, used INTEGER, updated_ts TEXT)""",
+        id INTEGER PRIMARY KEY AUTOINCREMENT, api TEXT NOT NULL, ts TEXT NOT NULL,
+        remaining INTEGER, used INTEGER, last INTEGER)""",
     """CREATE TABLE IF NOT EXISTS api_cache (
         key TEXT PRIMARY KEY, fetched_ts TEXT NOT NULL, payload TEXT NOT NULL)""",
     """CREATE TABLE IF NOT EXISTS ledger (
