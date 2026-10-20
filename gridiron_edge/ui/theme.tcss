@@ -51,6 +51,11 @@ OpportunityTable > .flash {
 .loss { color: $loss; }
 .pending { color: $pending; }
 
+/* Modals must not inherit the dashboard grid from the Screen rule above. */
+ModalScreen {
+    layout: vertical;
+}
+
 ConfirmScreen {
     align: center middle;
     background: $bg 70%;

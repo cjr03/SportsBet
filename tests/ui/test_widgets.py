@@ -1,3 +1,4 @@
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 from textual.app import App
@@ -9,6 +10,8 @@ from gridiron_edge.ui.widgets import (
     BalanceChart, BankrollHeader, EventLog, KpiTiles, OpportunityBoard, QuotaBar,
     ScoresPanel, compute_kpis,
 )
+
+THEME = Path(__file__).resolve().parents[2] / "gridiron_edge" / "ui" / "theme.tcss"
 
 T0 = datetime(2026, 10, 25, 17, 0, tzinfo=timezone.utc)
 
@@ -34,6 +37,38 @@ class Harness(App):
 
     def on_opportunity_board_confirm_requested(self, msg):
         self.requested.append(msg.rec_id)
+
+
+class ThemedHarness(Harness):
+    CSS_PATH = THEME
+
+
+async def test_board_flash_styled_then_expires():
+    app = ThemedHarness(OpportunityBoard())
+    async with app.run_test() as pilot:
+        board = app.query_one(OpportunityBoard)
+        board.set_recs([rec(1)])
+        await pilot.pause(board.FLASH_S + 0.3)
+        board.set_recs([rec(1), rec(2)])
+        await pilot.pause()
+        table = board.query_one("#tab-kalshi_game", DataTable)
+
+        assert 2 in board.flash_ids and 1 not in board.flash_ids
+        assert table.get_component_rich_style("flash").bgcolor is not None
+        flashed = str(table.get_row_at(1)[0].style)
+        assert flashed and "on " in flashed
+        assert "on " not in str(table.get_row_at(0)[0].style)
+        await pilot.pause(board.FLASH_S + 0.3)
+        assert board.flash_ids == set()
+        assert "on " not in str(table.get_row_at(1)[0].style)
+
+
+async def test_confirm_modal_width_with_theme():
+    app = ThemedHarness()
+    async with app.run_test(size=(120, 40)) as pilot:
+        app.push_screen(ConfirmScreen(rec(5)))
+        await pilot.pause()
+        assert app.screen.query_one("#confirm-box").region.width == 60
 
 
 async def test_board_flash_and_confirm_message():
@@ -165,7 +200,12 @@ async def test_quota_low_class_and_header():
         assert not q.has_class("low")
         q.update_quota(20, 900, None, False)
         assert q.has_class("low")
-        await pilot.pause()
+        await pilot.pause(0.5)
+        assert q.styles.opacity < 1.0
+        q.update_quota(400, 900, 150000, True)
+        assert not q.has_class("low")
+        await pilot.pause(1.0)
+        assert q.styles.opacity == 1.0
     app = Harness(BankrollHeader())
     async with app.run_test() as pilot:
         h = app.query_one(BankrollHeader)
