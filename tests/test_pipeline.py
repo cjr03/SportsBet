@@ -228,3 +228,69 @@ def test_slate_caps_hold(mk, settings):
     assert len(sized) >= 10
     assert sum(r.stake_cents for r in sized) <= settings.cap_slate * BANKROLL
     assert all(0 < r.stake_cents <= settings.cap_bet * BANKROLL for r in sized)
+
+
+def _slate_rec(m, p_fair, qty):
+    from gridiron_edge.strategy.kalshi_pricing import effective_price, kalshi_ev
+    from gridiron_edge.types import Leg, Recommendation
+    leg = Leg("kalshi", "H1 ML", "yes", m.yes_ask, p_fair, "g1", ticker=m.ticker, team="H1")
+    ev = kalshi_ev(p_fair, effective_price(m.yes_ask, qty, m.fee_multiplier))
+    return Recommendation(None, "kalshi_game", [leg], 0, qty, ev, p_fair, None, NOW, NOW + timedelta(hours=30))
+
+
+# 0.50: the final qty fails the min edge; 0.80 (smaller Kelly): it fails only the min EV
+@pytest.mark.parametrize("price, p_fair, overrides", [
+    (0.50, 0.5335, {"min_stake_cents": 50}),
+    (0.80, 0.837, {"kelly_fraction": 0.1, "min_stake_cents": 50}),
+])
+def test_size_slate_drops_rec_failing_filters_at_final_qty(mk, settings, price, p_fair, overrides):
+    from gridiron_edge.pipeline import size_slate
+    from gridiron_edge.strategy.kalshi_pricing import effective_price, passes_filters
+    settings = replace(settings, **overrides)
+    bankroll = 10_000  # $100: provisional qty is tiny, so per-order fee rounding bites
+    m = mk("E1-H1", "E1", "ml", "H1", yes_ask=price, game_id="g1")
+    prov = int(settings.cap_bet * bankroll / 100 / price)
+    p_eff = effective_price(price, prov)
+    assert passes_filters(p_fair, price, p_eff, m.yes_ask_size, prov, settings, "active")[0]
+    snap = snap_with(kalshi=[m], bankroll_cents=bankroll)
+    out = size_slate([_slate_rec(m, p_fair, prov)], snap, settings)
+    # Kelly sizes below the provisional qty, the per-contract fee rises and the rec no longer passes
+    assert out == []
+    # with a clearer edge the same market survives sizing, and its final EV still clears the minimum
+    kept = size_slate([_slate_rec(m, p_fair + 0.02, prov)], snap, settings)
+    assert len(kept) == 1 and kept[0].ev >= settings.kalshi_min_ev
+    k = kept[0]
+    assert passes_filters(k.legs[0].p_fair, price, effective_price(price, k.qty), m.yes_ask_size, k.qty,
+                          settings, "active")[0]
+
+
+def test_book_devig_is_worst_case_per_side(settings):
+    from gridiron_edge.pipeline import _book_p_sides
+    from gridiron_edge.strategy.devig import devig_worst
+    props = [PropQuote("odds_api", "draftkings", "g1", "Player 1", "rush_yds", "over", 50.5, 2.25, NOW),
+             PropQuote("odds_api", "draftkings", "g1", "Player 1", "rush_yds", "under", 50.5, 1.70, NOW)]
+    snap = snap_with(props=props)
+    p_over, p_under = _book_p_sides(snap, settings, "g1", "Player 1", "rush_yds", 50.5)
+    # at the book's own point each side is that side's most conservative devig, not a complement
+    assert p_over == pytest.approx(devig_worst([2.25, 1.70], 0), abs=1e-6)
+    assert p_under == pytest.approx(devig_worst([2.25, 1.70], 1), abs=1e-6)
+    assert p_under < 1.0 - p_over
+    # shifted to another line, both sides stay conservative
+    o, u = _book_p_sides(snap, settings, "g1", "Player 1", "rush_yds", 47.5)
+    assert o + u < 1.0 and o > p_over and u < p_under
+
+
+def test_pp_under_pick_uses_worst_case_under(settings):
+    from gridiron_edge.pipeline import _book_p_sides
+    snap = _pp_snap()
+    props = []
+    for q in snap.props:  # flip the books: every under is now the favourite
+        if q.book == "draftkings":
+            q = replace(q, decimal=2.25 if q.side == "over" else 1.70)
+        props.append(q)
+    snap = replace(snap, props=props)
+    recs = pp_entry_candidates(snap, settings, StubProjector())
+    assert len(recs) == 1
+    for leg in recs[0].legs:
+        p_over, p_under = _book_p_sides(snap, settings, leg.game_id, leg.player, leg.stat, leg.line)
+        assert leg.side == "under" and leg.p_fair == pytest.approx(p_under) and p_under < 1.0 - p_over

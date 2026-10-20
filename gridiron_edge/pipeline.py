@@ -103,12 +103,17 @@ def _game_p_yes(m: KalshiMarket, g: Game, snap: Snapshot, s: Settings) -> float 
     return blend(p_model, p_mkt, default_weight(g.league, hours))
 
 
-def _best_side(m: KalshiMarket, p_yes: float, snap: Snapshot, s: Settings, extra_ev: float = 0.0) -> _Side | None:
-    """The YES/NO side with the higher EV that passes every filter."""
+def _best_side(m: KalshiMarket, p_yes: float, snap: Snapshot, s: Settings, extra_ev: float = 0.0,
+               p_no: float | None = None) -> _Side | None:
+    """The YES/NO side with the higher EV that passes every filter.
+
+    p_no defaults to 1 - p_yes; pass it when each side has its own worst-case probability.
+    """
     bankroll = snap.bankroll_cents / 100
     best: _Side | None = None
+    p_no = 1.0 - p_yes if p_no is None else p_no
     for side, price, p, depth in (("yes", m.yes_ask, p_yes, m.yes_ask_size),
-                                  ("no", m.no_ask, 1.0 - p_yes, m.no_ask_size)):
+                                  ("no", m.no_ask, p_no, m.no_ask_size)):
         if price <= 0:
             continue
         qty = min(math.floor(s.cap_bet * bankroll / price), int(depth))
@@ -159,8 +164,14 @@ def _stat_kind(stat: str) -> Literal["yards", "count"]:
     return "yards" if stat.endswith("_yds") else "count"
 
 
-def _book_p_over(snap: Snapshot, s: Settings, game_id: str, player: str, stat: str, line: float) -> float | None:
-    """Worst-case devigged P(over) from the sportsbook nearest this line, shifted to the line."""
+def _book_p_sides(snap: Snapshot, s: Settings, game_id: str, player: str, stat: str,
+                  line: float) -> tuple[float, float] | None:
+    """(P(over), P(under)) at the line from the sportsbook nearest it, each side worst-case.
+
+    Each side is devigged with its own most conservative method and shifted to the line through
+    its own implied mean, so neither side is the optimistic complement of the other and
+    P(over) + P(under) <= 1.
+    """
     pairs: dict[tuple[str, float], dict[str, PropQuote]] = {}
     for q in snap.props:
         if (q.book == "prizepicks" or q.decimal is None or q.game_id != game_id or q.stat != stat
@@ -174,13 +185,16 @@ def _book_p_over(snap: Snapshot, s: Settings, game_id: str, player: str, stat: s
     if not both:
         return None
     (_, point), sides = min(both, key=lambda kv: (abs(kv[0][1] - line), kv[0][0]))
-    p_at_point = devig_worst([sides["over"].decimal, sides["under"].decimal], 0)
+    decimals = [sides["over"].decimal, sides["under"].decimal]
+    p_over_at_point = devig_worst(decimals, 0)
+    p_under_at_point = devig_worst(decimals, 1)
     kind = _stat_kind(stat)
-    try:
-        mean = implied_mean_from_line(point, p_at_point, kind)
+    try:  # a separate implied mean for each side's worst-case probability
+        mean_over = implied_mean_from_line(point, p_over_at_point, kind)
+        mean_under = implied_mean_from_line(point, 1.0 - p_under_at_point, kind)
     except ValueError:  # no mean reproduces this probability
         return None
-    return prop_p_over(line, mean, kind)
+    return prop_p_over(line, mean_over, kind), 1.0 - prop_p_over(line, mean_under, kind)
 
 
 def _model_p_over(projector: Projector, g: Game, player: str, stat: str, line: float) -> float | None:
@@ -194,14 +208,14 @@ def _model_p_over(projector: Projector, g: Game, player: str, stat: str, line: f
     return prop_p_over(line, mean, kind, sd if sd > 0 else None)
 
 
-def _prop_p_over(snap: Snapshot, s: Settings, projector: Projector, g: Game, player: str, stat: str,
-                 line: float) -> tuple[float, bool] | None:
-    """(P(over line), anchored): sportsbook-anchored when possible, else the projector."""
-    p = _book_p_over(snap, s, g.game_id, player, stat, line)
-    if p is not None:
-        return p, True
+def _prop_p_sides(snap: Snapshot, s: Settings, projector: Projector, g: Game, player: str, stat: str,
+                  line: float) -> tuple[float, float, bool] | None:
+    """(P(over), P(under), anchored): sportsbook-anchored when possible, else the projector."""
+    sides = _book_p_sides(snap, s, g.game_id, player, stat, line)
+    if sides is not None:
+        return sides[0], sides[1], True
     p = _model_p_over(projector, g, player, stat, line)
-    return None if p is None else (p, False)
+    return None if p is None else (p, 1.0 - p, False)
 
 
 def kalshi_prop_candidates(snap: Snapshot, s: Settings, projector: Projector) -> list[Recommendation]:
@@ -213,12 +227,12 @@ def kalshi_prop_candidates(snap: Snapshot, s: Settings, projector: Projector) ->
         g = _upcoming(snap, m.game_id)
         if g is None:
             continue
-        got = _prop_p_over(snap, s, projector, g, m.player, m.stat, m.line)
+        got = _prop_p_sides(snap, s, projector, g, m.player, m.stat, m.line)
         if got is None:
             continue
-        p_over, anchored = got
+        p_over, p_under, anchored = got
         extra = 0.0 if anchored else s.pp_margin_model - s.pp_margin_market
-        sd = _best_side(m, p_over, snap, s, extra)
+        sd = _best_side(m, p_over, snap, s, extra, p_no=p_under)
         key = m.player.lower()
         if sd is not None and (key not in best or sd.ev > best[key][2].ev):
             best[key] = (m, g, sd)
@@ -247,11 +261,11 @@ def pp_entry_candidates(snap: Snapshot, s: Settings, projector: Projector) -> li
         team = _player_team(snap, projector, q.player)
         if team is None:  # unknown team: skip rather than guess (the 2-team rule depends on it)
             continue
-        got = _prop_p_over(snap, s, projector, g, q.player, q.stat, q.point)
+        got = _prop_p_sides(snap, s, projector, g, q.player, q.stat, q.point)
         if got is None:
             continue
-        p_over, anchored = got
-        side, p = ("over", p_over) if p_over >= 0.5 else ("under", 1.0 - p_over)
+        p_over, p_under, anchored = got
+        side, p = ("over", p_over) if p_over >= p_under else ("under", p_under)
         picks.append(Pick(q.player, team, g.game_id, q.stat, q.point, side, p, anchored))
 
     found = build_best_entry(picks, s)
@@ -302,7 +316,7 @@ def arb_candidates(snap: Snapshot, s: Settings, league_of: Callable[[KalshiMarke
 
 def size_slate(recs: list[Recommendation], snap: Snapshot, s: Settings) -> list[Recommendation]:
     """Jointly Kelly-size the non-observe Kalshi recs; drops any that round to nothing."""
-    fees = {m.ticker: m.fee_multiplier for m in snap.kalshi}
+    markets = {m.ticker: m for m in snap.kalshi}
     pool = [r for r in recs if r.kind in ("kalshi_game", "kalshi_prop") and not r.observe_only]
     bets = []
     for r in pool:
@@ -319,9 +333,28 @@ def size_slate(recs: list[Recommendation], snap: Snapshot, s: Settings) -> list[
         stake = round(qty * leg.price * 100)
         if qty < 1 or stake < s.min_stake_cents:
             continue
-        ev = kalshi_ev(leg.p_fair, effective_price(leg.price, qty, fees.get(leg.ticker, 1.0)))
+        m = markets.get(leg.ticker)
+        if m is None:
+            continue
+        # fees round up per order, so a smaller qty can cost more per contract: re-check every filter
+        p_eff = effective_price(leg.price, qty, m.fee_multiplier)
+        depth = m.yes_ask_size if leg.side == "yes" else m.no_ask_size
+        ok, _ = passes_filters(leg.p_fair, leg.price, p_eff, depth, qty, s, m.status)
+        ev = kalshi_ev(leg.p_fair, p_eff)
+        if not ok or ev < s.kalshi_min_ev + _extra_ev(r, snap, s):
+            continue
         out.append(replace(r, qty=qty, stake_cents=stake, ev=ev))
     return out
+
+
+def _extra_ev(r: Recommendation, snap: Snapshot, s: Settings) -> float:
+    """Extra EV a rec had to clear as a candidate: projector-only props need the model margin."""
+    leg = r.legs[0]
+    if r.kind != "kalshi_prop" or leg.game_id is None or leg.player is None or leg.stat is None \
+            or leg.line is None:
+        return 0.0
+    anchored = _book_p_sides(snap, s, leg.game_id, leg.player, leg.stat, leg.line) is not None
+    return 0.0 if anchored else s.pp_margin_model - s.pp_margin_market
 
 
 def scan(snap: Snapshot, s: Settings, projector: Projector,
