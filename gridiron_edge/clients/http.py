@@ -48,7 +48,8 @@ class RateLimitedClient:
                  wait=wait_exponential_jitter(1, 8), transport=None):
         self._client = httpx.AsyncClient(
             base_url=base_url, headers=headers, timeout=timeout, transport=transport)
-        self._limiter = AsyncLimiter(rate, 1)
+        # AsyncLimiter refuses to acquire 1 token when max_rate < 1, so stretch the period instead
+        self._limiter = AsyncLimiter(rate, 1) if rate >= 1 else AsyncLimiter(1, 1 / rate)
         self._wait = wait
 
     def _delay(self, state: RetryCallState) -> float:

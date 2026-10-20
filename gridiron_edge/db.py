@@ -14,7 +14,8 @@ _SCHEMA = [
         id INTEGER PRIMARY KEY AUTOINCREMENT, api TEXT NOT NULL, ts TEXT NOT NULL,
         remaining INTEGER, used INTEGER, last INTEGER)""",
     """CREATE TABLE IF NOT EXISTS api_cache (
-        key TEXT PRIMARY KEY, fetched_ts TEXT NOT NULL, payload TEXT NOT NULL)""",
+        key TEXT PRIMARY KEY, fetched_at TEXT NOT NULL,
+        immutable INTEGER NOT NULL DEFAULT 0, body TEXT NOT NULL)""",
     """CREATE TABLE IF NOT EXISTS ledger (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         ts TEXT NOT NULL,

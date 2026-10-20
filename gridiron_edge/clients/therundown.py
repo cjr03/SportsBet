@@ -1,0 +1,151 @@
+"""TheRundown client: delayed live scores and main-line prices for DK/FD/BetMGM/Kalshi."""
+from collections.abc import Callable
+from datetime import date, datetime
+
+from gridiron_edge.budget import BudgetGuard
+from gridiron_edge.clients.http import AuthError, RateLimitedClient
+from gridiron_edge.strategy.odds import american_to_decimal
+from gridiron_edge.types import Game, League, Quote
+
+BASE_URL = "https://therundown.io/api/v2"
+SPORT_ID = {"cfb": 1, "nfl": 2}
+MONTHLY_CAP = 200_000
+RESERVE_FRAC = 0.10
+SENTINEL = 0.0001  # price meaning "off the board"
+AFFILIATE = {19: "draftkings", 23: "fanduel", 22: "betmgm", 25: "kalshi"}
+MARKET = {1: "h2h", 2: "spreads", 3: "totals"}
+_LIVE = {"STATUS_IN_PROGRESS", "STATUS_HALFTIME", "STATUS_END_PERIOD",
+         "STATUS_END_OF_REGULATION", "STATUS_OVERTIME", "STATUS_DELAYED"}
+_VOID = {"STATUS_POSTPONED", "STATUS_CANCELED", "STATUS_SUSPENDED", "STATUS_FORFEIT"}
+
+
+def map_status(raw: str | None) -> str:
+    if raw == "STATUS_SCHEDULED":
+        return "scheduled"
+    if raw == "STATUS_FINAL":
+        return "final"
+    if raw in _LIVE:
+        return "live"
+    if raw in _VOID:
+        return "void_candidate"
+    return "unknown"
+
+
+def _int(raw) -> int | None:
+    try:
+        return int(float(raw))
+    except (TypeError, ValueError):
+        return None
+
+
+def _team_name(t: dict) -> str:
+    return f"{t.get('name') or ''} {t.get('mascot') or ''}".strip()
+
+
+def _kickoff(ev: dict) -> datetime:
+    return datetime.fromisoformat(ev["event_date"].replace("Z", "+00:00"))
+
+
+class TheRundownClient:
+    def __init__(self, key: str, conn, resolve: Callable[[League, str, str, datetime], str | None],
+                 client: RateLimitedClient | None = None):
+        self.resolve = resolve
+        self._http = client or RateLimitedClient(
+            BASE_URL, headers={"X-TheRundown-Key": key}, rate=1 / 1.1)
+        self.budget = BudgetGuard(conn, "therundown", MONTHLY_CAP, RESERVE_FRAC)
+        self.disabled = False
+        self.unmatched = 0
+        self.last_status = ""
+        self.delay_seconds: int | None = None
+        self.tier: str | None = None
+        self.bookmakers_header: str | None = None
+
+    async def _events(self, league: League, day: date, params: dict) -> list[dict]:
+        if self.disabled:
+            self.last_status = "disabled"
+            return []
+        if self.budget.exhausted:
+            self.last_status = "skipped_budget"
+            return []
+        try:
+            resp = await self._http.get(f"/sports/{SPORT_ID[league]}/events/{day.isoformat()}", params)
+        except AuthError:
+            self.disabled = True
+            self.last_status = "auth_error"
+            raise
+        h = resp.headers
+        remaining = _int(h.get("X-Datapoints-Monthly-Remaining"))
+        if remaining is not None:
+            self.budget.record(remaining, MONTHLY_CAP - remaining, _int(h.get("X-Datapoints")) or 0)
+        if (delay := _int(h.get("X-Data-Delay-Seconds"))) is not None:
+            self.delay_seconds = delay
+        self.tier = h.get("X-Tier", self.tier)
+        self.bookmakers_header = h.get("X-Bookmakers", self.bookmakers_header)
+        self.last_status = "ok"
+        body = resp.json()
+        return body.get("events", []) if isinstance(body, dict) else body
+
+    def _match(self, league: League, ev: dict) -> tuple[str, dict, dict] | None:
+        home = next((t for t in ev.get("teams", []) if t.get("is_home")), None)
+        away = next((t for t in ev.get("teams", []) if t.get("is_away")), None)
+        game_id = None
+        if home and away:
+            game_id = self.resolve(league, _team_name(home), _team_name(away), _kickoff(ev))
+        if game_id is None:
+            self.unmatched += 1
+            return None
+        return game_id, home, away
+
+    async def scores(self, league: League, day: date) -> list[Game]:
+        out: list[Game] = []
+        for ev in await self._events(league, day, {"affiliate_ids": "0"}):
+            m = self._match(league, ev)
+            if m is None:
+                continue
+            game_id, _, _ = m
+            sc = ev.get("score") or {}
+            kickoff = _kickoff(ev)
+            away_code, home_code = game_id.split(":")[-1].split("@")
+            period = sc.get("game_period")
+            out.append(Game(
+                game_id, league, kickoff.year if kickoff.month >= 7 else kickoff.year - 1,
+                None, kickoff, home_code, away_code,
+                status=map_status(sc.get("event_status")),
+                home_pts=_int(sc.get("score_home")), away_pts=_int(sc.get("score_away")),
+                period=None if period is None else str(period), clock=sc.get("display_clock")))
+        return out
+
+    async def lines(self, league: League, day: date) -> list[Quote]:
+        params = {"market_ids": "1,2,3", "affiliate_ids": "19,23,22,25", "main_line": "true"}
+        out: list[Quote] = []
+        for ev in await self._events(league, day, params):
+            m = self._match(league, ev)
+            if m is None:
+                continue
+            game_id, home, away = m
+            team_side = {home["team_id"]: "home", away["team_id"]: "away"}
+            for mk in ev.get("markets", []):
+                market = MARKET.get(mk.get("market_id"))
+                if market is None or mk.get("period_id", 0) != 0:
+                    continue
+                for part in mk.get("participants", []):
+                    if part.get("type") == "TYPE_TEAM":
+                        side = team_side.get(part.get("id"))
+                    else:
+                        side = {"Over": "over", "Under": "under"}.get(part.get("name"))
+                    if side is None or (market == "totals") != (side in ("over", "under")):
+                        continue
+                    for line in part.get("lines", []):
+                        for aff, price in line.get("prices", {}).items():
+                            book = AFFILIATE.get(_int(aff))
+                            p = price.get("price")
+                            if book is None or price.get("closed_at") or p is None or p == SENTINEL or p == 0:
+                                continue
+                            value = None if market == "h2h" or line.get("value") is None else float(line["value"])
+                            out.append(Quote("therundown", book, game_id, market, side, value,
+                                             american_to_decimal(float(p)),
+                                             datetime.fromisoformat(price["updated_at"].replace("Z", "+00:00"))))
+        return out
+
+    async def aclose(self) -> None:
+        await self._http.aclose()

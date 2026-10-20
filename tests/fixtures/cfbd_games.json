@@ -1,0 +1,14 @@
+[
+ {
+  "id": 401,
+  "season": 2024,
+  "week": 1,
+  "startDate": "2024-08-31T23:00:00.000Z",
+  "homeTeam": "Ohio State",
+  "awayTeam": "Akron",
+  "homePoints": 52,
+  "awayPoints": 6,
+  "completed": true,
+  "neutralSite": false
+ }
+]

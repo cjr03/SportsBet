@@ -1,0 +1,242 @@
+[
+ {
+  "event_id": "ev1",
+  "event_date": "2026-11-01T18:00:00Z",
+  "teams": [
+   {
+    "team_id": 11,
+    "name": "Seattle",
+    "mascot": "Seahawks",
+    "is_home": true,
+    "is_away": false
+   },
+   {
+    "team_id": 21,
+    "name": "Chicago",
+    "mascot": "Bears",
+    "is_home": false,
+    "is_away": true
+   }
+  ],
+  "score": {
+   "event_status": "STATUS_FINAL",
+   "score_home": 27,
+   "score_away": 20,
+   "game_period": 4,
+   "display_clock": "0:00"
+  },
+  "markets": [
+   {
+    "market_id": 1,
+    "period_id": 0,
+    "participants": [
+     {
+      "id": 11,
+      "type": "TYPE_TEAM",
+      "name": "Seattle Seahawks",
+      "lines": [
+       {
+        "value": null,
+        "prices": {
+         "19": {
+          "price": -160,
+          "is_main_line": true,
+          "updated_at": "2026-11-01T12:00:00Z"
+         },
+         "23": {
+          "price": -155,
+          "is_main_line": true,
+          "updated_at": "2026-11-01T12:00:00Z"
+         },
+         "25": {
+          "price": 0.0001,
+          "is_main_line": true,
+          "updated_at": "2026-11-01T12:00:00Z"
+         }
+        }
+       }
+      ]
+     },
+     {
+      "id": 21,
+      "type": "TYPE_TEAM",
+      "name": "Chicago Bears",
+      "lines": [
+       {
+        "value": null,
+        "prices": {
+         "19": {
+          "price": 140,
+          "is_main_line": true,
+          "updated_at": "2026-11-01T12:00:00Z"
+         },
+         "23": {
+          "price": 135,
+          "is_main_line": true,
+          "updated_at": "2026-11-01T12:00:00Z"
+         }
+        }
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "market_id": 2,
+    "period_id": 0,
+    "participants": [
+     {
+      "id": 11,
+      "type": "TYPE_TEAM",
+      "name": "Seattle Seahawks",
+      "lines": [
+       {
+        "value": -3.5,
+        "prices": {
+         "22": {
+          "price": -110,
+          "is_main_line": true,
+          "updated_at": "2026-11-01T12:00:00Z"
+         }
+        }
+       }
+      ]
+     },
+     {
+      "id": 21,
+      "type": "TYPE_TEAM",
+      "name": "Chicago Bears",
+      "lines": [
+       {
+        "value": 3.5,
+        "prices": {
+         "22": {
+          "price": -110,
+          "is_main_line": true,
+          "updated_at": "2026-11-01T12:00:00Z"
+         }
+        }
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "market_id": 3,
+    "period_id": 0,
+    "participants": [
+     {
+      "id": 1,
+      "type": "TYPE_RESULT",
+      "name": "Over",
+      "lines": [
+       {
+        "value": 44.5,
+        "prices": {
+         "19": {
+          "price": -108,
+          "is_main_line": true,
+          "updated_at": "2026-11-01T12:00:00Z"
+         }
+        }
+       }
+      ]
+     },
+     {
+      "id": 2,
+      "type": "TYPE_RESULT",
+      "name": "Under",
+      "lines": [
+       {
+        "value": 44.5,
+        "prices": {
+         "19": {
+          "price": -112,
+          "is_main_line": true,
+          "updated_at": "2026-11-01T12:00:00Z"
+         }
+        }
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "market_id": 1,
+    "period_id": 1,
+    "participants": [
+     {
+      "id": 11,
+      "type": "TYPE_TEAM",
+      "lines": [
+       {
+        "value": null,
+        "prices": {
+         "19": {
+          "price": -300,
+          "is_main_line": true,
+          "updated_at": "2026-11-01T12:00:00Z"
+         }
+        }
+       }
+      ]
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "event_id": "ev2",
+  "event_date": "2026-11-01T18:00:00Z",
+  "teams": [
+   {
+    "team_id": 12,
+    "name": "Seattle",
+    "mascot": "Seahawks",
+    "is_home": true,
+    "is_away": false
+   },
+   {
+    "team_id": 22,
+    "name": "Chicago",
+    "mascot": "Bears",
+    "is_home": false,
+    "is_away": true
+   }
+  ],
+  "score": {
+   "event_status": "STATUS_IN_PROGRESS",
+   "score_home": 10,
+   "score_away": 7,
+   "game_period": 3,
+   "display_clock": "4:32"
+  }
+ },
+ {
+  "event_id": "ev3",
+  "event_date": "2026-11-01T18:00:00Z",
+  "teams": [
+   {
+    "team_id": 13,
+    "name": "Seattle",
+    "mascot": "Seahawks",
+    "is_home": true,
+    "is_away": false
+   },
+   {
+    "team_id": 23,
+    "name": "Chicago",
+    "mascot": "Bears",
+    "is_home": false,
+    "is_away": true
+   }
+  ],
+  "score": {
+   "event_status": "STATUS_POSTPONED",
+   "score_home": null,
+   "score_away": null,
+   "game_period": null,
+   "display_clock": null
+  }
+ }
+]
