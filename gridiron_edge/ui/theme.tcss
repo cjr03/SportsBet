@@ -1,0 +1,70 @@
+/* Neon-on-navy theme. */
+$bg: #0b0f1a;
+$surface: #121829;
+$accent: #22d3ee;
+$profit: #22c55e;
+$loss: #ef4444;
+$pending: #f59e0b;
+
+Screen {
+    background: $bg;
+    color: #e2e8f0;
+    layout: grid;
+    grid-size: 3;
+    grid-columns: 2fr 3fr 2fr;
+    grid-rows: auto 1fr auto;
+}
+
+BankrollHeader {
+    column-span: 3;
+    height: auto;
+    padding: 0 1;
+    background: $surface;
+    color: $accent;
+    text-style: bold;
+}
+
+#command-bar {
+    column-span: 3;
+    height: auto;
+}
+
+.panel {
+    background: $surface;
+    border: round $accent 40%;
+}
+
+BalanceChart, KpiTiles, QuotaBar, OpportunityBoard, ScoresPanel, EventLog {
+    background: $surface;
+    border: round $accent 40%;
+}
+
+KpiTiles { height: auto; padding: 0 1; }
+QuotaBar { height: auto; padding: 0 1; }
+QuotaBar.low { color: $loss; }
+
+OpportunityTable > .flash {
+    background: $accent 30%;
+}
+
+.profit { color: $profit; }
+.loss { color: $loss; }
+.pending { color: $pending; }
+
+ConfirmScreen {
+    align: center middle;
+    background: $bg 70%;
+}
+
+#confirm-box {
+    width: 60;
+    height: auto;
+    padding: 1 2;
+    background: $surface;
+    border: round $accent;
+}
+
+#confirm-box Input { margin-bottom: 1; }
+#error { color: $loss; height: auto; }
+#buttons { height: auto; align-horizontal: right; }
+#buttons Button { margin-left: 2; }
