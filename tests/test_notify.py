@@ -1,0 +1,124 @@
+import subprocess
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+import pytest
+
+from gridiron_edge.notify.chain import NotifyChain
+from gridiron_edge.notify.console import ConsoleNotifier
+from gridiron_edge.notify.format import format_message
+from gridiron_edge.notify.imessage import IMessageNotifier
+from gridiron_edge.notify.ntfy import NtfyNotifier
+from gridiron_edge.types import Leg, Recommendation
+
+PT = ZoneInfo("America/Los_Angeles")
+
+
+def _rec(kind, legs, **kw):
+    base = dict(id=42, kind=kind, legs=legs, stake_cents=1000, qty=None, ev=0.05, p_win=0.6,
+                structure=None, snapshot_ts=datetime(2026, 10, 25, 10, 5, tzinfo=PT),
+                expires_at=datetime(2026, 10, 25, 13, 0, tzinfo=PT))
+    base.update(kw)
+    return Recommendation(**base)
+
+
+@pytest.fixture
+def rec_kalshi():
+    leg = Leg("kalshi", "Kansas City ML — café", "yes", 0.55, 0.60, "g", ticker="KXNFLGAME-X")
+    return _rec("kalshi_game", [leg], stake_cents=1130, qty=20)
+
+
+@pytest.fixture
+def rec_pp():
+    legs = [Leg("prizepicks", f"P{i}", "over" if i % 2 else "under", 0.0, 0.6, "g",
+                player=f"Player {i}", stat="rec_yds", line=50.5 + i) for i in range(3)]
+    return _rec("pp_entry", legs, structure="3-power", stake_cents=500)
+
+
+@pytest.fixture
+def rec_arb():
+    legs = [Leg("kalshi", "KC ML YES", "yes", 0.45, 1.0, "g", ticker="A"),
+            Leg("kalshi", "DEN ML YES", "yes", 0.50, 1.0, "g", ticker="B")]
+    return _rec("arb", legs, qty=10, ev=0.04, tie_risk=True)
+
+
+@pytest.fixture
+def noon():
+    return datetime(2026, 10, 25, 12, 0, tzinfo=PT)
+
+
+@pytest.fixture
+def midnight():
+    return datetime(2026, 10, 26, 0, 30, tzinfo=PT)
+
+
+def test_format_kalshi_ascii_and_fields(rec_kalshi):
+    t = format_message(rec_kalshi)
+    assert t.isascii() and t.startswith("GE KALSHI BUY YES") and t.endswith(" PT | id 42")
+    assert "@ $0.55 x20 = $11.30 w/fee | fair 60.0% EV +5.0% | 10:05 PT" in t
+
+
+def test_format_pp_has_confirm(rec_pp):
+    t = format_message(rec_pp)
+    assert "confirm payout in app" in t and t.startswith("GE PP 3-POWER $5 |")
+    assert "1) Player 0 Rec Yds LESS 50.5 (60%) 2) Player 1 Rec Yds MORE 51.5 (60%)" in t
+
+
+def test_format_arb_has_verify_and_tie(rec_arb):
+    t = format_message(rec_arb)
+    assert "verify" in t and "tie risk" in t and t.startswith("GE ARB KALSHI +4.0% | KC ML YES + DEN ML YES x10 | tie risk |")
+
+
+def test_imessage_passes_argv_not_interpolated():
+    calls = []
+    n = IMessageNotifier("+15555550100", runner=lambda args, **kw: calls.append(args) or subprocess.CompletedProcess(args, 0))
+    evil = 'hi "; do shell script "rm -rf ~"'
+    assert n.send(evil).ok and calls[0][0] == "osascript" and calls[0][-3:] == ["+15555550100", evil, "iMessage"]
+
+
+def test_ntfy_posts_headers():
+    seen = {}
+
+    def post(url, **kw):
+        seen.update(url=url, **kw)
+
+        class R:
+            def raise_for_status(self): pass
+        return R()
+
+    r = NtfyNotifier("topic", post=post).send("hello")
+    assert r.ok and seen["url"] == "https://ntfy.sh/topic"
+    assert seen["headers"] == {"Title": "Gridiron Edge", "Priority": "4"}
+
+
+def test_chain_dedupe_and_fallback(conn, rec_kalshi, noon):
+    def boom(*a, **k): raise subprocess.TimeoutExpired("osascript", 30)
+    sink = []
+    ch = NotifyChain(conn, [IMessageNotifier("+15555550100", runner=boom), ConsoleNotifier(sink)], (23, 8))
+    assert ch.notify(rec_kalshi, noon).channel == "console" and ch.notify(rec_kalshi, noon) is None and len(sink) == 1
+    assert conn.execute("SELECT COUNT(*) FROM notifications").fetchone()[0] == 2
+
+
+def test_quiet_hours_suppress_non_arb(conn, rec_kalshi, rec_arb, midnight):
+    sink = []
+    ch = NotifyChain(conn, [ConsoleNotifier(sink)], (23, 8))
+    assert ch.notify(rec_kalshi, midnight) is None and ch.notify(rec_arb, midnight).ok
+    assert ch.notify(rec_kalshi, midnight, force=True).ok
+
+
+def test_arb_sends_to_every_channel(conn, rec_arb, noon):
+    a, b = [], []
+    ch = NotifyChain(conn, [ConsoleNotifier(a), ConsoleNotifier(b)], (23, 8))
+    assert ch.notify(rec_arb, noon).ok and len(a) == 1 and len(b) == 1
+
+
+def test_observe_only_never_sent(conn, rec_kalshi, noon):
+    rec_kalshi.observe_only = True
+    assert NotifyChain(conn, [ConsoleNotifier([])], (23, 8)).notify(rec_kalshi, noon) is None
+
+
+def test_disabled_and_send_text(conn, rec_kalshi, noon, midnight):
+    sink = []
+    ch = NotifyChain(conn, [ConsoleNotifier(sink)], (23, 8), enabled=False)
+    assert ch.notify(rec_kalshi, noon) is None
+    assert ch.send_text("GE test", midnight).ok and sink == ["GE test"]
