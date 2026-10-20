@@ -15,8 +15,17 @@ Screen {
     grid-rows: auto 1fr auto;
 }
 
-BankrollHeader {
+#top {
     column-span: 3;
+    height: auto;
+}
+
+#left, #centre { height: 1fr; }
+BalanceChart, OpportunityBoard, ScoresPanel { height: 1fr; }
+QuotaBar { width: auto; }
+
+BankrollHeader {
+    width: 1fr;
     height: auto;
     padding: 0 1;
     background: $surface;

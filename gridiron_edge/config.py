@@ -112,3 +112,12 @@ def load_settings(env_file: Path | None = None, overrides: dict[str, str] | None
     s = replace(base, **updates)
     _validate(s)
     return s
+
+
+def apply_override(s: Settings, name: str, raw: str) -> Settings:
+    """A copy of s with one field parsed from text (the `set` command); validates the result."""
+    if name not in {f.name for f in fields(Settings)}:
+        raise ValueError(f"unknown setting: {name}")
+    new = replace(s, **{name: _coerce(name, str(raw), getattr(Settings(), name))})
+    _validate(new)
+    return new
