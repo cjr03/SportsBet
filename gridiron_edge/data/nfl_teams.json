@@ -1,0 +1,333 @@
+{
+ "ARI": {
+  "names": [
+   "Arizona Cardinals",
+   "Cardinals",
+   "Arizona"
+  ],
+  "kalshi": [
+   "ARI"
+  ]
+ },
+ "ATL": {
+  "names": [
+   "Atlanta Falcons",
+   "Falcons",
+   "Atlanta"
+  ],
+  "kalshi": [
+   "ATL"
+  ]
+ },
+ "BAL": {
+  "names": [
+   "Baltimore Ravens",
+   "Ravens",
+   "Baltimore"
+  ],
+  "kalshi": [
+   "BAL"
+  ]
+ },
+ "BUF": {
+  "names": [
+   "Buffalo Bills",
+   "Bills",
+   "Buffalo"
+  ],
+  "kalshi": [
+   "BUF"
+  ]
+ },
+ "CAR": {
+  "names": [
+   "Carolina Panthers",
+   "Panthers",
+   "Carolina"
+  ],
+  "kalshi": [
+   "CAR"
+  ]
+ },
+ "CHI": {
+  "names": [
+   "Chicago Bears",
+   "Bears",
+   "Chicago"
+  ],
+  "kalshi": [
+   "CHI"
+  ]
+ },
+ "CIN": {
+  "names": [
+   "Cincinnati Bengals",
+   "Bengals",
+   "Cincinnati"
+  ],
+  "kalshi": [
+   "CIN"
+  ]
+ },
+ "CLE": {
+  "names": [
+   "Cleveland Browns",
+   "Browns",
+   "Cleveland"
+  ],
+  "kalshi": [
+   "CLE"
+  ]
+ },
+ "DAL": {
+  "names": [
+   "Dallas Cowboys",
+   "Cowboys",
+   "Dallas"
+  ],
+  "kalshi": [
+   "DAL"
+  ]
+ },
+ "DEN": {
+  "names": [
+   "Denver Broncos",
+   "Broncos",
+   "Denver"
+  ],
+  "kalshi": [
+   "DEN"
+  ]
+ },
+ "DET": {
+  "names": [
+   "Detroit Lions",
+   "Lions",
+   "Detroit"
+  ],
+  "kalshi": [
+   "DET"
+  ]
+ },
+ "GB": {
+  "names": [
+   "Green Bay Packers",
+   "Packers",
+   "Green Bay"
+  ],
+  "kalshi": [
+   "GB",
+   "GNB"
+  ]
+ },
+ "HOU": {
+  "names": [
+   "Houston Texans",
+   "Texans",
+   "Houston"
+  ],
+  "kalshi": [
+   "HOU"
+  ]
+ },
+ "IND": {
+  "names": [
+   "Indianapolis Colts",
+   "Colts",
+   "Indianapolis"
+  ],
+  "kalshi": [
+   "IND"
+  ]
+ },
+ "JAX": {
+  "names": [
+   "Jacksonville Jaguars",
+   "Jaguars",
+   "Jacksonville"
+  ],
+  "kalshi": [
+   "JAX",
+   "JAC"
+  ]
+ },
+ "KC": {
+  "names": [
+   "Kansas City Chiefs",
+   "Chiefs",
+   "Kansas City"
+  ],
+  "kalshi": [
+   "KC",
+   "KAN"
+  ]
+ },
+ "LA": {
+  "names": [
+   "Los Angeles Rams",
+   "Rams",
+   "LA Rams"
+  ],
+  "kalshi": [
+   "LA",
+   "LAR"
+  ]
+ },
+ "LAC": {
+  "names": [
+   "Los Angeles Chargers",
+   "Chargers",
+   "LA Chargers"
+  ],
+  "kalshi": [
+   "LAC"
+  ]
+ },
+ "LV": {
+  "names": [
+   "Las Vegas Raiders",
+   "Raiders",
+   "Las Vegas"
+  ],
+  "kalshi": [
+   "LV",
+   "LVR",
+   "OAK"
+  ]
+ },
+ "MIA": {
+  "names": [
+   "Miami Dolphins",
+   "Dolphins",
+   "Miami"
+  ],
+  "kalshi": [
+   "MIA"
+  ]
+ },
+ "MIN": {
+  "names": [
+   "Minnesota Vikings",
+   "Vikings",
+   "Minnesota"
+  ],
+  "kalshi": [
+   "MIN"
+  ]
+ },
+ "NE": {
+  "names": [
+   "New England Patriots",
+   "Patriots",
+   "New England"
+  ],
+  "kalshi": [
+   "NE",
+   "NWE"
+  ]
+ },
+ "NO": {
+  "names": [
+   "New Orleans Saints",
+   "Saints",
+   "New Orleans"
+  ],
+  "kalshi": [
+   "NO",
+   "NOR"
+  ]
+ },
+ "NYG": {
+  "names": [
+   "New York Giants",
+   "Giants",
+   "NY Giants"
+  ],
+  "kalshi": [
+   "NYG"
+  ]
+ },
+ "NYJ": {
+  "names": [
+   "New York Jets",
+   "Jets",
+   "NY Jets"
+  ],
+  "kalshi": [
+   "NYJ"
+  ]
+ },
+ "PHI": {
+  "names": [
+   "Philadelphia Eagles",
+   "Eagles",
+   "Philadelphia"
+  ],
+  "kalshi": [
+   "PHI"
+  ]
+ },
+ "PIT": {
+  "names": [
+   "Pittsburgh Steelers",
+   "Steelers",
+   "Pittsburgh"
+  ],
+  "kalshi": [
+   "PIT"
+  ]
+ },
+ "SEA": {
+  "names": [
+   "Seattle Seahawks",
+   "Seahawks",
+   "Seattle"
+  ],
+  "kalshi": [
+   "SEA"
+  ]
+ },
+ "SF": {
+  "names": [
+   "San Francisco 49ers",
+   "49ers",
+   "San Francisco"
+  ],
+  "kalshi": [
+   "SF",
+   "SFO"
+  ]
+ },
+ "TB": {
+  "names": [
+   "Tampa Bay Buccaneers",
+   "Buccaneers",
+   "Tampa Bay"
+  ],
+  "kalshi": [
+   "TB",
+   "TAM"
+  ]
+ },
+ "TEN": {
+  "names": [
+   "Tennessee Titans",
+   "Titans",
+   "Tennessee"
+  ],
+  "kalshi": [
+   "TEN"
+  ]
+ },
+ "WAS": {
+  "names": [
+   "Washington Commanders",
+   "Commanders",
+   "Washington"
+  ],
+  "kalshi": [
+   "WAS",
+   "WSH"
+  ]
+ }
+}
