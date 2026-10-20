@@ -72,3 +72,17 @@ def test_slate_fallback_when_solver_fails(monkeypatch):
 
 def test_to_cents_min_stake():
     assert to_cents([0.0005, 0.02], 100_000, 100) == [0, 2_000]
+
+
+def test_fallback_sizes_by_edge_and_zeroes_negative_ev(monkeypatch):
+    import gridiron_edge.strategy.kelly as k
+
+    def boom(*a, **kw):
+        raise RuntimeError("x")
+
+    monkeypatch.setattr(k, "minimize", boom)
+    bets = [Bet(0.4, 0, 2.0, "g1"), Bet(0.55, 0, 2.0, "g2"), Bet(0.7, 0, 2.0, "g3")]
+    f = optimize_slate(bets, 0.25, 1, 1, 1)
+    assert f[0] == 0
+    assert 0 < f[1] < f[2]
+    assert f[1] == pytest.approx(k.kelly_push(0.55, 0.45, 2.0) * 0.25)

@@ -53,7 +53,8 @@ def _scenarios(bets: list[Bet], seed: int) -> tuple[np.ndarray, np.ndarray]:
 
 
 def _fallback(bets: list[Bet], fraction: float, cap_bet: float, cap_game: float, cap_slate: float) -> list[float]:
-    f = [min(kelly_push(b.p_win, b.p_push, b.d) * fraction, cap_bet) for b in bets]
+    f = [min(kelly_push(b.p_win, max(0.0, 1.0 - b.p_win - b.p_push), b.d) * fraction, cap_bet)
+         for b in bets]
     games: dict[str, list[int]] = {}
     for i, b in enumerate(bets):
         games.setdefault(b.game_id, []).append(i)
