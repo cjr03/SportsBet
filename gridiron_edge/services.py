@@ -183,6 +183,7 @@ class Services:
     nfl_model: NflRatings | None = None
     cfb_model: CfbRatings | None = None
     gates: dict[tuple[str, str], bool] = field(default_factory=dict)
+    gates_complete: bool = False  # last fit_gates backtested every league
     margin_models: dict = field(default_factory=_default_margin_models)
     latest: dict = field(default_factory=lambda: {"quotes": [], "props": [], "kalshi": [], "stats": None})
     player_teams: dict[str, str] = field(default_factory=dict)
@@ -449,28 +450,59 @@ class Services:
         return await asyncio.to_thread(walkforward_ats, league, games, predict)
 
     async def fit_gates(self, now: datetime, force: bool = False) -> list[tuple[str, str]]:
-        """Auto-gate per league from a walk-forward backtest; refit at most weekly unless forced."""
+        """Auto-gate per league from a walk-forward backtest; refit at most weekly unless forced.
+
+        Fails closed: a league whose backtest errors, or that has a fitted model but no backtest
+        history, is gated (observe-only). Only a result with every league backtested is cached.
+        """
         stored = json.loads(self._get("gates") or "null")
-        if stored and not force and now - datetime.fromisoformat(stored["fitted_at"]) < GATE_REFIT:
+        spans = self._gate_spans(now)
+        if (stored and not force and set(stored["leagues"]) >= set(spans)
+                and now - datetime.fromisoformat(stored["fitted_at"]) < GATE_REFIT):
             results = stored["leagues"]
             out = [("info", f"gates: cached from {stored['fitted_at'][:10]}")]
+            closed: set[str] = set()
         else:
-            results, out = {}, []
-            cur = _season(now)
-            spans = {"nfl": (cur - NFL_SEASONS + 1, cur), "cfb": (cur - 1, cur - 1)}
+            results, out, closed = {}, [], set()
             for league, (start, end) in spans.items():
                 try:
                     fit, metrics = await self.backtest(league, start, end, now)
-                except ValueError:
-                    out.append(("info", f"gate {league}: no backtest history - not gated"))
+                except ValueError as e:
+                    if self._league_model(league) is not None:
+                        closed.add(league)
+                        out.append(("info", f"gate {league}: {e} - observe-only until a backtest runs"))
+                    else:
+                        out.append(("info", f"gate {league}: no backtest history - not gated"))
+                    continue
+                except Exception as e:  # noqa: BLE001 - one league's failure must not ungate the others
+                    closed.add(league)
+                    out.append(("error", f"gate {league}: backtest failed ({e}) - observe-only"))
                     continue
                 results[league] = {"gated": fit.gated, "b_model": fit.b_model, "se": fit.b_model_se, **metrics}
-            self._put("gates", json.dumps({"fitted_at": now.isoformat(), "leagues": results}))
-        self.gates = {(lg, m): bool(r["gated"]) for lg, r in results.items() for m in ("ml", "spread", "total")}
+            if set(results) >= set(spans):
+                self._put("gates", json.dumps({"fitted_at": now.isoformat(), "leagues": results}))
+        self.gates_complete = set(results) >= set(spans)
+        gates = {(lg, m): bool(r["gated"]) for lg, r in results.items() for m in ("ml", "spread", "total")}
+        gates.update({(lg, m): True for lg in closed for m in ("ml", "spread", "total")})
+        self.gates = gates
         for lg, r in results.items():
             out.append(("info", f"gate {lg}: n={r['n']} b_model={r['b_model']:.2f}±{r['se']:.2f} "
                                 f"-> {'observe-only' if r['gated'] else 'live'}"))
         return out
+
+    @staticmethod
+    def _gate_spans(now: datetime) -> dict[str, tuple[int, int]]:
+        cur = _season(now)
+        return {"nfl": (cur - NFL_SEASONS + 1, cur), "cfb": (cur - 1, cur - 1)}
+
+    def _league_model(self, league: str):
+        return self.nfl_model if league == "nfl" else self.cfb_model
+
+    async def _refit_gates_if_needed(self, league: str, had_model: bool, now: datetime) -> list[tuple[str, str]]:
+        """Refit gates when a league's model first appears or the last fit left a league ungraded."""
+        if self._league_model(league) is not None and (not had_model or not self.gates_complete):
+            return await self._guarded("gates", self.fit_gates(now, force=True))
+        return []
 
     # -- jobs ------------------------------------------------------------
     async def run_job(self, job: Job, now: datetime) -> list[tuple[str, str]]:
@@ -550,10 +582,14 @@ class Services:
         return [("api", f"kalshi: {len(markets)} markets ({unmatched} unmatched)")]
 
     async def _job_cfbd_weekly(self, job: Job, now: datetime):
-        return await self._fit_cfb(now)
+        had = self.cfb_model is not None
+        out = await self._fit_cfb(now)
+        return out + await self._refit_gates_if_needed("cfb", had, now)
 
     async def _job_nflverse_refresh(self, job: Job, now: datetime):
-        return await self._load_nflverse(now) + await self._fit_nfl(now)
+        had = self.nfl_model is not None
+        out = await self._load_nflverse(now) + await self._fit_nfl(now)
+        return out + await self._refit_gates_if_needed("nfl", had, now)
 
     async def _job_settle(self, job: Job, now: datetime):
         open_bets = self.lifecycle.open_bets()
