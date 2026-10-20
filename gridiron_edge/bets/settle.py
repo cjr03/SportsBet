@@ -1,5 +1,6 @@
 """Settlement of Kalshi, PrizePicks and arb bets: grading, payouts, voids (integer cents)."""
 import json
+import logging
 import sqlite3
 from collections.abc import Callable
 from datetime import datetime, timedelta
@@ -13,6 +14,7 @@ from gridiron_edge.strategy.prizepicks import PAYOUTS, revert
 from gridiron_edge.types import Game, KalshiMarket, Leg
 
 Result = Literal["won", "lost", "refund", "pending"]
+log = logging.getLogger(__name__)
 VOID_AFTER = timedelta(hours=72)
 
 
@@ -86,7 +88,9 @@ class Settler:
         return round(bet["qty"] * leg.price * 100) + round(taker_fee(bet["qty"], leg.price, 1.0) * 100)
 
     def _grade_bet(self, bet: sqlite3.Row, now: datetime, kalshi_lookup, stat_lookup
-                   ) -> tuple[Result, int]:
+                   ) -> tuple[Result, int, int]:
+        """Return (result, payout_cents, refund_part_cents); refund_part is the share of an
+        arb payout that is a refund of a voided leg rather than a winning payout."""
         legs = [Leg(**d) for d in json.loads(bet["legs_json"])]
         refund_all = bet["stake_cents"] + bet["fee_cents"]
         if bet["kind"] == "pp_entry":
@@ -99,25 +103,29 @@ class Settler:
             if result == "pending" and any(
                     (g := self.registry.get(leg.game_id)) is not None and g.status != "final"
                     and now >= g.kickoff + VOID_AFTER for leg in legs):
-                return "refund", refund_all
+                return "refund", refund_all, refund_all
             if result == "refund":
-                return result, refund_all
-            return result, round(bet["stake_cents"] * mult)
+                return result, refund_all, refund_all
+            return result, round(bet["stake_cents"] * mult), 0
         grades = [grade_kalshi_leg(leg, kalshi_lookup(leg.ticker), self.registry.get(leg.game_id), now)
                   for leg in legs]
         if "pending" in grades:
-            return "pending", 0
+            return "pending", 0, 0
         if bet["kind"] != "arb":
             result = grades[0]
-            return result, (bet["qty"] * 100 if result == "won" else refund_all if result == "refund" else 0)
-        payout = sum(bet["qty"] * 100 if g == "won" else self._leg_refund_cents(bet, leg) if g == "refund" else 0
-                     for g, leg in zip(grades, legs))
+            if result == "won":
+                return result, bet["qty"] * 100, 0
+            return (result, refund_all, refund_all) if result == "refund" else (result, 0, 0)
         if all(g == "refund" for g in grades):
-            return "refund", refund_all
-        return ("won" if "won" in grades or payout > 0 else "lost"), payout
+            return "refund", refund_all, refund_all
+        won = sum(bet["qty"] * 100 for g in grades if g == "won")
+        refunded = sum(self._leg_refund_cents(bet, leg) for g, leg in zip(grades, legs) if g == "refund")
+        result = "won" if "won" in grades else "refund" if "refund" in grades else "lost"
+        return result, won + refunded, refunded
 
     # -- writing ---------------------------------------------------------
-    def _write(self, bet_id: int, result: str, payout: int, now: datetime) -> None:
+    def _write(self, bet_id: int, result: str, payout: int, now: datetime,
+               refund_part: int = 0) -> None:
         with self.conn:
             self.conn.execute("SAVEPOINT settle_bet")
             try:
@@ -126,9 +134,13 @@ class Settler:
                     "WHERE id=? AND state='PLACED'", (result, payout, now.isoformat(), bet_id))
                 if cur.rowcount != 1:
                     raise LifecycleError("bet is not open")
-                if payout > 0:
-                    self.lc.ledger.post("refund" if result == "refund" else "payout", payout,
-                                        bet_id=bet_id, note=result)
+                if result == "refund":
+                    refund_part = payout
+                refund_part = min(max(refund_part, 0), payout)
+                if payout - refund_part > 0:
+                    self.lc.ledger.post("payout", payout - refund_part, bet_id=bet_id, note=result)
+                if refund_part > 0:
+                    self.lc.ledger.post("refund", refund_part, bet_id=bet_id, note=result)
             except BaseException:
                 self.conn.execute("ROLLBACK TO settle_bet")
                 self.conn.execute("RELEASE settle_bet")
@@ -141,10 +153,14 @@ class Settler:
                      ) -> list[tuple[int, str, int]]:
         done = []
         for bet in self.lc.open_bets():
-            result, payout = self._grade_bet(bet, now, kalshi_lookup, stat_lookup)
-            if result == "pending":
+            try:
+                result, payout, refund_part = self._grade_bet(bet, now, kalshi_lookup, stat_lookup)
+                if result == "pending":
+                    continue
+                self._write(bet["id"], result, payout, now, refund_part)
+            except (ValueError, KeyError, TypeError, AttributeError, LifecycleError, sqlite3.Error) as exc:
+                log.warning("skipping bet %s: cannot settle (%s: %s)", bet["id"], type(exc).__name__, exc)
                 continue
-            self._write(bet["id"], result, payout, now)
             done.append((bet["id"], result, payout))
         return done
 
@@ -176,5 +192,6 @@ class Settler:
             return None
         value = clv((bet["stake_cents"] + bet["fee_cents"]) / (bet["qty"] * 100), p_close_fair)
         if value is not None:
-            self.conn.execute("UPDATE bets SET clv=? WHERE id=?", (value, bet_id))
+            with self.conn:
+                self.conn.execute("UPDATE bets SET clv=? WHERE id=?", (value, bet_id))
         return value

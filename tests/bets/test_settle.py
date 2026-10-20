@@ -167,3 +167,83 @@ def test_manual_settle_and_clv(env):
 def test_clv():
     assert clv(0.50, 0.55) == pytest.approx(0.10)
     assert clv(0.5, None) is None
+
+
+# -- arb settlement, error isolation, clv durability ---------------------------
+GID2 = "nfl:20261025:NYG@WAS"
+T1, T2 = TICKER, "KXNFLGAME-26OCT25NYGWAS-NYG"
+
+
+def _arb(env, mk, r1, r2):
+    """Place a 2-leg arb; r1/r2 in yes/no (market result) or 'void' (game void_candidate)."""
+    from dataclasses import replace
+    conn, lc, reg, st = env
+    reg.upsert(game(status="void_candidate" if r1 == "void" else "final"))
+    reg.upsert(Game(GID2, "nfl", 2026, 8, KICK, "WAS", "NYG", status="void_candidate"))
+    legs = [kleg(ticker=T1), Leg("kalshi", "x", "yes", 0.50, 0.5, GID2, ticker=T2, team="NYG")]
+    bet = place(lc, legs, kind="arb", qty=10, structure="pair")
+    row = conn.execute("SELECT stake_cents, fee_cents FROM bets WHERE id=?", (bet,)).fetchone()
+    res = {T1: r1, T2: r2}
+
+    def lookup(t):
+        return None if res[t] == "void" else replace(mk(t, "E", "ml", team="DAL"), result=res[t])
+    before = lc.ledger.balance()
+    out = st.settle_ready(NOW, lookup, no_stat)
+    kinds = conn.execute("SELECT kind, amount_cents FROM ledger WHERE bet_id=? AND kind IN "
+                         "('payout','refund') ORDER BY id", (bet,)).fetchall()
+    return bet, out, [tuple(k) for k in kinds], lc.ledger.balance() - before
+
+
+def test_arb_win_and_loss(env, mk):
+    bet, out, rows, delta = _arb(env, mk, "yes", "no")
+    assert out == [(bet, "won", 1000)] and rows == [("payout", 1000)] and delta == 1000
+
+
+def test_arb_win_and_refund(env, mk):
+    refund = round(10 * 0.5 * 100) + round(taker_fee(10, 0.5, 1.0) * 100)
+    bet, out, rows, delta = _arb(env, mk, "yes", "void")
+    assert out == [(bet, "won", 1000 + refund)]
+    assert rows == [("payout", 1000), ("refund", refund)] and delta == 1000 + refund
+
+
+def test_arb_loss_and_refund_is_refund_not_won(env, mk):
+    refund = round(10 * 0.5 * 100) + round(taker_fee(10, 0.5, 1.0) * 100)
+    bet, out, rows, delta = _arb(env, mk, "no", "void")
+    assert out == [(bet, "refund", refund)] and rows == [("refund", refund)] and delta == refund
+
+
+def test_arb_all_refund(env, mk):
+    bet, out, rows, delta = _arb(env, mk, "void", "void")
+    conn = env[0]
+    s, f = conn.execute("SELECT stake_cents, fee_cents FROM bets WHERE id=?", (bet,)).fetchone()
+    assert out == [(bet, "refund", s + f)] and rows == [("refund", s + f)]
+
+
+def test_bad_structure_does_not_block_later_bets(env):
+    conn, lc, reg, st = env
+    legs = [pleg(f"P{i}", team=f"T{i}", game_id=f"g{i}") for i in range(5)]
+    bad = place(lc, legs, kind="pp_entry", qty=None, stake=500, structure="5-flex")
+    conn.execute("UPDATE bets SET structure=NULL WHERE id=?", (bad,))
+    conn.commit()
+    reg.upsert(game())
+    good = place(lc, [kleg()])
+    out = st.settle_ready(NOW, lambda t: None, lambda *a: 60.0)
+    assert [o[0] for o in out] == [good]
+    assert conn.execute("SELECT state FROM bets WHERE id=?", (bad,)).fetchone()[0] == "PLACED"
+
+
+def test_raising_lookup_isolated(env):
+    conn, lc, reg, st = env
+    reg.upsert(game())
+    b1 = place(lc, [kleg()])
+    def boom(t):
+        raise ValueError("feed down")
+    assert st.settle_ready(NOW, boom, no_stat) == []
+    assert conn.execute("SELECT state FROM bets WHERE id=?", (b1,)).fetchone()[0] == "PLACED"
+
+
+def test_record_clv_is_committed(env):
+    conn, lc, reg, st = env
+    bet = place(lc, [kleg()])
+    st.record_clv(bet, 0.55)
+    assert conn.in_transaction is False
