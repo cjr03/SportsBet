@@ -1,6 +1,6 @@
 """Decides which fetch jobs are due; pure given its state and the game registry."""
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Callable, Literal
 from zoneinfo import ZoneInfo
 
@@ -16,6 +16,27 @@ SCAN_DEBOUNCE = timedelta(seconds=60)
 _EARLY = {"nfl": (1, 9), "cfb": (6, 12)}
 _MID = {"nfl": (3, 9), "cfb": (2, 9)}
 _SCAN_TRIGGERS = ("kalshi_refresh", "odds_games", "odds_props", "rundown_lines")
+# TheRundown pacing: live scores every minute only while money rides on a live game.
+LIVE_BET_SCORES_EVERY = timedelta(seconds=60)
+LIVE_SCORES_EVERY = timedelta(minutes=5)
+RUNDOWN_LINES_EVERY = timedelta(minutes=30)
+LINES_HORIZON = timedelta(hours=48)
+# Odds API closing pulls: one per league per fixed 2-hour UTC block that holds a game we care about.
+CLOSE_BLOCK = timedelta(hours=2)
+
+
+def _odds_time(t: datetime) -> str:
+    """The Odds API's documented commence-time form: UTC with a literal Z."""
+    return t.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _in_close_window(kickoff: datetime, now: datetime) -> bool:
+    return kickoff - timedelta(minutes=20) <= now <= kickoff - timedelta(minutes=5)
+
+
+def _block_start(t: datetime) -> datetime:
+    u = t.astimezone(UTC)
+    return u.replace(hour=u.hour - u.hour % 2, minute=0, second=0, microsecond=0)
 
 
 @dataclass
@@ -42,12 +63,18 @@ def _last_at_or_before(now: datetime, weekday: int, hour: int) -> datetime:
 class Scheduler:
     def __init__(self, registry, budgets: dict[str, BudgetGuard], state: dict | None = None,
                  tz=ZoneInfo("America/Los_Angeles"),
-                 has_open_bets: Callable[[], bool] = lambda: False):
+                 has_open_bets: Callable[[], bool] = lambda: False,
+                 open_bet_games: Callable[[], set[str]] = lambda: set(),
+                 close_games: Callable[[], set[str]] = lambda: set()):
+        """open_bet_games: game ids with a PLACED bet. close_games: game ids whose closing line
+        matters (a PLACED bet or a live, non-observe recommendation)."""
         self.registry = registry
         self.budgets = budgets
         self.state: dict = {} if state is None else state
         self.tz = tz
         self.has_open_bets = has_open_bets
+        self.open_bet_games = open_bet_games
+        self.close_games = close_games
         self._scan_pending = False
 
     # -- recording -------------------------------------------------------
@@ -83,17 +110,21 @@ class Scheduler:
 
         add(Job("expire"), timedelta(seconds=60))
 
+        bet_games = set(self.open_bet_games()) if live else set()
         for league in LEAGUES:
             lg_up = [g for g in upcoming if g.league == league]
-            if any(g.league == league for g in live):
-                every = timedelta(seconds=60)
+            lg_live = [g for g in live if g.league == league]
+            if any(g.game_id in bet_games for g in lg_live):
+                every = LIVE_BET_SCORES_EVERY
+            elif lg_live:
+                every = LIVE_SCORES_EVERY
             elif any(g.kickoff - now <= timedelta(hours=3) for g in lg_up):
                 every = timedelta(minutes=15)
             else:
                 every = timedelta(hours=1)
             add(Job("rundown_scores", league), every)
-            if any(g.kickoff - now <= timedelta(hours=48) for g in lg_up):
-                add(Job("rundown_lines", league), timedelta(minutes=20))
+            if any(g.kickoff - now <= LINES_HORIZON for g in lg_up):
+                add(Job("rundown_lines", league), RUNDOWN_LINES_EVERY)
 
         near = live or [g for g in upcoming if g.kickoff - now <= timedelta(hours=24)]
         add(Job("kalshi_refresh"), timedelta(minutes=3 if near else 30))
@@ -116,6 +147,7 @@ class Scheduler:
 
     def _odds_games(self, now: datetime, local: datetime, upcoming) -> list[Job]:
         out: list[Job] = []
+        wanted = None  # computed lazily: only when some game is near its close window
         for league in LEAGUES:
             lg_up = [g for g in upcoming if g.league == league]
             if not lg_up:
@@ -126,15 +158,28 @@ class Scheduler:
                 job = Job("odds_games", league, {"window": window})
                 if local >= anchor and not self._done_since(job, anchor):
                     out.append(job)
-            for kickoff in sorted({g.kickoff for g in lg_up}):
-                if kickoff - timedelta(minutes=20) <= now <= kickoff - timedelta(minutes=5):
-                    job = Job("odds_games", league, {
-                        "window": f"close:{kickoff.isoformat()}",
-                        "commence_from": (kickoff - timedelta(minutes=1)).isoformat(),
-                        "commence_to": (kickoff + timedelta(minutes=1)).isoformat(),
-                    }, essential=True)
-                    if job.key not in self.state:
-                        out.append(job)
+            if not any(_in_close_window(g.kickoff, now) for g in lg_up):
+                continue
+            if wanted is None:
+                wanted = set(self.close_games())
+            # Closing lines only matter for CLV and last-minute recs: one pull per 2-hour block
+            # that holds a game with a PLACED bet or an active recommendation, timed to the
+            # block's first such kickoff. The args depend only on the block, so it runs once.
+            blocks: dict[datetime, list[datetime]] = {}
+            for g in lg_up:
+                if g.game_id in wanted:
+                    blocks.setdefault(_block_start(g.kickoff), []).append(g.kickoff)
+            for block, kickoffs in sorted(blocks.items()):
+                first = min(kickoffs)
+                if not _in_close_window(first, now):
+                    continue
+                job = Job("odds_games", league, {
+                    "window": f"close:{_odds_time(block)}",
+                    "commence_from": _odds_time(block),
+                    "commence_to": _odds_time(block + CLOSE_BLOCK),
+                }, essential=league == "nfl")
+                if job.key not in self.state:
+                    out.append(job)
         return out
 
     def _odds_props(self, now: datetime, local: datetime, upcoming) -> list[Job]:

@@ -294,3 +294,42 @@ def test_pp_under_pick_uses_worst_case_under(settings):
     for leg in recs[0].legs:
         p_over, p_under = _book_p_sides(snap, settings, leg.game_id, leg.player, leg.stat, leg.line)
         assert leg.side == "under" and leg.p_fair == pytest.approx(p_under) and p_under < 1.0 - p_over
+
+
+def test_open_bet_on_game_blocks_new_kalshi_game_rec(mk, settings):
+    snap = _ml_snap(mk, 0.48)
+    assert kalshi_game_candidates(snap, settings)
+    held = replace(snap, open_game_ids={"g1"})
+    assert kalshi_game_candidates(held, settings) == []
+    assert not [r for r in scan(held, settings, StubProjector(), lambda m: "nfl") if r.kind == "kalshi_game"]
+
+
+def test_open_bet_on_player_blocks_new_kalshi_prop_rec(mk, settings):
+    m = replace(mk("P1", "EP", "prop", line=49.5, yes_ask=0.45, no_ask=0.60, game_id="g1"),
+                player="Player 1", stat="rush_yds")
+    props = [PropQuote("odds_api", "draftkings", "g1", "Player 1", "rush_yds", "over", 52.5, 1.70, NOW),
+             PropQuote("odds_api", "draftkings", "g1", "Player 1", "rush_yds", "under", 52.5, 2.25, NOW)]
+    snap = snap_with(kalshi=[m], props=props)
+    assert kalshi_prop_candidates(snap, settings, StubProjector())
+    assert kalshi_prop_candidates(replace(snap, open_players={"player 1"}), settings, StubProjector()) == []
+
+
+def test_placed_arb_not_recommended_again(mk, settings):
+    ms = [mk("E1-H1", "E1", "ml", "H1", yes_ask=0.45, game_id="g1"),
+          mk("E1-A1", "E1", "ml", "A1", yes_ask=0.45, game_id="g1")]
+    (rec,) = arb_candidates(snap_with(kalshi=ms), settings, lambda m: "nfl")
+    moved = [replace(m, yes_ask=0.44) for m in ms]
+    assert arb_candidates(snap_with(kalshi=moved, open_leg_keys={rec.leg_key}), settings, lambda m: "nfl") == []
+
+
+def test_zero_ask_markets_make_no_arb_and_no_crash(mk, settings):
+    pair = [mk("E1-H1", "E1", "ml", "H1", yes_ask=0.0, yes_bid=0.0, game_id="g1"),
+            mk("E1-A1", "E1", "ml", "A1", yes_ask=0.0, yes_bid=0.0, game_id="g1")]
+    ladder = [mk("E2-H3", "E2", "spread", "H1", line=3.5, yes_ask=0.0, yes_bid=0.0, game_id="g1"),
+              mk("E2-H7", "E2", "spread", "H1", line=7.5, yes_ask=0.30, yes_bid=0.20, no_ask=0.0,
+                 game_id="g1")]
+    from gridiron_edge.strategy.arb import kalshi_ladders, kalshi_ml_pairs
+    assert kalshi_ml_pairs(pair, lambda m: "nfl") == [] and kalshi_ladders(ladder) == []
+    snap = snap_with(kalshi=pair + ladder, quotes=h2h("g1", 1.80, 2.10))
+    assert arb_candidates(snap, settings, lambda m: "nfl") == []
+    assert not [r for r in scan(snap, settings, StubProjector(), lambda m: "nfl") if r.kind == "arb"]

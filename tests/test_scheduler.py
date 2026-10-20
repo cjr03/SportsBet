@@ -49,9 +49,9 @@ def run_all(s, jobs, now):
         s.mark_done(j, now)
 
 
-def test_live_scores_every_minute():
+def test_live_scores_every_minute_with_open_bet():
     live = game("g", T0 - timedelta(hours=1), status="live")
-    s = sched(FakeRegistry(live=[live]))
+    s = sched(FakeRegistry(live=[live]), open_bet_games=lambda: {"g"})
     for dt, expect in ((0, True), (30, False), (61, True)):
         t = T0 + timedelta(seconds=dt)
         jobs = names(s.due(t), "rundown_scores")
@@ -73,18 +73,65 @@ def test_scores_quarter_hour_near_kickoff():
     assert [j for j in names(s.due(T0 + timedelta(minutes=16)), "rundown_scores") if j.league == "nfl"]
 
 
-def test_odds_close_window_once_per_kickoff():
+def _closes(jobs):
+    return [j for j in names(jobs, "odds_games") if j.args["window"].startswith("close")]
+
+
+def _z(t):
+    return t.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def test_odds_close_window_once_per_block():
+    k = datetime(2026, 10, 21, 22, 30, tzinfo=timezone.utc)  # block 22:00-24:00 UTC
+    s = sched(FakeRegistry([game("a", k), game("b", k)]), close_games=lambda: {"a"})
+    assert not _closes(s.due(T0))
+    t = k - timedelta(minutes=10)
+    close = _closes(s.due(t))
+    assert len(close) == 1 and close[0].essential
+    assert close[0].args["commence_from"] == "2026-10-21T22:00:00Z" == _z(k.replace(minute=0))
+    assert close[0].args["commence_to"] == "2026-10-22T00:00:00Z"
+    run_all(s, close, t)
+    assert not _closes(s.due(t + timedelta(minutes=1)))
+
+
+def test_odds_close_one_job_for_kickoffs_in_same_block():
+    k1 = datetime(2026, 10, 24, 16, 0, tzinfo=timezone.utc)
+    k2 = k1 + timedelta(minutes=30)
+    k3 = k1 + timedelta(hours=1, minutes=30)
+    games = [game("a", k1, "cfb"), game("b", k2, "cfb"), game("c", k3, "cfb")]
+    s = sched(FakeRegistry(games), close_games=lambda: {"a", "b", "c"})
+    t = k1 - timedelta(minutes=10)
+    close = _closes(s.due(t))
+    assert len(close) == 1 and not close[0].essential  # CFB closes never dip into the reserve
+    assert close[0].args["commence_from"] == _z(k1) and close[0].args["commence_to"] == _z(k1 + timedelta(hours=2))
+    run_all(s, close, t)
+    for later in (k2 - timedelta(minutes=10), k3 - timedelta(minutes=10)):
+        assert not _closes(s.due(later))
+
+
+def test_odds_close_skipped_without_bet_or_rec():
     k = T0 + timedelta(hours=3)
     s = sched(FakeRegistry([game("a", k), game("b", k)]))
-    assert not [j for j in names(s.due(T0), "odds_games") if j.args["window"].startswith("close")]
-    t = k - timedelta(minutes=10)
-    close = [j for j in names(s.due(t), "odds_games") if j.args["window"].startswith("close")]
-    assert len(close) == 1 and close[0].essential
-    assert close[0].args["commence_from"] == (k - timedelta(minutes=1)).isoformat()
-    assert close[0].args["commence_to"] == (k + timedelta(minutes=1)).isoformat()
-    run_all(s, close, t)
-    assert not [j for j in names(s.due(t + timedelta(minutes=1)), "odds_games")
-                if j.args["window"].startswith("close")]
+    assert not _closes(s.due(k - timedelta(minutes=10)))
+
+
+def test_live_cfb_slate_without_open_bets_polled_every_five_minutes():
+    live = [game(f"c{i}", T0 - timedelta(hours=1), "cfb", status="live") for i in range(60)]
+    s = sched(FakeRegistry(live=live), open_bet_games=lambda: {"other"})
+    cfb = lambda t: [j for j in names(s.due(t), "rundown_scores") if j.league == "cfb"]  # noqa: E731
+    run_all(s, cfb(T0), T0)
+    assert not cfb(T0 + timedelta(seconds=61))
+    assert not cfb(T0 + timedelta(minutes=4, seconds=59))
+    assert cfb(T0 + timedelta(minutes=5))
+
+
+def test_rundown_lines_every_thirty_minutes():
+    s = sched(FakeRegistry([game("g", T0 + timedelta(hours=30))]))
+    lines = lambda t: [j for j in names(s.due(t), "rundown_lines") if j.league == "nfl"]  # noqa: E731
+    run_all(s, lines(T0), T0)
+    assert not lines(T0 + timedelta(minutes=29))
+    assert lines(T0 + timedelta(minutes=30))
+    assert not names(sched(FakeRegistry([game("g", T0 + timedelta(hours=49))])).due(T0), "rundown_lines")
 
 
 def test_early_window_once():

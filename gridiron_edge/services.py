@@ -3,7 +3,7 @@ import asyncio
 import json
 import sqlite3
 from collections.abc import Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 
 import httpx
@@ -41,7 +41,7 @@ from gridiron_edge.scheduler import LEAGUES, Job, Scheduler
 from gridiron_edge.strategy.distributions import (
     CFB_SIGMA, NFL_ML_SIGMA, NFL_SPREAD_SIGMA, NFL_TOTAL_SIGMA, EmpiricalMarginModel, NormalModel,
 )
-from gridiron_edge.types import Game, KalshiMarket, Leg, PropQuote, Recommendation, make_game_id
+from gridiron_edge.types import Game, KalshiMarket, Leg, PropQuote, Quote, Recommendation, make_game_id
 from gridiron_edge.ui.widgets import compute_kpis
 
 register_schema("CREATE TABLE IF NOT EXISTS scheduler_state (key TEXT PRIMARY KEY, ts TEXT NOT NULL)")
@@ -50,6 +50,9 @@ STATE_TTL = timedelta(days=14)
 UPCOMING_WINDOW = timedelta(days=8)
 GATE_REFIT = timedelta(days=7)
 QUOTE_TTL = timedelta(days=2)
+LINES_HORIZON = timedelta(hours=48)
+# sportsbook quotes and prop lines, written through to api_cache so a restart keeps them
+_PERSISTED = {"quotes": Quote, "props": PropQuote}
 NFL_SEASONS = 3
 # Settings the `set` command may not touch: secrets and paths live in .env / --db.
 LOCKED_SETTINGS = {"odds_api_key", "cfbd_api_key", "therundown_api_key", "notify_phone", "ntfy_topic",
@@ -111,6 +114,24 @@ def _as_date(v) -> date:
 
 def _league_of(m: KalshiMarket) -> str:
     return "cfb" if m.series.startswith("KXNCAAF") else "nfl"
+
+
+def _dump_items(items: list) -> str:
+    return json.dumps([{**asdict(i), "last_update": i.last_update.isoformat()} for i in items])
+
+
+def _load_items(cls, body: str) -> list:
+    out = []
+    for d in json.loads(body):
+        try:
+            out.append(cls(**{**d, "last_update": datetime.fromisoformat(d["last_update"])}))
+        except (KeyError, TypeError, ValueError):
+            continue  # an older row shape: drop it rather than fail startup
+    return out
+
+
+def _bet_legs(bets) -> list[dict]:
+    return [leg for b in bets for leg in json.loads(b["legs_json"])]
 
 
 def _default_margin_models() -> dict:
@@ -513,11 +534,36 @@ class Services:
         return await self._guarded(job.name, handler(job, now))
 
     def _merge(self, key: str, source: str, items: list, now: datetime) -> None:
-        """Replace one source's items for the games it just returned; drop anything stale."""
+        """Replace one source's items for the games it just returned; drop anything stale; persist."""
         ids = {i.game_id for i in items}
         keep = [q for q in self.latest[key] if not (q.source == source and q.game_id in ids)
                 and now - q.last_update < QUOTE_TTL]
         self.latest[key] = keep + items
+        self.conn.execute(
+            "INSERT OR REPLACE INTO api_cache (key, fetched_at, immutable, body) VALUES (?,?,0,?)",
+            (f"latest:{key}", now.astimezone(UTC).isoformat(), _dump_items(self.latest[key])))
+
+    def load_latest(self, now: datetime) -> None:
+        """Reload persisted quotes and prop lines (the scheduler won't re-pull them after a restart)."""
+        for key, cls in _PERSISTED.items():
+            row = self.conn.execute("SELECT body FROM api_cache WHERE key=?", (f"latest:{key}",)).fetchone()
+            if row is None:
+                continue
+            try:
+                items = _load_items(cls, row["body"])
+            except (TypeError, ValueError):
+                continue
+            self.latest[key] = [i for i in items if now - i.last_update < QUOTE_TTL]
+
+    # -- open positions ----------------------------------------------------
+    def open_bet_games(self) -> set[str]:
+        return {leg["game_id"] for leg in _bet_legs(self.lifecycle.open_bets()) if leg.get("game_id")}
+
+    def close_games(self) -> set[str]:
+        """Games whose closing line matters: a PLACED bet, or an active non-observe recommendation."""
+        rows = self.conn.execute("SELECT legs_json FROM recommendations "
+                                 "WHERE state IN ('RECOMMENDED','PENDING') AND observe_only=0").fetchall()
+        return self.open_bet_games() | {leg["game_id"] for leg in _bet_legs(rows) if leg.get("game_id")}
 
     async def _job_expire(self, job: Job, now: datetime):
         ids = self.lifecycle.expire_due(now)
@@ -527,16 +573,24 @@ class Services:
         if self.rundown is None:
             return []
         n = 0
+        essential = any(g.startswith(f"{job.league}:") for g in self.open_bet_games())
         for day in sorted({(now - timedelta(hours=12)).date(), now.date()}):
-            n += self._apply_scores(await self.rundown.scores(job.league, day))
+            n += self._apply_scores(await self.rundown.scores(job.league, day, essential=essential))
+        if self.rundown.last_status == "skipped_budget":
+            return [("info", f"therundown scores {job.league}: skipped to protect the daily/monthly points")]
         return [("api", f"therundown scores {job.league}: {n} games")]
 
     async def _job_rundown_lines(self, job: Job, now: datetime):
         if self.rundown is None:
             return []
+        # only the dates of games kicking off within 48 h - usually one call, not two
+        days = sorted({g.kickoff.astimezone(UTC).date()
+                       for g in self.registry.upcoming(LINES_HORIZON, now) if g.league == job.league})
         quotes = []
-        for day in (now.date(), now.date() + timedelta(days=1)):
+        for day in days:
             quotes += await self.rundown.lines(job.league, day)
+        if self.rundown.last_status == "skipped_budget":
+            return [("info", f"therundown lines {job.league}: skipped to protect the daily/monthly points")]
         self._merge("quotes", "therundown", quotes, now)
         return [("api", f"therundown lines {job.league}: {len(quotes)} quotes")]
 
@@ -660,6 +714,12 @@ class Services:
     def snapshot(self, now: datetime) -> pipeline.Snapshot:
         games = {g.game_id: g for g in self.registry.all_since(now - timedelta(days=1))}
         exposure = self.lifecycle.open_exposure_cents()
+        bets = self.lifecycle.open_bets()
+        game_legs = _bet_legs([b for b in bets if b["kind"] == "kalshi_game"])
+        prop_legs = _bet_legs([b for b in bets if b["kind"] == "kalshi_prop"])
+        open_keys = {r["leg_key"] for r in self.conn.execute(
+            "SELECT r.leg_key FROM recommendations r JOIN bets b ON b.rec_id = r.id "
+            "WHERE b.state='PLACED' AND r.state='PLACED'")}
         return pipeline.Snapshot(
             now=now, games=games, quotes=list(self.latest["quotes"]),
             props=self.latest["props"] + self.manual_props, kalshi=list(self.latest["kalshi"]),
@@ -667,7 +727,10 @@ class Services:
             # the ledger already holds open stakes out, so the Kelly bankroll adds them back
             bankroll_cents=self.ledger.balance() + exposure, open_exposure_cents=exposure,
             pp_staked_today_cents=self.lifecycle.pp_staked_today_cents(now, PT),
-            margin_models=self.margin_models, player_teams={**self.player_teams, **self.manual_teams})
+            margin_models=self.margin_models, player_teams={**self.player_teams, **self.manual_teams},
+            open_game_ids={leg["game_id"] for leg in game_legs if leg.get("game_id")},
+            open_players={leg["player"].lower() for leg in prop_legs if leg.get("player")},
+            open_leg_keys=open_keys)
 
     def _wanted(self, rec: Recommendation, what: str) -> bool:
         venue = "prizepicks" if rec.kind == "pp_entry" else "kalshi"
@@ -830,11 +893,14 @@ def build_services(settings: Settings, transports: dict[str, httpx.AsyncBaseTran
 
     view = _RegistryView(registry, lambda: datetime.now(UTC))
     scheduler = Scheduler(view, budgets, state=_SchedulerState(conn, datetime.now(UTC)),
-                          has_open_bets=lambda: bool(lifecycle.open_bets()))
+                          has_open_bets=lambda: bool(lifecycle.open_bets()),
+                          open_bet_games=lambda: services.open_bet_games(),
+                          close_games=lambda: services.close_games())
     services = Services(
         settings=settings, conn=conn, ledger=ledger, lifecycle=lifecycle,
         settler=Settler(conn, lifecycle, registry), teams=teams, registry=registry, budgets=budgets,
         scheduler=scheduler, notifier=notifier, odds=odds, kalshi=kalshi, rundown=rundown, cfbd=cfbd,
         nflverse=NflverseSource(settings.db_path.parent / "nflverse"), console_sink=sink)
     view.clock = lambda: services.clock()
+    services.load_latest(datetime.now(UTC))
     return services

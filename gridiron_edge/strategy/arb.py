@@ -29,7 +29,7 @@ def _leg(m: KalshiMarket, side: str, price: float) -> Leg:
 def kalshi_ml_pairs(markets: list[KalshiMarket], league_of: Callable[[KalshiMarket], str]) -> list[Arb]:
     groups: dict[str, list[KalshiMarket]] = defaultdict(list)
     for m in markets:
-        if m.market_type == "ml" and m.status == "active":
+        if m.market_type == "ml" and m.status == "active" and m.yes_ask > 0:
             groups[m.event_ticker].append(m)
     out: list[Arb] = []
     for ms in groups.values():
@@ -39,6 +39,8 @@ def kalshi_ml_pairs(markets: list[KalshiMarket], league_of: Callable[[KalshiMark
         if qty < 1:
             continue
         cost = sum(effective_price(m.yes_ask, qty, m.fee_multiplier) * qty for m in ms)
+        if cost <= 0:
+            continue
         roi = qty / cost - 1
         if roi > 0:
             out.append(Arb("kalshi_ml_pair", ms[0].game_id, [_leg(m, "yes", m.yes_ask) for m in ms],
@@ -55,13 +57,15 @@ def kalshi_ladders(markets: list[KalshiMarket]) -> list[Arb]:
     for ms in groups.values():
         ms.sort(key=lambda m: m.line)
         for lo, hi in zip(ms, ms[1:]):
-            if not hi.yes_bid > lo.yes_ask:
-                continue
+            if lo.yes_ask <= 0 or hi.no_ask <= 0 or not hi.yes_bid > lo.yes_ask:
+                continue  # a zero ask is a missing quote, not a free contract
             qty = int(min(lo.yes_ask_size, hi.no_ask_size))
             if qty < 1:
                 continue
             cost = (effective_price(lo.yes_ask, qty, lo.fee_multiplier)
                     + effective_price(hi.no_ask, qty, hi.fee_multiplier)) * qty
+            if cost <= 0:
+                continue
             roi = qty / cost - 1
             if roi > 0:
                 out.append(Arb("kalshi_ladder", lo.game_id,

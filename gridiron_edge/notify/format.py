@@ -2,6 +2,7 @@
 import unicodedata
 from zoneinfo import ZoneInfo
 
+from gridiron_edge.strategy.kalshi_pricing import taker_fee
 from gridiron_edge.types import Recommendation
 
 PT = ZoneInfo("America/Los_Angeles")
@@ -19,9 +20,11 @@ def format_message(rec: Recommendation, tz: ZoneInfo = PT) -> str:
     hhmm = f"{rec.snapshot_ts.astimezone(tz):%H:%M}"
     if rec.kind.startswith("kalshi_"):
         leg = rec.legs[0]
+        # the same fee confirm debits (multiplier 1.0), so the text matches the ledger
+        cost = rec.stake_cents / 100 + (taker_fee(rec.qty, leg.price) if rec.qty else 0.0)
         text = (f"GE KALSHI BUY {leg.side.upper()} {leg.description} ({leg.ticker}) "
-                f"@ ${leg.price:.2f} x{rec.qty} = ${rec.stake_cents / 100:.2f} w/fee "
-                f"| fair {leg.p_fair:.1%} EV +{rec.ev:.1%} | {hhmm} PT | id {rec.id}")
+                f"@ ${leg.price:.2f} x{rec.qty} = ${cost:.2f} w/fee "
+                f"| fair {leg.p_fair:.1%} EV +{rec.ev:.1%} | verify availability before placing | {hhmm} PT | id {rec.id}")
     elif rec.kind == "pp_entry":
         n, _, kind = (rec.structure or "").partition("-")
         picks = " ".join(

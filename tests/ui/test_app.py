@@ -172,3 +172,72 @@ async def test_scheduler_state_survives_restart(services_mocked):
     svc = services_mocked()
     svc.scheduler.mark_done(Job("cfbd_weekly"), NOW)
     assert services_mocked().scheduler.state[Job("cfbd_weekly").key] == NOW
+
+
+def _frozen(monkeypatch):
+    from gridiron_edge import services as services_mod
+
+    class Frozen(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return NOW if tz is None else NOW.astimezone(tz)
+
+    monkeypatch.setattr(services_mod, "datetime", Frozen)
+
+
+async def test_quotes_and_props_survive_restart(services_mocked, monkeypatch):
+    _frozen(monkeypatch)
+    svc = services_mocked()
+    assert not [ln for ln in await svc.run_job(EARLY, NOW) if ln[0] == "error"]
+    (gid,) = [r["game_id"] for r in svc.conn.execute("SELECT game_id FROM games WHERE odds_event_id='evt1'")]
+    props_job = Job("odds_props", "nfl", {"game_id": gid})
+    assert not [ln for ln in await svc.run_job(props_job, NOW) if ln[0] == "error"]
+    for job in (EARLY, props_job):
+        svc.scheduler.mark_done(job, NOW)
+    assert svc.snapshot(NOW).quotes and svc.snapshot(NOW).props
+
+    again = services_mocked()  # a relaunch on the same db: the scheduler won't re-pull either
+    assert EARLY.key in again.scheduler.state and props_job.key in again.scheduler.state
+    snap = again.snapshot(NOW)
+    assert snap.quotes and snap.props
+    assert {q.game_id for q in snap.quotes} == {q.game_id for q in svc.snapshot(NOW).quotes}
+
+
+async def test_stale_persisted_quotes_dropped_on_restart(services_mocked, monkeypatch):
+    from datetime import timedelta
+
+    _frozen(monkeypatch)
+    svc = services_mocked()
+    await svc.run_job(EARLY, NOW)
+    assert svc.latest["quotes"]
+    later = services_mocked()
+    later.load_latest(NOW + timedelta(days=30))
+    assert later.latest["quotes"] == []
+
+
+async def test_placed_bet_not_rerecommended_or_retexted(services_mocked, load):
+    mock_edge(services_mocked, load)
+    svc = services_mocked()
+    await prime(svc)
+    await svc.run_job(Job("scan"), NOW)
+    (rec,) = svc.lifecycle.pending()
+    svc.lifecycle.confirm(rec.id, NOW)
+    assert svc.snapshot(NOW).open_game_ids == {rec.legs[0].game_id}
+    assert svc.scheduler.open_bet_games() == {rec.legs[0].game_id}
+    # the price ticks a cent: without the open-position check this would be a new rec and a new text
+    svc.latest["kalshi"] = [m if m.ticker != rec.legs[0].ticker else
+                            __import__("dataclasses").replace(m, yes_ask=m.yes_ask - 0.01)
+                            for m in svc.latest["kalshi"]]
+    lines = await svc.run_job(Job("scan"), NOW)
+    assert not [ln for ln in lines if ln[0] in ("rec", "text")]
+    assert len(services_mocked.sink) == 1
+
+
+async def test_rundown_lines_only_for_dates_within_48h(services_mocked):
+    svc = services_mocked()
+    await svc.run_job(EARLY, NOW)  # registers SEA game at 2026-11-02 01:15 UTC (~31 h away)
+    route = services_mocked.router.routes
+    before = sum(r.call_count for r in route if "therundown" in str(r.pattern))
+    await svc.run_job(Job("rundown_lines", "nfl"), NOW)
+    after = sum(r.call_count for r in route if "therundown" in str(r.pattern))
+    assert after - before == 1

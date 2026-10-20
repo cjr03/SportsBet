@@ -1,4 +1,5 @@
 import subprocess
+from dataclasses import replace
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -25,7 +26,7 @@ def _rec(kind, legs, **kw):
 @pytest.fixture
 def rec_kalshi():
     leg = Leg("kalshi", "Kansas City ML — café", "yes", 0.55, 0.60, "g", ticker="KXNFLGAME-X")
-    return _rec("kalshi_game", [leg], stake_cents=1130, qty=20)
+    return _rec("kalshi_game", [leg], stake_cents=1100, qty=20)
 
 
 @pytest.fixture
@@ -55,7 +56,8 @@ def midnight():
 def test_format_kalshi_ascii_and_fields(rec_kalshi):
     t = format_message(rec_kalshi)
     assert t.isascii() and t.startswith("GE KALSHI BUY YES") and t.endswith(" PT | id 42")
-    assert "@ $0.55 x20 = $11.30 w/fee | fair 60.0% EV +5.0% | 10:05 PT" in t
+    # 20 x $0.55 = $11.00 plus the $0.35 taker fee confirm will debit
+    assert "@ $0.55 x20 = $11.35 w/fee | fair 60.0% EV +5.0% | verify availability before placing | 10:05 PT" in t
 
 
 def test_format_pp_has_confirm(rec_pp):
@@ -122,3 +124,57 @@ def test_disabled_and_send_text(conn, rec_kalshi, noon, midnight):
     ch = NotifyChain(conn, [ConsoleNotifier(sink)], (23, 8), enabled=False)
     assert ch.notify(rec_kalshi, noon) is None
     assert ch.send_text("GE test", midnight).ok and sink == ["GE test"]
+
+
+@pytest.mark.parametrize("exc", [
+    subprocess.CalledProcessError(1, ["osascript", "-e", "s", "+15555550100", "hi", "iMessage"],
+                                  stderr=b"execution error: Messages got an error (-1700)"),
+    subprocess.TimeoutExpired(["osascript", "-e", "s", "+15555550100", "hi", "iMessage"], 30),
+    OSError("osascript not found"),
+])
+def test_imessage_error_never_contains_phone(exc):
+    def runner(args, **kw):
+        raise exc
+    result = IMessageNotifier("+15555550100", runner=runner).send("hi")
+    assert not result.ok and result.error and "+15555550100" not in result.error
+    if isinstance(exc, subprocess.CalledProcessError):
+        assert result.error.startswith("osascript exit 1:") and "-1700" in result.error
+
+
+def test_cooldown_one_text_per_contract_while_price_drifts(conn, noon):
+    from datetime import timedelta
+
+    from gridiron_edge.bets.lifecycle import Lifecycle
+    from gridiron_edge.db import Ledger
+
+    lc = Lifecycle(conn, Ledger(conn))
+    sink = []
+    ch = NotifyChain(conn, [ConsoleNotifier(sink)], (23, 8))
+
+    def rec_at(price):
+        leg = Leg("kalshi", "KC ML", "yes", price, 0.60, "g", ticker="KXNFLGAME-X")
+        saved, new = lc.upsert_recommendation(_rec("kalshi_game", [leg], id=None, qty=20), noon)
+        assert new
+        return saved
+
+    first, second = rec_at(0.55), rec_at(0.54)
+    assert first.leg_key == second.leg_key and first.dedupe_key != second.dedupe_key
+    assert ch.notify(first, noon).ok
+    assert ch.notify(second, noon + timedelta(minutes=5)) is None
+    assert len(sink) == 1
+    assert ch.notify(rec_at(0.53), noon + timedelta(minutes=31)).ok and len(sink) == 2
+
+
+def test_cooldown_does_not_hold_back_arbs(conn, rec_arb, noon):
+    from datetime import timedelta
+
+    from gridiron_edge.bets.lifecycle import Lifecycle
+    from gridiron_edge.db import Ledger
+
+    lc = Lifecycle(conn, Ledger(conn))
+    sink = []
+    ch = NotifyChain(conn, [ConsoleNotifier(sink)], (23, 8))
+    a, _ = lc.upsert_recommendation(rec_arb, noon)
+    legs = [replace(leg, price=leg.price - 0.01) for leg in rec_arb.legs]
+    b, _ = lc.upsert_recommendation(_rec("arb", legs, qty=10, ev=0.05), noon)
+    assert ch.notify(a, noon).ok and ch.notify(b, noon + timedelta(minutes=5)).ok and len(sink) == 2

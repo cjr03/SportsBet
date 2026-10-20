@@ -39,6 +39,11 @@ class Snapshot:
     pp_staked_today_cents: int
     margin_models: dict[str, MarginModel]
     player_teams: dict[str, str] = field(default_factory=dict)
+    # open positions: games with a PLACED Kalshi game bet, players (lower-cased) with a PLACED
+    # Kalshi prop bet, and leg keys of PLACED recs - none of these is recommended again
+    open_game_ids: set[str] = field(default_factory=set)
+    open_players: set[str] = field(default_factory=set)
+    open_leg_keys: set[str] = field(default_factory=set)
 
 
 class Projector(Protocol):
@@ -142,7 +147,7 @@ def kalshi_game_candidates(snap: Snapshot, s: Settings) -> list[Recommendation]:
         if m.market_type not in _GAME_TYPES:
             continue
         g = _upcoming(snap, m.game_id)
-        if g is None:
+        if g is None or g.game_id in snap.open_game_ids:  # one market per game, already held
             continue
         p_yes = _game_p_yes(m, g, snap, s)
         if p_yes is None:
@@ -224,6 +229,8 @@ def kalshi_prop_candidates(snap: Snapshot, s: Settings, projector: Projector) ->
     for m in snap.kalshi:
         if m.market_type != "prop" or m.player is None or m.stat is None or m.line is None:
             continue
+        if m.player.lower() in snap.open_players:  # already holding a prop on this player
+            continue
         g = _upcoming(snap, m.game_id)
         if g is None:
             continue
@@ -299,18 +306,23 @@ def arb_candidates(snap: Snapshot, s: Settings, league_of: Callable[[KalshiMarke
     out = []
     for a in filter_arbs(kalshi_ml_pairs(snap.kalshi, league_of) + kalshi_ladders(snap.kalshi), s.arb_max_roi):
         g = _upcoming(snap, a.game_id)
-        if g is None:
+        if g is None or a.qty < 1 or a.cost <= 0:
             continue
         qty = min(a.qty, math.floor(s.arb_fraction * bankroll / (a.cost / a.qty)))
         if qty < 1:
             continue
         # fees are rounded per order, so re-price at the smaller size
         cost = sum(effective_price(leg.price, qty, fees[leg.ticker]) for leg in a.legs) * qty
+        if cost <= 0:
+            continue
         roi = qty / cost - 1
         if roi <= 0:
             continue
-        out.append(Recommendation(None, "arb", a.legs, round(cost * 100), qty, roi, 1.0, a.kind,
-                                  snap.now, g.kickoff, tie_risk=a.tie_risk))
+        rec = Recommendation(None, "arb", a.legs, round(cost * 100), qty, roi, 1.0, a.kind,
+                             snap.now, g.kickoff, tie_risk=a.tie_risk)
+        if rec.leg_key in snap.open_leg_keys:  # this arb is already placed
+            continue
+        out.append(rec)
     return out
 
 
@@ -362,5 +374,6 @@ def scan(snap: Snapshot, s: Settings, projector: Projector,
     """Arbs, then sized Kalshi recs, then observe-only recs (stake 0), then the PrizePicks entry."""
     kalshi = kalshi_game_candidates(snap, s) + kalshi_prop_candidates(snap, s, projector)
     observe = [replace(r, stake_cents=0) for r in kalshi if r.observe_only]
-    return (arb_candidates(snap, s, league_of) + size_slate(kalshi, snap, s) + observe
+    recs = (arb_candidates(snap, s, league_of) + size_slate(kalshi, snap, s) + observe
             + pp_entry_candidates(snap, s, projector))
+    return [r for r in recs if r.leg_key not in snap.open_leg_keys]  # never re-recommend a placed bet

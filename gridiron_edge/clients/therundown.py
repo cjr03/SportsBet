@@ -13,6 +13,8 @@ BASE_URL = "https://therundown.io/api/v2"
 SPORT_ID = {"cfb": 1, "nfl": 2}
 MONTHLY_CAP = 200_000
 RESERVE_FRAC = 0.10
+DAILY_CAP = 20_000
+DAILY_RESERVE_FRAC = 0.10  # non-essential calls stop when the day's points fall below this share
 SENTINEL = 0.0001  # price meaning "off the board"
 AFFILIATE = {19: "draftkings", 23: "fanduel", 22: "betmgm", 25: "kalshi"}
 MARKET = {1: "h2h", 2: "spreads", 3: "totals"}
@@ -62,12 +64,30 @@ class TheRundownClient:
         self.delay_seconds: int | None = None
         self.tier: str | None = None
         self.bookmakers_header: str | None = None
+        # (UTC date of the reading, X-Datapoints-Remaining): the daily cap resets each day
+        self.daily: tuple[date, int] | None = None
+        self._cost: dict[tuple, int] = {}  # last X-Datapoints per (league, params) as a cost estimate
 
-    async def _events(self, league: League, day: date, params: dict) -> list[dict]:
+    def daily_remaining(self, today: date | None = None) -> int | None:
+        today = today or datetime.now(UTC).date()
+        if self.daily is None or self.daily[0] != today:
+            return None
+        return self.daily[1]
+
+    def _allowed(self, cost: int, essential: bool) -> bool:
+        daily = self.daily_remaining()
+        if daily is not None:
+            floor = 0 if essential else DAILY_RESERVE_FRAC * DAILY_CAP
+            if daily <= 0 or daily - cost < floor:
+                return False
+        return self.budget.can_spend(cost, essential)
+
+    async def _events(self, league: League, day: date, params: dict, essential: bool = False) -> list[dict]:
         if self.disabled:
             self.last_status = "disabled"
             return []
-        if self.budget.exhausted:
+        kind = (league, tuple(sorted(params.items())))
+        if not self._allowed(self._cost.get(kind, 0), essential):
             self.last_status = "skipped_budget"
             return []
         try:
@@ -78,8 +98,13 @@ class TheRundownClient:
             raise
         h = resp.headers
         remaining = _int(h.get("X-Datapoints-Monthly-Remaining"))
+        cost = _int(h.get("X-Datapoints"))
+        if cost is not None:
+            self._cost[kind] = cost
         if remaining is not None:
-            self.budget.record(remaining, MONTHLY_CAP - remaining, _int(h.get("X-Datapoints")) or 0)
+            self.budget.record(remaining, MONTHLY_CAP - remaining, cost or 0)
+        if (daily := _int(h.get("X-Datapoints-Remaining"))) is not None:
+            self.daily = (datetime.now(UTC).date(), daily)
         if (delay := _int(h.get("X-Data-Delay-Seconds"))) is not None:
             self.delay_seconds = delay
         self.tier = h.get("X-Tier", self.tier)
@@ -104,9 +129,10 @@ class TheRundownClient:
             return None
         return game_id, home, away
 
-    async def scores(self, league: League, day: date) -> list[Game]:
+    async def scores(self, league: League, day: date, essential: bool = False) -> list[Game]:
+        """essential: an open bet needs these scores to settle, so the daily/monthly reserve may be used."""
         out: list[Game] = []
-        for ev in await self._events(league, day, {"affiliate_ids": "0"}):
+        for ev in await self._events(league, day, {"affiliate_ids": "0"}, essential):
             m = self._match(league, ev)
             if m is None:
                 continue

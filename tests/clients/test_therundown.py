@@ -92,3 +92,31 @@ async def test_scores_bad_game_id_skipped(respx_mock, rd, load):
     respx_mock.get(url__regex=r".*/events/.*").mock(return_value=_ok(load))
     assert await rd.scores("nfl", date(2026, 11, 1)) == []
     assert rd.malformed >= 1
+
+
+async def test_low_daily_header_blocks_next_call(respx_mock, rd, load):
+    route = respx_mock.get(url__regex=r".*/events/.*").mock(return_value=_ok(
+        load, **{"X-Datapoints-Remaining": "1500", "X-Datapoints-Monthly-Remaining": "150000",
+                 "X-Datapoints": "6"}))
+    await rd.lines("nfl", date(2026, 11, 1))
+    assert rd.daily_remaining() == 1500 and route.call_count == 1
+    assert await rd.lines("nfl", date(2026, 11, 1)) == [] and rd.last_status == "skipped_budget"
+    assert await rd.scores("nfl", date(2026, 11, 1)) == []
+    assert route.call_count == 1
+    # an open bet's scores may still dip into the daily reserve
+    await rd.scores("nfl", date(2026, 11, 1), essential=True)
+    assert route.call_count == 2
+
+
+async def test_monthly_reserve_blocks_non_essential(respx_mock, rd, load):
+    route = respx_mock.get(url__regex=r".*/events/.*").mock(return_value=_ok(
+        load, **{"X-Datapoints-Remaining": "19000", "X-Datapoints-Monthly-Remaining": "19000"}))
+    await rd.scores("nfl", date(2026, 11, 1))
+    assert await rd.lines("nfl", date(2026, 11, 1)) == [] and route.call_count == 1
+
+
+async def test_daily_reading_from_another_day_is_ignored(respx_mock, rd, load):
+    route = respx_mock.get(url__regex=r".*/events/.*").mock(return_value=_ok(load))
+    rd.daily = (date(2000, 1, 1), 0)
+    await rd.scores("nfl", date(2026, 11, 1))
+    assert route.call_count == 1
