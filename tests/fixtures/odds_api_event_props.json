@@ -1,0 +1,86 @@
+{
+ "id": "evt1",
+ "sport_key": "americanfootball_nfl",
+ "commence_time": "2026-11-02T01:15:00Z",
+ "home_team": "Seattle Seahawks",
+ "away_team": "Chicago Bears",
+ "bookmakers": [
+  {
+   "key": "prizepicks",
+   "title": "PrizePicks",
+   "last_update": "2026-10-31T18:00:00Z",
+   "markets": [
+    {
+     "key": "player_reception_yds",
+     "last_update": "2026-10-31T18:00:00Z",
+     "outcomes": [
+      {
+       "name": "Over",
+       "description": "DK Metcalf",
+       "price": 1.0,
+       "point": 62.5,
+       "multiplier": 1.0
+      },
+      {
+       "name": "Under",
+       "description": "DK Metcalf",
+       "price": 1.0,
+       "point": 62.5,
+       "multiplier": 1.0
+      }
+     ]
+    },
+    {
+     "key": "player_reception_yds_alternate",
+     "last_update": "2026-10-31T18:00:00Z",
+     "outcomes": [
+      {
+       "name": "Over",
+       "description": "DK Metcalf",
+       "price": 1.0,
+       "point": 50.5,
+       "multiplier": 0.8
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "key": "draftkings",
+   "title": "DraftKings",
+   "last_update": "2026-10-31T18:00:00Z",
+   "markets": [
+    {
+     "key": "player_reception_yds",
+     "last_update": "2026-10-31T18:00:00Z",
+     "outcomes": [
+      {
+       "name": "Over",
+       "description": "DK Metcalf",
+       "price": 1.87,
+       "point": 62.5
+      },
+      {
+       "name": "Under",
+       "description": "DK Metcalf",
+       "price": 1.95,
+       "point": 62.5
+      }
+     ]
+    },
+    {
+     "key": "player_reception_yds_alternate",
+     "last_update": "2026-10-31T18:00:00Z",
+     "outcomes": [
+      {
+       "name": "Over",
+       "description": "DK Metcalf",
+       "price": 1.4,
+       "point": 50.5
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

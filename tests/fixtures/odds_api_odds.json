@@ -1,0 +1,117 @@
+[
+ {
+  "id": "evt1",
+  "sport_key": "americanfootball_nfl",
+  "commence_time": "2026-11-02T01:15:00Z",
+  "home_team": "Seattle Seahawks",
+  "away_team": "Chicago Bears",
+  "bookmakers": [
+   {
+    "key": "pinnacle",
+    "title": "pinnacle",
+    "last_update": "2026-10-31T18:00:00Z",
+    "markets": [
+     {
+      "key": "h2h",
+      "last_update": "2026-10-31T18:00:00Z",
+      "outcomes": [
+       {
+        "name": "Seattle Seahawks",
+        "price": 1.62
+       },
+       {
+        "name": "Chicago Bears",
+        "price": 2.35
+       }
+      ]
+     },
+     {
+      "key": "spreads",
+      "last_update": "2026-10-31T18:00:00Z",
+      "outcomes": [
+       {
+        "name": "Seattle Seahawks",
+        "price": 1.91,
+        "point": -3.5
+       },
+       {
+        "name": "Chicago Bears",
+        "price": 1.95,
+        "point": 3.5
+       }
+      ]
+     },
+     {
+      "key": "totals",
+      "last_update": "2026-10-31T18:00:00Z",
+      "outcomes": [
+       {
+        "name": "Over",
+        "price": 1.93,
+        "point": 44.5
+       },
+       {
+        "name": "Under",
+        "price": 1.97,
+        "point": 44.5
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "key": "draftkings",
+    "title": "draftkings",
+    "last_update": "2026-10-31T18:00:00Z",
+    "markets": [
+     {
+      "key": "h2h",
+      "last_update": "2026-10-31T18:00:00Z",
+      "outcomes": [
+       {
+        "name": "Seattle Seahawks",
+        "price": 1.6
+       },
+       {
+        "name": "Chicago Bears",
+        "price": 2.3
+       }
+      ]
+     },
+     {
+      "key": "spreads",
+      "last_update": "2026-10-31T18:00:00Z",
+      "outcomes": [
+       {
+        "name": "Seattle Seahawks",
+        "price": 1.91,
+        "point": -3.5
+       },
+       {
+        "name": "Chicago Bears",
+        "price": 1.95,
+        "point": 3.5
+       }
+      ]
+     },
+     {
+      "key": "totals",
+      "last_update": "2026-10-31T18:00:00Z",
+      "outcomes": [
+       {
+        "name": "Over",
+        "price": 1.91,
+        "point": 44.5
+       },
+       {
+        "name": "Under",
+        "price": 1.91,
+        "point": 44.5
+       }
+      ]
+     }
+    ]
+   }
+  ]
+ }
+]

@@ -52,3 +52,14 @@ def mk():
         )
 
     return make
+
+
+@pytest.fixture
+def load():
+    import json
+    from pathlib import Path
+
+    def _load(name):
+        return json.loads((Path(__file__).parent / "fixtures" / name).read_text())
+
+    return _load
