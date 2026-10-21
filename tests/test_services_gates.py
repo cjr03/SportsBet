@@ -36,7 +36,7 @@ async def test_cfbd_500_keeps_nfl_gate_and_gates_cfb(services_mocked, monkeypatc
     assert GATED_NFL.gated
     assert svc.gates[("nfl", "ml")] is True and svc.gates[("nfl", "spread")] is True
     assert all(svc.gates[("cfb", m)] for m in ("ml", "spread", "total"))  # failed league fails closed
-    assert any(k == "error" and "gate cfb" in m for k, m in out)
+    assert any(k == "error" and "College football" in m for k, m in out)
     assert svc._get("gates") is None  # a result missing a league is not cached
     assert not svc.gates_complete
 
@@ -147,7 +147,7 @@ async def test_nflverse_refresh_refits_gates_when_model_appears(services_mocked)
     out = await svc.run_job(Job("nflverse_refresh"), NOW)
     assert not [ln for ln in out if ln[0] == "error"], out
     assert svc.gates[("nfl", "ml")] is True
-    assert any("gate nfl" in m for _, m in out)
+    assert any("NFL spreads/moneylines" in m for _, m in out)
 
 
 async def test_fits_and_caps_reach_the_snapshot(services_mocked):
@@ -162,3 +162,42 @@ async def test_fits_and_caps_reach_the_snapshot(services_mocked):
     snap = svc.snapshot(NOW)
     assert snap.blend_fits[("nfl", "spread")] == (0.5, 0.05)
     assert snap.disagree_caps == {"nfl": 4.5, "cfb": 8.0}
+
+
+JARGON = ("gate", "b_model", "±", "->", "observe-only", "backtest")
+
+
+async def test_gate_log_lines_are_plain_english(services_mocked):
+    svc = services_mocked(cfbd_api_key="")
+    svc.nfl_model = object()
+    stub_nfl_backtest(svc)
+
+    async def totals(start, end, now):
+        raise ValueError("no nfl totals history for 2024-2026")
+
+    svc.backtest_totals = totals
+    out = await svc.fit_gates(NOW)
+    msgs = [m for _, m in out]
+    nfl = next(m for m in msgs if m.startswith("NFL spreads/moneylines"))
+    assert "checked on 600 past games" in nfl
+    assert "not yet trusted, bets are shown but not texted" in nfl
+    tot = next(m for m in msgs if m.startswith("NFL over/unders"))
+    assert "sportsbooks' number only" in tot
+    assert "no nfl totals history" not in tot  # raw exception text stays out of the Log tab
+    for m in msgs:
+        assert not any(j in m for j in JARGON), m
+
+
+async def test_live_gate_line_is_plain_english(services_mocked):
+    svc = services_mocked(cfbd_api_key="")
+    live = BlendFit(a=0.0, b_model=0.5, b_market=0.5, b_model_se=0.05, n=600)
+
+    async def backtest(league, start, end, now):
+        return live, {"n": live.n}
+
+    svc.backtest = backtest
+    await svc.fit_gates(NOW - timedelta(days=7))
+    out = await svc.fit_gates(NOW)
+    nfl = next(m for _, m in out if m.startswith("NFL spreads/moneylines"))
+    assert "trusted, bets are texted" in nfl
+    assert not any(j in nfl for j in JARGON), nfl

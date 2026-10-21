@@ -1,6 +1,7 @@
 """Wires settings, db, clients, models, notifier and scheduler together; runs startup and fetch jobs."""
 import asyncio
 import json
+import logging
 import sqlite3
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, replace
@@ -199,6 +200,21 @@ HYPERPARAMS = {
            f"prior 0.6/0.25/0.15, market share={cfb_models.W_MARKET}: hand-set from brief1 §5, not tuned",
     "sigma": "Normal 13 (NFL) / 15.75 (CFB); NFL uses the empirical close-residual model once >= 500 residuals",
 }
+
+
+_log = logging.getLogger(__name__)
+_GATE_LABEL = {"nfl": "NFL spreads/moneylines", "cfb": "College football bets"}
+
+
+def _gate_label(league: str) -> str:
+    return _GATE_LABEL.get(league, f"{league.upper()} bets")
+
+
+def _gate_line(label: str, r: dict) -> str:
+    """Plain-English gate summary for the Log tab; b_model/se stay in the stored JSON only."""
+    verdict = ("not yet trusted, bets are shown but not texted" if r["gated"]
+               else "trusted, bets are texted")
+    return f"{label}: model checked on {r['n']} past games; {verdict}{_gate_detail(r)}"
 
 
 def _gate_detail(r: dict) -> str:
@@ -639,7 +655,7 @@ class Services:
         if (stored and not force and set(stored["leagues"]) >= set(spans)
                 and now - datetime.fromisoformat(stored["fitted_at"]) < GATE_REFIT):
             results = stored["leagues"]
-            out = [("info", f"gates: cached from {stored['fitted_at'][:10]}")]
+            out = [("info", f"Model checks: using results from {stored['fitted_at'][:10]}")]
             closed: set[str] = set()
         else:
             prev = (stored or {}).get("leagues", {})
@@ -651,13 +667,17 @@ class Services:
                 except ValueError as e:
                     if self._league_model(league) is not None:
                         closed.add(league)
-                        out.append(("info", f"gate {league}: {e} - observe-only until a backtest runs"))
+                        _log.info("gate %s: %s", league, e)
+                        out.append(("info", f"{_gate_label(league)}: no past games to check the model on yet, "
+                                            "so bets are shown but not texted"))
                     else:
-                        out.append(("info", f"gate {league}: no backtest history - not gated"))
+                        out.append(("info", f"{_gate_label(league)}: no model or past games yet, nothing to check"))
                     continue
                 except Exception as e:  # noqa: BLE001 - one league's failure must not ungate the others
                     closed.add(league)
-                    out.append(("error", f"gate {league}: backtest failed ({e}) - observe-only"))
+                    _log.warning("gate %s: backtest failed: %r", league, e)
+                    out.append(("error", f"{_gate_label(league)}: could not check the model on past games "
+                                         "(data download failed), so bets are shown but not texted"))
                     continue
                 results[league] = self._gate_result(fit, metrics, prev.get(league), recent)
                 if league == "nfl":
@@ -666,7 +686,9 @@ class Services:
                         results[league]["total"] = self._gate_result(
                             tfit, tm, prev.get(league, {}).get("total"), recent)
                     except Exception as e:  # noqa: BLE001 - totals stay market-only and gated
-                        out.append(("info", f"gate nfl totals: {e} - totals use the market only"))
+                        _log.info("gate nfl totals: %r", e)
+                        out.append(("info", "NFL over/unders: could not test our totals model on past games "
+                                            "yet, so totals use the sportsbooks' number only"))
             if set(results) >= set(spans):
                 self._put("gates", json.dumps({"fitted_at": now.isoformat(), "leagues": results}))
         self.gates_complete = set(results) >= set(spans)
@@ -687,8 +709,9 @@ class Services:
         gates.update({(lg, m): True for lg in closed for m in ("ml", "spread", "total")})
         self.gates, self.blend_fits, self.disagree_caps = gates, fits, caps
         for lg, r in results.items():
-            out.append(("info", f"gate {lg}: n={r['n']} b_model={r['b_model']:.2f}±{r['se']:.2f} "
-                                f"-> {'observe-only' if r['gated'] else 'live'}{_gate_detail(r)}"))
+            out.append(("info", _gate_line(_gate_label(lg), r)))
+            if r.get("total") is not None:
+                out.append(("info", _gate_line("NFL over/unders", r["total"])))
         return out
 
     @staticmethod
