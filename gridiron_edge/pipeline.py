@@ -134,8 +134,12 @@ def kalshi_tie_rule(m: KalshiMarket) -> str | None:
     return None
 
 
-def _game_fair(m: KalshiMarket, g: Game, snap: Snapshot, s: Settings) -> GameFair | None:
-    """Blended P(YES) for a Kalshi game market, or None when inputs are missing or CFB agrees."""
+def _game_fair(m: KalshiMarket, g: Game, snap: Snapshot, s: Settings,
+               cache: dict | None = None) -> GameFair | None:
+    """Blended P(YES) for a Kalshi game market, or None when inputs are missing or CFB agrees.
+
+    cache: shared across one scan so each game's implied mean is solved once, not per Kalshi strike.
+    """
     mtype = m.market_type
     if mtype != "total" and m.team not in (g.home, g.away):
         return None
@@ -145,16 +149,24 @@ def _game_fair(m: KalshiMarket, g: Game, snap: Snapshot, s: Settings) -> GameFai
     quotes = [q for q in snap.quotes if q.game_id == g.game_id]
     model = _margin_model(snap, g.league, mtype)
     kw = {"now": snap.now, "stale_seconds": s.stale_seconds}
+    cache = {} if cache is None else cache
+
+    def market_mean(market: str, mm: MarginModel):
+        key = (g.game_id, market)
+        if key not in cache:
+            cache[key] = implied_market_mean(quotes, market, mm, **kw)
+        return cache[key]
+
     if mtype == "ml":
         fp = fair_price(quotes, "h2h", None, **kw)
         if fp is None:
             return None
         p_mkt, method = (fp.p if home_side else 1.0 - fp.p), "h2h"
-        im = implied_market_mean(quotes, "spreads", _margin_model(snap, g.league, "spread"), **kw)
+        im = market_mean("spreads", _margin_model(snap, g.league, "spread"))
         mkt_mean = None if im is None else im.mean
     else:
         market = "totals" if mtype == "total" else "spreads"
-        im = implied_market_mean(quotes, market, model, **kw)
+        im = market_mean(market, model)
         mkt_mean = None if im is None else im.mean
         threshold = m.line if (mtype == "total" or home_side) else -m.line
         direct = _sharp_at(quotes, market, threshold, model, kw)
@@ -234,13 +246,14 @@ def _kalshi_rec(kind: Literal["kalshi_game", "kalshi_prop"], m: KalshiMarket, g:
 def kalshi_game_candidates(snap: Snapshot, s: Settings) -> list[Recommendation]:
     """Best Kalshi ml/spread/total recommendation per game (unsized: stake 0, provisional qty)."""
     best: dict[str, tuple[KalshiMarket, Game, _Side, GameFair]] = {}
+    cache: dict = {}
     for m in snap.kalshi:
         if m.market_type not in _GAME_TYPES:
             continue
         g = _upcoming(snap, m.game_id)
         if g is None or g.game_id in snap.open_game_ids:  # one market per game, already held
             continue
-        gf = _game_fair(m, g, snap, s)
+        gf = _game_fair(m, g, snap, s, cache)
         if gf is None:
             continue
         if gf.fair.source == "median" and s.median_fair_policy == "block":

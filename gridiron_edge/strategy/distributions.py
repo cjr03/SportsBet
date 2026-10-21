@@ -138,7 +138,7 @@ def p_cover(model: MarginModel, mean: float, x: float) -> float:
 def implied_mean(model: MarginModel, x: float, p: float, width: float = 80.0) -> float | None:
     """Mean whose push-aware P(value > x | no push) equals p, or None when no mean reproduces it."""
     try:
-        return float(brentq(lambda mu: p_cover(model, mu, x) - p, x - width, x + width, xtol=1e-6))
+        return float(brentq(lambda mu: p_cover(model, mu, x) - p, x - width, x + width, xtol=1e-4))
     except ValueError:
         return None
 

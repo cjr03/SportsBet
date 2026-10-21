@@ -410,3 +410,13 @@ def test_cfb_spread_model_falls_back_to_cfb(mk, settings):
     special = NormalModel(14.0)
     snap = snap_with(margin_models={**snap.margin_models, "cfb_spread": special})
     assert _margin_model(snap, "cfb", "spread") is special
+
+
+def test_game_fair_solves_each_implied_mean_once_per_scan(mk, settings, monkeypatch):
+    import gridiron_edge.pipeline as pl_mod
+    calls = []
+    real = pl_mod.implied_market_mean
+    monkeypatch.setattr(pl_mod, "implied_market_mean", lambda *a, **k: calls.append(a[1]) or real(*a, **k))
+    ladder = [mk(f"E1-H{x}", "E1", "spread", "H1", line=x, yes_ask=0.5, game_id="g1") for x in (1.5, 4.5, 7.5)]
+    kalshi_game_candidates(snap_with(quotes=spreads("g1", -3.0), kalshi=ladder), settings)
+    assert calls == ["spreads"]
