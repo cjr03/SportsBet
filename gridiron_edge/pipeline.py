@@ -268,6 +268,8 @@ class GameFair:
     tie_prob: float = 0.0
     mkt_yes: float | None = None  # market-only P(YES)/P(NO), tie-adjusted like p_yes/p_no
     mkt_no: float | None = None
+    # points between the strike and the sportsbook line it was priced from (0: a quote at the strike)
+    shift: float = 0.0
 
     def market_side(self, side: str) -> float:
         """Market-only P(this side wins), for calibration baselines and CLV."""
@@ -280,7 +282,7 @@ class GameFair:
                 "p_market": round(self.p_market, 4),
                 "p_model": None if self.p_model is None else round(self.p_model, 4),
                 "model_weight": round(self.model_weight, 4), "method": self.method,
-                "tie_prob": self.tie_prob}
+                "tie_prob": self.tie_prob, "book_shift": self.shift}
 
 
 class _MarketFair(NamedTuple):
@@ -288,11 +290,13 @@ class _MarketFair(NamedTuple):
     mkt_mean: float | None
     fair: FairPrice
     method: str
+    shift: float = 0.0  # |strike - the quoted line it was priced from|, in points
 
 
 def _sharp_at(quotes: list[Quote], market: str, threshold: float, model: MarginModel,
-              kw: dict) -> tuple[float, FairPrice, str] | None:
-    """P(home margin / total > threshold) straight from a sharp quote at the line or a half point away.
+              kw: dict) -> tuple[float, FairPrice, str, float] | None:
+    """(P(home margin / total > threshold), fair, method, quoted line) straight from a sharp quote at
+    the line or a half point away.
 
     A quote exactly at a half-point threshold is the answer. A quote at an adjacent integer line is
     P(cover | no push) there, so it goes through the push-aware inversion before pricing.
@@ -302,7 +306,7 @@ def _sharp_at(quotes: list[Quote], market: str, threshold: float, model: MarginM
         return fp if fp is not None and fp.tier < TIER_RANK["median"] else None
 
     if threshold != math.floor(threshold) and (fp := at(threshold)) is not None:
-        return fp.p, fp, "exact line"
+        return fp.p, fp, "exact line", threshold
     best: tuple[int, float, float, FairPrice] | None = None
     for x in (threshold - 0.5, threshold + 0.5):
         if (fp := at(x)) is not None and (best is None or (fp.tier, abs(fp.p - 0.5)) < best[:2]):
@@ -311,7 +315,7 @@ def _sharp_at(quotes: list[Quote], market: str, threshold: float, model: MarginM
         return None
     _, _, x, fp = best
     mean = implied_mean(model, x, fp.p)
-    return None if mean is None else (model.p_greater(mean, threshold), fp, "adjacent line")
+    return None if mean is None else (model.p_greater(mean, threshold), fp, "adjacent line", x)
 
 
 def kalshi_tie_rule(m: KalshiMarket) -> str | None:
@@ -359,13 +363,15 @@ def _market(m: KalshiMarket, g: Game, snap: Snapshot, s: Settings,
         threshold = m.line if (mtype == "total" or home_side) else -m.line
         direct = _sharp_at(quotes, market, threshold, model, kw)
         if direct is not None:
-            p_a, fp, method = direct
+            p_a, fp, method, book_line = direct
             p_mkt = p_a if (mtype == "total" or home_side) else 1.0 - p_a
         elif im is not None:
             fp, method = im.fair, "implied mean"
+            book_line = -im.point if market == "spreads" else im.point  # home-margin / total units
             p_mkt = _p_yes(mtype, model, im.mean, m.line, home_side)
         else:
             return None
+        return _MarketFair(p_mkt, mkt_mean, fp, method, abs(threshold - book_line))
     return _MarketFair(p_mkt, mkt_mean, fp, method)
 
 
@@ -386,7 +392,7 @@ def _game_fair(m: KalshiMarket, g: Game, snap: Snapshot, s: Settings,
     mkt = _market(m, g, snap, s, cache)
     if mkt is None:
         return None
-    p_mkt, mkt_mean, fp, method = mkt
+    p_mkt, mkt_mean, fp, method, shift = mkt
     mtype = m.market_type
     pred = snap.predictions.get(g.game_id)
     model_mean = None if pred is None else (pred.mean_total if mtype == "total" else pred.mean_margin)
@@ -418,7 +424,7 @@ def _game_fair(m: KalshiMarket, g: Game, snap: Snapshot, s: Settings,
 
     p_yes, p_no = sides(p)
     mkt_yes, mkt_no = sides(p_mkt)
-    return GameFair(p_yes, p_no, p_mkt, p_model, w, fp, method, tie, mkt_yes, mkt_no)
+    return GameFair(p_yes, p_no, p_mkt, p_model, w, fp, method, tie, mkt_yes, mkt_no, shift)
 
 
 def game_p_yes_w(m: KalshiMarket, g: Game, snap: Snapshot, s: Settings) -> tuple[float, float] | None:
@@ -476,9 +482,53 @@ def _model_gated(snap: Snapshot, league: str) -> bool:
     return not snap.projector_live
 
 
+# Kalshi game strikes away from the book line: the Normal/empirical curve prices them by translating
+# the book's line, and its tail is the weakest part of it. Kalshi's centre strike matches Pinnacle, so
+# the Kalshi mid is a strong prior once we leave the quoted line.
+GAME_MAX_GAP = 0.08  # our number this far from a liquid Kalshi mid is our error, not an edge
+
+
+def game_max_shift(league: str, s: Settings) -> float:
+    """Furthest (pts) a Kalshi game strike is priced from the sportsbook line it was translated from."""
+    return s.game_max_shift_nfl if league == "nfl" else s.game_max_shift_cfb
+
+
+GAME_QUOTED_SHIFT = 0.5  # at most this far from a sharp quote, the strike is priced by that quote
+
+
+def _game_weight(shift: float, max_shift: float) -> float:
+    """Share of our number kept against the Kalshi mid: all of it at (or a half point from) a quoted
+    sharp line, exp(-shift / max_shift) once translated (37% at the limit)."""
+    return 1.0 if shift <= GAME_QUOTED_SHIFT else math.exp(-shift / max_shift)
+
+
+def _game_guard(m: KalshiMarket, league: str, gf: GameFair, s: Settings) -> tuple[float, float, dict] | None:
+    """(P(YES), P(NO), why extras) after the far-strike guards, or None when the idea is dropped.
+
+    Strikes further than game_max_shift from the book line are not priced. A translated strike needs
+    a liquid Kalshi mid within GAME_MAX_GAP of our number (each side is a worst case, so the centre is
+    compared), and is then shrunk toward that mid by _game_weight. A strike at (or a half point from)
+    a quoted sharp line keeps its number.
+    """
+    max_shift = game_max_shift(league, s)
+    if gf.shift > max_shift:
+        return None
+    if gf.shift <= GAME_QUOTED_SHIFT:
+        return gf.p_yes, gf.p_no, {}
+    mid = _kalshi_mid(m)
+    if mid is None or abs((gf.p_yes + 1 - gf.p_no) / 2 - mid) > GAME_MAX_GAP:
+        return None
+    w = _game_weight(gf.shift, max_shift)
+    p_yes, p_no = _shrink_to_market(gf.p_yes, gf.p_no, m, w)
+    return p_yes, p_no, {"kalshi_mid": mid, "weight": round(w, 4)}
+
+
 def kalshi_game_candidates(snap: Snapshot, s: Settings) -> list[Recommendation]:
-    """Best Kalshi ml/spread/total recommendation per game (unsized: stake 0, provisional qty)."""
-    best: dict[str, tuple[KalshiMarket, Game, _Side, GameFair]] = {}
+    """Best Kalshi ml/spread/total recommendation per game (unsized: stake 0, provisional qty).
+
+    Strikes away from the book line go through _game_guard (translation limit, Kalshi-mid gap check
+    and shrink)."""
+    best: dict[str, tuple[KalshiMarket, Game, _Side, GameFair, dict]] = {}
     cache: dict = {}
     for m in snap.kalshi:
         if m.market_type not in _GAME_TYPES:
@@ -491,12 +541,18 @@ def kalshi_game_candidates(snap: Snapshot, s: Settings) -> list[Recommendation]:
             continue
         if gf.fair.source == "median" and s.median_fair_policy == "block":
             continue
-        sd = _best_side(m, gf.p_yes, snap, s, p_no=gf.p_no)
+        guarded = _game_guard(m, g.league, gf, s)
+        if guarded is None:
+            continue
+        p_yes, p_no, extra = guarded
+        sd = _best_side(m, p_yes, snap, s, p_no=p_no)
         if sd is not None and (g.game_id not in best or sd.ev > best[g.game_id][2].ev):
-            best[g.game_id] = (m, g, sd, gf)
+            if extra:
+                extra = {**extra, "p_ours": gf.p_yes if sd.side == "yes" else gf.p_no}
+            best[g.game_id] = (m, g, sd, gf, extra)
 
     out = []
-    for m, g, sd, gf in best.values():
+    for m, g, sd, gf, extra in best.values():
         desc = contract_text(m.market_type, m.team, m.line, g.away, g.home, g.league)
         tie = m.market_type == "ml" and ml_tie_risk(m, g.league)
         # the gate judges the model: a market-only edge (w=0) may go live when market_only_live is on
@@ -506,8 +562,8 @@ def kalshi_game_candidates(snap: Snapshot, s: Settings) -> list[Recommendation]:
         observe = (snap.paused.get((g.league, m.market_type), False) or gated
                    or (gf.fair.source == "median" and s.median_fair_policy == "observe"))
         p_mkt = gf.market_side(sd.side)
-        out.append(_kalshi_rec("kalshi_game", m, g, sd, desc, snap, m.market_type, tie, gf.why(), observe,
-                               p_mkt=p_mkt))
+        out.append(_kalshi_rec("kalshi_game", m, g, sd, desc, snap, m.market_type, tie, {**gf.why(), **extra},
+                               observe, p_mkt=p_mkt))
     return out
 
 
@@ -1016,6 +1072,11 @@ def _middle_rec(a: Arb, snap: Snapshot, s: Settings) -> Recommendation | None:
     mean = (fair_total_mean if mtype == "total" else fair_spread_mean)(quotes, now=snap.now)
     if mean is None:
         return None
+    # every leg's strike within the translation limit of the book line (the expected margin / total)
+    for leg in a.legs:
+        x = leg.line if (mtype == "total" or leg.team == g.home) else -(leg.line or 0.0)
+        if leg.line is None or abs(x - mean) > game_max_shift(g.league, s):
+            return None
     ps = []
     for leg in a.legs:
         p_yes = _p_yes(mtype, model, mean, leg.line, leg.team == g.home)

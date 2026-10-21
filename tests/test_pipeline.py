@@ -113,10 +113,15 @@ def test_spread_uses_distribution(mk, settings):
 
 
 def test_away_spread_uses_negated_margin(mk, settings):
-    m = mk("E1-A13", "E1", "spread", "A1", line=2.5, yes_ask=0.20, no_ask=0.81, game_id="g1")
+    # "A1 win by 3+" against home -3: 5.5 points from the book line, so shrunk toward the Kalshi mid
+    m = mk("E1-A13", "E1", "spread", "A1", line=2.5, yes_ask=0.27, no_ask=0.74, game_id="g1")
+    settings = replace(settings, kalshi_min_edge=0.0)
     recs = kalshi_game_candidates(snap_with(quotes=spreads("g1", -3.0), kalshi=[m]), settings)
     assert len(recs) == 1
-    assert recs[0].legs[0].p_fair == pytest.approx(NormalModel(NFL_SPREAD_SIGMA).p_greater(-3.0, 2.5), abs=1e-3)
+    ours = NormalModel(NFL_SPREAD_SIGMA).p_greater(-3.0, 2.5)
+    why = recs[0].why
+    assert why["p_ours"] == pytest.approx(ours, abs=1e-3) and why["book_shift"] == 5.5
+    assert recs[0].legs[0].p_fair == pytest.approx(why["weight"] * ours + (1 - why["weight"]) * 0.265, abs=1e-3)
 
 
 def test_prediction_blends_into_probability(mk, settings):

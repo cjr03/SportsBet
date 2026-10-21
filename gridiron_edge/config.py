@@ -48,6 +48,10 @@ class Settings:
     cfb_max_disagree: float = 9.0
     qb_veto: bool = True  # NFL: no model weight when the depth-chart QB1 is not last game's starter
     market_only_live: bool = False  # a gated league's market-only (no model) edges are texted, not observe-only
+    # Kalshi game strikes are priced off the book line by the margin/total curve no further than this
+    # (pts); beyond it the curve's tail is a guess, not a price
+    game_max_shift_nfl: float = 7.0
+    game_max_shift_cfb: float = 10.0
     pp_margin_market: float = 0.02
     pp_margin_model: float = 0.035
     arb_fraction: float = 0.10
