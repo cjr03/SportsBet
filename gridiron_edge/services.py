@@ -202,14 +202,15 @@ HYPERPARAMS = {
 
 
 def _gate_detail(r: dict) -> str:
-    """A plain summary of a gate fit: simulated ROI, early/late season, why it is not live."""
+    """A plain-English summary of a gate fit: simulated return, early vs later season, why not live yet."""
     parts = []
     if "sim_roi" in r:
-        parts.append(f"sim ROI {r['sim_roi']:+.1%} on {r.get('sim_bets', 0)} bets after fees")
+        parts.append(f"simulated return {r['sim_roi']:+.1%} on {r.get('sim_bets', 0)} bets after Kalshi fees")
     if "early" in r and "late" in r:
-        parts.append(f"ATS early {r['early']['ats_pct']:.1%} / late {r['late']['ats_pct']:.1%}")
+        parts.append(f"right {r['early']['ats_pct']:.0%} of the time in the first 4 weeks, "
+                     f"{r['late']['ats_pct']:.0%} after")
     if r.get("passed") and r.get("gated"):
-        parts.append(f"passed {r.get('streak', 0)} of {GATE_PASSES} refits needed")
+        parts.append(f"passed {r.get('streak', 0)} of the {GATE_PASSES} weekly checks needed to go live")
     return f" ({'; '.join(parts)})" if parts else ""
 
 
@@ -378,13 +379,14 @@ class Services:
         try:
             qb1 = await asyncio.to_thread(self.nflverse.depth_chart_qb1, season)
         except Exception as e:  # noqa: BLE001 - the disagreement cap still guards these games
-            return [("info", f"QB change check unavailable ({type(e).__name__}); using the disagreement cap only")]
+            return [("info", f"Could not check NFL starting quarterbacks ({type(e).__name__}); "
+                             "games where our number is far from the betting market still use the market only")]
         teams = qb_changes(sched, qb1, now.date())
         self.qb_changes = {self.teams.canonical("nfl", t) or t for t in teams}
         if not self.qb_changes:
             return []
-        return [("info", f"QB change since last game: {', '.join(sorted(self.qb_changes))} - "
-                         "those games use the betting market only")]
+        return [("info", f"New starting quarterback since last game: {', '.join(sorted(self.qb_changes))} - "
+                         "their games use the betting market's number only")]
 
     def _latest_teams(self, weekly: pl.DataFrame) -> dict[str, str]:
         """Ruling R2: each player's latest team from the weekly stats."""

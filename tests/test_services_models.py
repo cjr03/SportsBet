@@ -144,7 +144,7 @@ async def test_qb_change_vetoes_model_for_that_game(services_mocked):
     svc = services_mocked(cfbd_api_key="")
     svc.nflverse = Nflverse()
     out = await svc._load_nflverse(NOW)
-    assert svc.qb_changes == {"KC"} and any("QB change" in m for _, m in out)
+    assert svc.qb_changes == {"KC"} and any("New starting quarterback" in m for _, m in out)
     svc.nfl_model = NflRatings({"KC": 3.0, "BUF": 2.0, "MIA": 0.0}, 2.0, {}, {})
     kc = _game("nfl", "KC", "MIA", NOW + timedelta(days=2))
     ok = _game("nfl", "MIA", "BUF", NOW + timedelta(days=2))
