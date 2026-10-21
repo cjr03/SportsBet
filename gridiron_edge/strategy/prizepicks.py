@@ -112,13 +112,14 @@ _RHO_CLIP = 0.95
 
 
 def corr_sign(a: Pick, b: Pick) -> int:
-    """Sign of the correlation between two picks' hits: +1 same team leaning the same way (a QB
-    and his own receiver included), -1 opposite directions in one game, 0 otherwise."""
+    """Sign of the correlation between two picks' hits: 0 across games; in one game +1 when both lean
+    the same way (a QB and his own receiver, or both QBs in a shootout), -1 opposite ways.
+
+    Every same-game pair gets a sign so the robust set {-|r|, 0, +|r|} prices all of them; signs of
+    the form side_i * side_j also keep 3-pick blocks a valid correlation matrix."""
     if a.game_id != b.game_id:
         return 0
-    if a.side != b.side:
-        return -1
-    return 1 if a.team == b.team else 0
+    return 1 if a.side == b.side else -1
 
 
 def _phi2(x: float, y: float, r: float) -> float:

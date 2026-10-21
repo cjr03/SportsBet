@@ -1,3 +1,5 @@
+from collections import Counter
+
 import pytest
 
 from gridiron_edge.strategy.prizepicks import (
@@ -136,8 +138,19 @@ def test_corr_sign():
     assert corr_sign(qb, wr) == 1  # same team, same direction (a QB and his own receiver)
     assert corr_sign(qb, _pk("WR", "KC", "g", 0.6, "under")) == -1  # opposite directions
     assert corr_sign(qb, _pk("X", "BUF", "g", 0.6, "under")) == -1
-    assert corr_sign(qb, _pk("X", "BUF", "g", 0.6)) == 0
+    assert corr_sign(qb, _pk("X", "BUF", "g", 0.6)) == 1  # opposing players, same way (a shootout)
+    assert corr_sign(_pk("A", "KC", "g", 0.6, "under"), _pk("B", "BUF", "g", 0.6, "under")) == 1
     assert corr_sign(qb, _pk("X", "KC", "g2", 0.6)) == 0  # different games are independent
+
+
+def test_cross_team_same_game_pair_is_penalized():
+    """QB-A MORE + QB-B MORE in one game must not be priced as independent (it was, so the builder
+    leaned towards cross-team same-game pairs)."""
+    legs = [_pk("QB1", "KC", "g", 0.62), _pk("QB2", "BUF", "g", 0.62), _pk("C", "MIA", "h", 0.62)]
+    ind = entry_ev([p.p for p in legs], (3, "power"))
+    own = [_pk("QB1", "KC", "g", 0.62), _pk("WR1", "KC", "g", 0.62), _pk("C", "MIA", "h", 0.62)]
+    assert robust_ev(legs, (3, "power"), PAYOUTS, 0.3) < ind - 1e-4
+    assert robust_ev(legs, (3, "power"), PAYOUTS, 0.3) == pytest.approx(robust_ev(own, (3, "power"), PAYOUTS, 0.3))
 
 
 def test_mvn_cdf_matches_scipy():
@@ -188,4 +201,5 @@ def test_greedy_never_beats_brute_with_correlation(settings):
             continue
         legs = greedy[0]
         assert len({p.team for p in legs}) >= 2 and len({p.player for p in legs}) == len(legs)
+        assert max(Counter(p.game_id for p in legs).values()) <= settings.pp_max_per_game
         assert brute is not None and greedy[3] <= brute[3] + 1e-9
