@@ -1,9 +1,11 @@
 """Modal screens."""
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, Static
 
+from gridiron_edge import describe as d
 from gridiron_edge.types import Recommendation
 
 
@@ -12,23 +14,24 @@ class ConfirmScreen(ModalScreen[tuple[float | None, int | None] | None]):
 
     BINDINGS = [("escape", "cancel", "Cancel")]
 
-    def __init__(self, rec: Recommendation):
+    def __init__(self, rec: Recommendation, names: d.Names = d.DEFAULT_NAMES):
         super().__init__()
         self.rec = rec
+        self.names = names
 
     def compose(self) -> ComposeResult:
-        legs = "\n".join(f"{leg.description} ({leg.side}) @ {leg.price:.2f}"
-                         for leg in self.rec.legs)
+        r = self.rec
+        price = "" if r.kind == "pp_entry" else f" at {d.price_text(r)}"
         with Vertical(id="confirm-box"):
-            yield Label(f"Confirm #{self.rec.id}  stake ${self.rec.stake_cents / 100:,.2f}")
-            yield Static(legs, id="legs")
-            yield Label("Price (0-1)")
-            yield Input(value=f"{self.rec.legs[0].price:.2f}", id="price")
-            yield Label("Quantity")
-            yield Input(value="" if self.rec.qty is None else str(self.rec.qty), id="qty")
+            yield Label(f"Did you place bet idea #{r.id}?  Bet {d.money(r.stake_cents)}{price}")
+            yield Static(Text(d.bet_text(r, self.names)), id="legs")
+            yield Label("Price you got, in dollars (e.g. 0.47)")
+            yield Input(value=f"{r.legs[0].price:.2f}", id="price")
+            yield Label("How many contracts")
+            yield Input(value="" if r.qty is None else str(r.qty), id="qty")
             yield Static("", id="error")
             with Horizontal(id="buttons"):
-                yield Button("Confirm", id="ok", variant="success")
+                yield Button("Yes, placed", id="ok", variant="success")
                 yield Button("Cancel", id="cancel")
 
     def on_mount(self) -> None:
@@ -71,4 +74,33 @@ class ConfirmScreen(ModalScreen[tuple[float | None, int | None] | None]):
             self._error(str(e))
 
     def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class WhyScreen(ModalScreen[None]):
+    """'Why this bet?': plain-English reasons; the last line holds the internal details."""
+
+    BINDINGS = [("escape", "close", "Close"), ("d", "close", "Close"), ("q", "close", "Close")]
+
+    def __init__(self, lines: list[str]):
+        super().__init__()
+        self.lines = lines
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="why-box"):
+            yield Label("Why this bet?", id="why-title")
+            yield Static(Text("\n".join(self.lines[:-1])), id="why-body")
+            yield Static(Text(self.lines[-1] if self.lines else ""), id="why-details")
+            with Horizontal(id="buttons"):
+                yield Button("Close", id="close")
+
+    @property
+    def text(self) -> str:
+        return "\n".join(self.lines)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.dismiss(None)
+
+    def action_close(self) -> None:
         self.dismiss(None)

@@ -9,32 +9,61 @@ $pending: #f59e0b;
 Screen {
     background: $bg;
     color: #e2e8f0;
-    layout: grid;
-    grid-size: 3;
-    grid-columns: 2fr 3fr 2fr;
-    grid-rows: auto 1fr auto;
+    layout: vertical;
 }
-
-#top {
-    column-span: 3;
-    height: auto;
-}
-
-#left, #centre { height: 1fr; }
-BalanceChart, OpportunityBoard, ScoresPanel { height: 1fr; }
-QuotaBar { width: auto; }
 
 BankrollHeader {
     width: 1fr;
-    height: auto;
+    height: 1;
     padding: 0 1;
     background: $surface;
     color: $accent;
     text-style: bold;
 }
 
+#tabs { height: 1fr; }
+#tabs TabPane { padding: 0; }
+#tabs Tabs { background: $bg; }
+#tabs Tab.-active { color: $accent; text-style: bold; }
+
+#home { layout: vertical; }
+#place-box { height: 3fr; }
+#open-box { height: 2fr; }
+#place-box, #open-box {
+    background: $surface;
+    border: round $accent 40%;
+    border-title-color: $accent;
+    border-title-style: bold;
+}
+#place-box:focus-within { border: round $accent; }
+#open-box:focus-within { border: round $accent; }
+PlaceNowList, OpenBetsList {
+    height: 1fr;
+    background: $surface;
+    border: none;
+    padding: 0;
+}
+PlaceNowList > .option-list--option { padding: 0 1; }
+OpenBetsList > .option-list--option { padding: 0 1; }
+.empty {
+    height: auto;
+    padding: 1 2;
+    color: #94a3b8;
+}
+
+#performance { layout: vertical; }
+BalanceChart { height: 1fr; }
+ScoresPanel, EventLog { height: 1fr; }
+QuotaBar { width: 1fr; }
+
+#status {
+    height: 1;
+    padding: 0 1;
+    color: #94a3b8;
+    background: $bg;
+}
+
 #command-bar {
-    column-span: 3;
     height: auto;
 }
 
@@ -43,7 +72,7 @@ BankrollHeader {
     border: round $accent 40%;
 }
 
-BalanceChart, KpiTiles, QuotaBar, OpportunityBoard, ScoresPanel, EventLog {
+BalanceChart, KpiTiles, QuotaBar, ScoresPanel, EventLog {
     background: $surface;
     border: round $accent 40%;
 }
@@ -72,6 +101,7 @@ ConfirmScreen {
 
 #confirm-box {
     width: 60;
+    max-width: 96%;
     height: auto;
     padding: 1 2;
     background: $surface;
@@ -81,4 +111,23 @@ ConfirmScreen {
 #confirm-box Input { margin-bottom: 1; }
 #error { color: $loss; height: auto; }
 #buttons { height: auto; align-horizontal: right; }
+
+WhyScreen {
+    align: center middle;
+    background: $bg 70%;
+}
+
+#why-box {
+    width: 90;
+    max-width: 96%;
+    height: auto;
+    max-height: 90%;
+    padding: 1 2;
+    background: $surface;
+    border: round $accent;
+}
+
+#why-title { color: $accent; text-style: bold; margin-bottom: 1; }
+#why-body { height: auto; }
+#why-details { height: auto; color: #64748b; margin-top: 1; }
 #buttons Button { margin-left: 2; }

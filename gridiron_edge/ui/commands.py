@@ -26,6 +26,28 @@ COMMAND_WORDS: list[str] = [
     "set", "venues", "backtest", "fit blend", "report", "drift reset", "help",
 ]
 
+# (what to type, what it does) for the help command, in plain English
+HELP: list[tuple[str, str]] = [
+    ("confirm <id> [price] [contracts]", "you placed bet idea <id>; record it (price/contracts if different)"),
+    ("skip <id>", "you are not placing bet idea <id>"),
+    ("deposit <amount> / withdraw <amount>", "add money to or take money out of the bankroll"),
+    ("scan [games|props|pp|arb|all]", "look for bets now"),
+    ("refresh [nfl|cfb] [--force]", "pull fresh prices (--force also uses sportsbook credits)"),
+    ("bets [open|settled]", "list your open or finished bets"),
+    ("settle <id> <won|lost|refund> [payout]", "mark a bet as finished by hand"),
+    ('pp add "<player>" <stat> <line> <team> <game_id>', "type in a PrizePicks line yourself"),
+    ("quota", "how many free API calls are left"),
+    ("notify test|on|off", "send a test text, or turn texts on or off"),
+    ("set <setting> <value>", "change a setting"),
+    ("venues", "which betting sites are in use"),
+    ("backtest <nfl|cfb> <yyyy>-<yyyy>", "test the model on past seasons"),
+    ("fit blend", "recheck which markets our model has earned"),
+    ("report", "how the bets have done so far"),
+    ("drift reset <nfl|cfb> <ml|spread|total|prop|prizepicks> / drift reset all",
+     "turn a paused kind of bet back on after our prices fell behind the market"),
+    ("keys", "1-4 switch tabs; Down arrow picks a bet; Enter confirms, s skips, d explains it"),
+]
+
 _SETTINGS_FIELDS = {f.name for f in fields(Settings)}
 
 

@@ -1,15 +1,22 @@
-"""TUI widgets: chart, KPI tiles, quota bars, opportunity board, scores, event log, header."""
+"""TUI widgets: header, PLACE NOW / OPEN BETS lists, chart, KPI tiles, quota bars, scores, event log."""
+import math
 from datetime import datetime
 from typing import Literal
 
 from rich.text import Text
+from textual.app import ComposeResult
+from textual.binding import Binding
+from textual.containers import Vertical
 from textual.message import Message
 from textual.reactive import reactive
-from textual.widgets import DataTable, RichLog, Static, TabbedContent, TabPane
+from textual.widgets import DataTable, OptionList, RichLog, Static, TabbedContent, TabPane
+from textual.widgets.option_list import Option
 from textual_plotext import PlotextPlot
 
 from gridiron_edge.bets import report
+from gridiron_edge import describe as d
 from gridiron_edge.types import Game, Recommendation
+from gridiron_edge.ui.home import OpenBetView, place_now_cells
 
 PROFIT, LOSS, PENDING, ACCENT = "#22c55e", "#ef4444", "#f59e0b", "#22d3ee"
 _RGB = {"profit": (34, 197, 94), "loss": (239, 68, 68)}
@@ -88,6 +95,8 @@ class BalanceChart(PlotextPlot):
 
 
 class KpiTiles(Static):
+    """Performance numbers in plain English; takes whatever KPI/report dict is available."""
+
     text = ""
 
     def update_kpis(self, k: dict) -> None:
@@ -122,6 +131,7 @@ class KpiTiles(Static):
             lines.append(f"After {n} bets we are losing by more than bad luck explains")
         else:
             lines.append(f"Too few bets to tell luck from skill yet ({n} settled)")
+        lines += [str(w) for w in k.get("warnings", []) or []]  # e.g. drift warnings from the report
         self.text = "\n".join(lines)
         self.update(Text(self.text))
 
@@ -257,8 +267,8 @@ class ScoresPanel(DataTable):
 
     def set_games(self, games: list[Game],
                   bet_status: dict[str, Literal["winning", "losing", "none"]],
-                  delay_s: int | None) -> None:
-        self.border_title = (f"Scores ~{round(delay_s / 60)}m delay"
+                  delay_s: int | None, names: d.Names = d.DEFAULT_NAMES) -> None:
+        self.border_title = (f"Scores (about {round(delay_s / 60)} min behind)"
                              if delay_s is not None and delay_s >= 60 else "Scores")
         self.clear()
         self._live_keys = []
@@ -270,9 +280,12 @@ class ScoresPanel(DataTable):
             if g.status == "live":
                 state = self._live_cell(g, True)
                 self._live_keys.append(g.game_id)
+            elif g.status == "scheduled":
+                state = Text(f"{g.kickoff.astimezone(d.PT):%a} {d.clock(g.kickoff)}")
             else:
-                state = Text(g.status)
-            self.add_row(Text(f"{g.away} @ {g.home}", style=style), Text(score, style=style),
+                state = Text(g.status.replace("_", " ").capitalize())
+            matchup = f"{names.team(g.league, g.away)} at {names.team(g.league, g.home)}"
+            self.add_row(Text(matchup, style=style), Text(score, style=style),
                          state, key=g.game_id)
         self._games = {g.game_id: g for g in games}
 
@@ -298,39 +311,189 @@ class EventLog(RichLog):
     def __init__(self, **kw):
         super().__init__(wrap=True, markup=False, **kw)
         self.lines_text: list[str] = []
+        self.last_kind, self.last_msg = "", ""
+
+    LABELS = {"rec": "idea", "confirm": "placed", "settle": "settled", "api": "usage", "info": "note"}
 
     def event(self, kind: str, msg: str) -> None:
         line = Text(datetime.now().strftime("%H:%M:%S") + " ")
-        line.append(f"{kind:<8}", style=self.KIND_COLORS.get(kind, "#e2e8f0"))
+        line.append(f"{self.LABELS.get(kind, kind):<8}", style=self.KIND_COLORS.get(kind, "#e2e8f0"))
         line.append(f" {msg}")
         self.lines_text.append(line.plain)
+        self.last_kind, self.last_msg = kind, msg
         self.write(line)
 
 
 class BankrollHeader(Static):
+    """One line: bankroll, today's change, money in open bets, Odds API credits left."""
+
     shown = reactive(0.0)  # cents, animated toward target_cents
     text = ""
+    SHORTER = ((" of bankroll", ""), ("/500 left", "/500"), (" left", ""), ("Odds API", "Odds"),
+               (" in open bets", " in bets"))
 
     def __init__(self, **kw):
         super().__init__(**kw)
         self.target_cents = 0
         self.today_cents = 0
+        self.open_cents: int | None = None
+        self.odds: tuple[int | None, int] | None = None
 
     def on_mount(self) -> None:
-        self.set_interval(1.0, self._draw)
         self._draw()
 
-    def set_balance(self, cents: int, today_cents: int) -> None:
+    def set_balance(self, cents: int, today_cents: int, open_cents: int | None = None,
+                    odds: tuple[int | None, int] | None = None) -> None:
         self.target_cents = cents
         self.today_cents = today_cents
+        self.open_cents = open_cents
+        self.odds = odds
         self.animate("shown", float(cents), duration=0.6)
+        self._draw()
 
     def watch_shown(self, _old: float, _new: float) -> None:
         self._draw()
 
     def _draw(self) -> None:
-        sign = "+" if self.today_cents >= 0 else "-"
-        self.text = (f"GRIDIRON EDGE  ${self.shown / 100:,.2f}  "
-                     f"{sign}${abs(self.today_cents) / 100:,.2f} today  "
-                     f"{datetime.now():%H:%M:%S}")
-        self.update(Text(self.text))
+        arrow = "▲" if self.today_cents >= 0 else "▼"
+        parts = [f"Bankroll {d.money(round(self.shown))}  {arrow} {d.money(abs(self.today_cents))} today"]
+        if self.open_cents is not None:
+            share = self.open_cents / self.target_cents if self.target_cents > 0 else 0.0
+            parts.append(f"{d.money(self.open_cents)} in open bets ({share:.1%} of bankroll)")
+        if self.odds is not None:
+            left, cap = self.odds
+            parts.append(f"Odds API {'?' if left is None else left}/{cap} left")
+        self.text = " · ".join(parts)
+        for long, short in self.SHORTER:  # narrow terminal: drop words until it fits on one line
+            if not self.size.width or len(self.text) <= self.size.width - 2:
+                break
+            self.text = self.text.replace(long, short)
+        out = Text(self.text)
+        out.stylize(PROFIT if self.today_cents >= 0 else LOSS, self.text.index(arrow),
+                    self.text.index(" today"))
+        self.update(out)
+
+
+class PlaceNowList(OptionList):
+    """Recs that can be placed right now, two lines each; Enter confirm, s skip, d why."""
+
+    BINDINGS = [Binding("s", "skip", "Skip"), Binding("d", "why", "Why this bet?"),
+                Binding("enter", "select", "Confirm", show=True)]
+    FLASH_S = 1.5
+
+    class ConfirmRequested(Message):
+        def __init__(self, rec_id: int):
+            super().__init__()
+            self.rec_id = rec_id
+
+    class SkipRequested(ConfirmRequested):
+        pass
+
+    class WhyRequested(ConfirmRequested):
+        pass
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.recs: list[Recommendation] = []
+        self.flash_ids: set[int] = set()
+        self._seen: set[int] = set()
+        self._args: tuple = ()
+
+    def set_recs(self, recs: list[Recommendation], now: datetime, games: dict,
+                 names: d.Names = d.DEFAULT_NAMES) -> None:
+        self.recs = list(recs)
+        self._args = (now, games, names)
+        for r in recs:
+            if r.id is not None and r.id not in self._seen:
+                self._seen.add(r.id)
+                self.flash_ids.add(r.id)
+                self.set_timer(self.FLASH_S, lambda i=r.id: self._unflash(i))
+        self._render()
+
+    def _unflash(self, rec_id: int) -> None:
+        self.flash_ids.discard(rec_id)
+        self._render()
+
+    def prompt(self, r: Recommendation) -> Text:
+        now, games, names = self._args
+        rid, where, bet, price, stake, profit, left, kick = place_now_cells(r, now, games, names)
+        out = Text()
+        out.append(f"#{rid} ", style=f"bold {ACCENT}")
+        out.append(where, style=f"bold {PROFIT}" if r.kind == "arb" else "bold")
+        out.append(f"  {bet}\n")
+        profit_word = "locked profit" if r.kind == "arb" else "expected profit"
+        out.append(f"    {price} \u00b7 bet {stake} \u00b7 {profit_word} ")
+        out.append(profit, style=PROFIT)
+        out.append(f" \u00b7 {left}", style=PENDING if "min left" in left and "hr" not in left else "")
+        out.append(f" \u00b7 kickoff {kick}")
+        if r.state == "PENDING":
+            out.append("  (texted)", style="dim")
+        if r.id in self.flash_ids:
+            out.stylize(f"on {ACCENT}", 0, len(out))
+            out.stylize("#0b0f1a")
+        return out
+
+    def _render(self) -> None:
+        keep = self.highlighted_option.id if self.highlighted_option is not None else None
+        self.set_options(Option(self.prompt(r), id=str(r.id)) for r in self.recs)
+        if not self.recs:
+            return
+        ids = [str(r.id) for r in self.recs]
+        self.highlighted = ids.index(keep) if keep in ids else 0
+
+    def _current(self) -> int | None:
+        opt = self.highlighted_option
+        return None if opt is None or opt.id is None else int(opt.id)
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        event.stop()
+        if event.option.id is not None:
+            self.post_message(self.ConfirmRequested(int(event.option.id)))
+
+    def action_skip(self) -> None:
+        if (i := self._current()) is not None:
+            self.post_message(self.SkipRequested(i))
+
+    def action_why(self) -> None:
+        if (i := self._current()) is not None:
+            self.post_message(self.WhyRequested(i))
+
+
+class OpenBetsList(OptionList):
+    def set_bets(self, views: list[OpenBetView]) -> None:
+        self.views = list(views)
+        opts = []
+        for v in views:
+            t = Text()
+            t.append(f"#{v.bet_id} ", style=f"bold {ACCENT}")
+            t.append(f"{v.text}\n")
+            t.append(f"    {v.stake} in \u00b7 {v.game} \u00b7 ")
+            color = "" if v.pnl_cents is None else PROFIT if v.pnl_cents >= 0 else LOSS
+            picks = v.pnl_cents is None and any(w in v.worth for w in ("hit", "missed", "pending"))
+            t.append("picks: " if picks else "worth now ")
+            t.append(v.worth, style=color)
+            if v.close != "not yet":
+                t.append(f" \u00b7 beat closing price by {v.close}")
+            opts.append(Option(t, id=str(v.bet_id)))
+        self.set_options(opts)
+
+
+class Section(Vertical):
+    """A titled box holding a list and the plain-English message shown when the list is empty."""
+
+    def __init__(self, title: str, body, empty_id: str, **kw):
+        super().__init__(**kw)
+        self.border_title = title
+        self.body = body
+        self.empty = Static("", id=empty_id, classes="empty")
+
+    def compose(self) -> ComposeResult:
+        yield self.empty
+        yield self.body
+
+    def show_empty(self, message: str | None) -> None:
+        """message None: show the list; otherwise hide it and explain why it is empty."""
+        self.message = message
+        self.empty.update(Text(message or ""))
+        self.empty.display = message is not None
+        self.body.display = message is None

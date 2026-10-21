@@ -1,12 +1,12 @@
 from datetime import UTC, datetime
 
 import httpx
-from textual.widgets import DataTable, Input
+from textual.widgets import Input, Static, TabbedContent
 
 from gridiron_edge.app import GridironApp
 from gridiron_edge.scheduler import Job
-from gridiron_edge.ui.screens import ConfirmScreen
-from gridiron_edge.ui.widgets import BankrollHeader, EventLog
+from gridiron_edge.ui.screens import ConfirmScreen, WhyScreen
+from gridiron_edge.ui.widgets import BankrollHeader, EventLog, OpenBetsList, PlaceNowList
 
 # Five minutes after the fixtures' odds were pulled; Sunday's SEA game is ~31 h away.
 NOW = datetime(2026, 10, 31, 18, 5, tzinfo=UTC)
@@ -58,6 +58,7 @@ async def test_deposit_updates_header_and_log(services_mocked):
     async with app.run_test(size=SIZE) as pilot:
         await submit(app, pilot, "deposit 250")
         assert app.query_one(BankrollHeader).target_cents == 25000
+        assert "\u25b2 $0.00 today" in app.query_one(BankrollHeader).text  # a deposit is not a win
         assert "deposit" in log_lines(app)[-1]
         assert app.query_one("#cmd", Input).value == ""
 
@@ -95,8 +96,10 @@ async def test_scan_job_creates_rec_and_texts_once(services_mocked, load):
         second = await svc.run_job(Job("scan"), NOW)
         app.refresh_views()
         await pilot.pause()
-        assert app.query_one("#tab-kalshi_game", DataTable).row_count == 1
-        assert len(services_mocked.sink) == 1 and services_mocked.sink[0].startswith("GE KALSHI BUY YES")
+        place = app.query_one("#place-now", PlaceNowList)
+        assert place.option_count == 1
+        assert "Seahawks beat Bears" in place.get_option_at_index(0).prompt.plain
+        assert len(services_mocked.sink) == 1 and services_mocked.sink[0].startswith("Bet idea #")
         assert {k for k, _ in first} >= {"rec", "text"}
         assert not [ln for ln in second if ln[0] in ("rec", "text")]
         (rec,) = svc.lifecycle.pending()
@@ -114,8 +117,7 @@ async def test_confirm_flow_from_board(services_mocked, load):
         app.refresh_views()
         await pilot.pause()
         before = svc.ledger.balance()
-        table = app.query_one("#tab-kalshi_game", DataTable)
-        table.focus()
+        app.query_one("#place-now", PlaceNowList).focus()
         await pilot.press("enter")
         await pilot.pause()
         assert isinstance(app.screen, ConfirmScreen)
@@ -126,7 +128,7 @@ async def test_confirm_flow_from_board(services_mocked, load):
         (bet,) = svc.lifecycle.open_bets()
         assert bet["state"] == "PLACED" and bet["qty"] == 10 and bet["price"] == 0.5
         assert svc.ledger.balance() == before - bet["stake_cents"] - bet["fee_cents"] < before
-        assert "confirm" in log_lines(app)[-1]
+        assert "recorded from idea #" in log_lines(app)[-1]
         assert app.query_one(BankrollHeader).target_cents == svc.ledger.balance()
 
 
@@ -254,3 +256,128 @@ async def test_report_and_drift_reset_commands_log_plain_english(services_mocked
     assert "No settled bets yet." in text
     assert "NFL point-spread bets are back on" in text
     assert svc.drift_paused() == {}
+
+
+JARGON = ("EV", "CLV", "fair", "Brier", "KXNFL", "ML", " x")
+
+
+def home_text(app) -> str:
+    parts = [app.query_one(BankrollHeader).text]
+    for lst in (app.query_one("#place-now", PlaceNowList), app.query_one("#open-bets", OpenBetsList)):
+        parts += [lst.get_option_at_index(i).prompt.plain for i in range(lst.option_count)]
+    for sel in ("#place-empty", "#open-empty"):
+        parts.append(str(app.query_one(sel, Static).render()))
+    return "\n".join(parts)
+
+
+async def test_number_keys_switch_tabs_only_when_bar_empty(services_mocked):
+    app = GridironApp(services_mocked(), clock=lambda: NOW)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await app.workers.wait_for_complete()
+        tabs = app.query_one("#tabs", TabbedContent)
+        assert tabs.active == "home"
+        for key, tab in (("2", "performance"), ("3", "scores"), ("4", "log"), ("1", "home")):
+            await pilot.press(key)
+            await pilot.pause()
+            assert tabs.active == tab
+        await pilot.press("d", "e", "p", "o", "s", "i", "t", "space", "2")
+        assert app.query_one("#cmd", Input).value == "deposit 2" and tabs.active == "home"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert "added $2.00" in str(app.query_one("#status", Static).render())
+
+
+async def test_home_empty_state_explains_itself(services_mocked):
+    app = GridironApp(services_mocked(), clock=lambda: NOW)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await app.workers.wait_for_complete()
+        app.refresh_views()
+        await pilot.pause()
+        empty = app.query_one("#place-empty", Static)
+        assert empty.display and not app.query_one("#place-now").display
+        msg = str(empty.render())
+        assert msg and ("Next check" in msg or "Checking now" in msg)
+        assert "No open bets" in str(app.query_one("#open-empty", Static).render())
+        place = app.query_one("#place-box")
+        assert place.region.height >= 8 and place.region.right <= 100
+        assert app.query_one(BankrollHeader).region.height == 1
+
+
+async def test_home_place_why_skip_and_open_bets(services_mocked, load):
+    mock_edge(services_mocked, load)
+    svc = services_mocked()
+    await prime(svc)
+    app = GridironApp(svc, clock=lambda: NOW)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await app.workers.wait_for_complete()
+        await svc.run_job(Job("scan"), NOW)
+        app.refresh_views()
+        await pilot.pause()
+        text = home_text(app)
+        assert "#1 Kalshi  Seahawks beat Bears" in text and "expected profit $" in text
+        assert not [w for w in JARGON if w in text], text
+        await pilot.press("down")  # from the empty command bar into the list
+        await pilot.press("d")
+        await pilot.pause()
+        assert isinstance(app.screen, WhyScreen)
+        assert "Our chance:" in app.screen.text and "price implies" in app.screen.text
+        assert "KXNFLGAME" in app.screen.lines[-1]
+        assert str(app.screen.query_one("#why-details", Static).render()).startswith("[details] id 1")
+        await pilot.press("escape")
+        await pilot.pause()
+        app.query_one("#place-now", PlaceNowList).focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(app.screen, ConfirmScreen)
+        await pilot.click("#ok")
+        await pilot.pause()
+        opened = app.query_one("#open-bets", OpenBetsList)
+        assert opened.option_count == 1
+        assert "Seahawks beat Bears" in opened.get_option_at_index(0).prompt.plain
+        assert "in open bets" in app.query_one(BankrollHeader).text
+        assert not app.query_one("#place-now").display  # nothing left to place
+
+
+async def test_skip_key_removes_idea(services_mocked, load):
+    mock_edge(services_mocked, load)
+    svc = services_mocked()
+    await prime(svc)
+    app = GridironApp(svc, clock=lambda: NOW)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await app.workers.wait_for_complete()
+        await svc.run_job(Job("scan"), NOW)
+        app.refresh_views()
+        await pilot.pause()
+        app.query_one("#place-now", PlaceNowList).focus()
+        await pilot.press("s")
+        await pilot.pause()
+        assert svc.lifecycle.get_rec(1).state == "SKIPPED"
+        assert app.query_one("#place-empty", Static).display
+
+
+def _bet(svc, placed: str, cost: int, settled: str | None = None, payout: int | None = None) -> None:
+    """A bet row plus its ledger moves, times given in PT on the app clock."""
+    from gridiron_edge.notify.format import PT
+    p = datetime.fromisoformat(placed).replace(tzinfo=PT)
+    s = datetime.fromisoformat(settled).replace(tzinfo=PT) if settled else None
+    cur = svc.conn.execute(
+        "INSERT INTO bets (rec_id, kind, legs_json, stake_cents, fee_cents, placed_at, state, result, "
+        "payout_cents, settled_at) VALUES (0, 'kalshi', '[]', ?, 0, ?, ?, ?, ?, ?)",
+        (cost, p.isoformat(), "SETTLED" if s else "PLACED", None if s is None else
+         "won" if payout else "lost", payout, s.isoformat() if s else None))
+    rows = [(p, "stake", -cost)] + ([(s, "payout", payout)] if s and payout else [])
+    for ts, kind, cents in rows:
+        svc.conn.execute("INSERT INTO ledger (ts, kind, amount_cents, bet_id) VALUES (?,?,?,?)",
+                         (ts.astimezone(UTC).isoformat(), kind, cents, cur.lastrowid))
+
+
+def test_today_profit_counts_bets_settled_today_that_were_placed_yesterday(services_mocked):
+    svc = services_mocked()
+    svc.ledger.deposit(100_000)
+    _bet(svc, "2026-10-30T20:00", 1000, "2026-10-31T09:00")          # lost today: -$10
+    _bet(svc, "2026-10-30T20:00", 1000, "2026-10-31T10:00", 1900)    # won today: +$9
+    _bet(svc, "2026-10-30T19:00", 1000, "2026-10-30T23:00", 1900)    # won yesterday: not today
+    _bet(svc, "2026-10-31T08:00", 500)                               # placed today, still open
+    _bet(svc, "2026-10-30T18:00", 700)                               # placed yesterday, still open
+    app = GridironApp(svc, clock=lambda: NOW)  # 11:05 PT on Oct 31
+    assert app._today_profit(NOW) == -100

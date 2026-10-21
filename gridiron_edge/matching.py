@@ -23,6 +23,11 @@ register_schema(
         home_pts INTEGER, away_pts INTEGER, period TEXT, clock TEXT,
         odds_event_id TEXT, updated_at TEXT NOT NULL)""")
 
+register_schema(
+    """CREATE TABLE IF NOT EXISTS team_names (
+        league TEXT NOT NULL, canonical TEXT NOT NULL, name TEXT NOT NULL,
+        PRIMARY KEY (league, canonical))""")
+
 _TEAMS_JSON = Path(__file__).parent / "data" / "nfl_teams.json"
 _WINDOW = timedelta(hours=36)
 
@@ -73,6 +78,14 @@ class TeamResolver:
         self.conn.execute(
             f"{verb} INTO team_aliases (league, name_norm, canonical) VALUES (?,?,?)",
             (league, norm, canonical))
+
+    def set_display(self, league: str, canonical: str, name: str) -> None:
+        """The name shown to the user for a canonical code (e.g. a CFB school name)."""
+        self.conn.execute("INSERT OR REPLACE INTO team_names (league, canonical, name) VALUES (?,?,?)",
+                          (league, canonical, name))
+
+    def display_names(self) -> dict[tuple[str, str], str]:
+        return {(r[0], r[1]): r[2] for r in self.conn.execute("SELECT league, canonical, name FROM team_names")}
 
     def canonical(self, league: str, name: str) -> str | None:
         row = self.conn.execute(

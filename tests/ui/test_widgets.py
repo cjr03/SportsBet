@@ -129,6 +129,8 @@ async def test_kpi_verdict_comes_from_ci_not_bet_count():
         assert "losing" in tiles.text.lower() and "too few" not in tiles.text.lower()
         tiles.update_kpis({**base, "n": 5000, "conclusive": False, "roi_ci": (-0.02, 0.18)})
         assert "too few bets to tell luck from skill yet" in tiles.text.lower()
+        tiles.update_kpis({**base, "warnings": ["Recent bets are doing worse than the backtest."]})
+        assert tiles.text.endswith("Recent bets are doing worse than the backtest.")
 
 
 def test_kpi_empty():
@@ -178,7 +180,8 @@ async def test_scores_delay_title():
         p = app.query_one(ScoresPanel)
         p.set_games([g], {"g1": "winning"}, 300)
         await pilot.pause()
-        assert p.border_title == "Scores ~5m delay"
+        assert p.border_title == "Scores (about 5 min behind)"
+        assert str(p.get_row_at(0)[0]) == "Bills at Chiefs"
         assert p.row_count == 1
         p.set_games([g], {}, None)
         assert p.border_title == "Scores"
@@ -225,12 +228,22 @@ async def test_quota_low_class_and_header():
         await pilot.pause(1.0)
         assert q.styles.opacity == 1.0
     app = Harness(BankrollHeader())
-    async with app.run_test() as pilot:
+    async with app.run_test(size=(120, 24)) as pilot:
         h = app.query_one(BankrollHeader)
         h.set_balance(123456, -500)
         assert h.target_cents == 123456
         await pilot.pause(0.9)
-        assert "$1,234.56" in h.text and "-$5.00 today" in h.text
+        assert h.text == "Bankroll $1,234.56  \u25bc $5.00 today"
+        h.set_balance(128450, 4210, 9600, (412, 500))
+        await pilot.pause(0.9)
+        assert h.text == ("Bankroll $1,284.50  \u25b2 $42.10 today \u00b7 $96.00 in open bets "
+                          "(7.5% of bankroll) \u00b7 Odds API 412/500 left")
+    app = Harness(BankrollHeader())
+    async with app.run_test(size=(80, 24)) as pilot:  # narrow: drops the extra words, still one line
+        h = app.query_one(BankrollHeader)
+        h.set_balance(128450, 4210, 9600, (412, 500))
+        await pilot.pause(0.9)
+        assert h.text.endswith("in open bets (7.5%) \u00b7 Odds 412/500") and len(h.text) <= 78
 
 
 async def test_middle_and_arb_rows_say_which_side_in_plain_english():

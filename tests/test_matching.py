@@ -116,3 +116,9 @@ def test_normalize_name_strips_suffix_punctuation_accents_and_nicknames():
     assert normalize_name("Amon-Ra St. Brown") == "amon ra st brown"
     assert normalize_name("Gabe Davis") == normalize_name("Gabriel Davis")
     assert normalize_name("José  Ramírez ") == "jose ramirez"
+
+
+def test_display_names_for_cfb(resolver):
+    resolver.set_display("cfb", "OSU", "Ohio State")
+    resolver.set_display("cfb", "OSU", "Ohio State")
+    assert resolver.display_names() == {("cfb", "OSU"): "Ohio State"}

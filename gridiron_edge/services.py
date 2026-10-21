@@ -36,6 +36,7 @@ from gridiron_edge.models.cfb import CfbRatings, cfb_prior, games_played
 from gridiron_edge.models.nfl import NflRatings, is_neutral, qb_changes
 from gridiron_edge.models.props import STAT_COLUMNS, PropProjector
 from gridiron_edge.models.ridge import implied_ratings
+from gridiron_edge.describe import Names, bet_text, expected_profit_cents, money
 from gridiron_edge.notify.chain import NotifyChain
 from gridiron_edge.notify.console import ConsoleNotifier
 from gridiron_edge.notify.format import PT, format_message
@@ -181,10 +182,14 @@ def _default_margin_models() -> dict:
             "nfl_ml": NormalModel(NFL_ML_SIGMA), "cfb": NormalModel(CFB_SIGMA)}
 
 
-def _describe(rec: Recommendation) -> str:
-    legs = " + ".join(leg.description for leg in rec.legs)
-    tail = " (observe-only)" if rec.observe_only else f" stake ${rec.stake_cents / 100:,.2f}"
-    return f"#{rec.id} {rec.kind} {legs} EV {rec.ev:+.1%}{tail}"
+def _describe(rec: Recommendation, names: Names | None = None) -> str:
+    venue = "PrizePicks" if rec.kind == "pp_entry" else "Kalshi"
+    what = bet_text(rec, names) if names else bet_text(rec)
+    if rec.observe_only:
+        return f"#{rec.id} {venue}: {what} (tracking only, not a bet yet)"
+    label = "locked profit" if rec.kind == "arb" else "expected profit"
+    return (f"#{rec.id} {venue}: {what} - bet {money(rec.stake_cents)}, "
+            f"{label} about {money(expected_profit_cents(rec))}")
 
 
 def _register(registry: GameRegistry, teams: TeamResolver, league: str, home_name: str,
@@ -372,6 +377,7 @@ class Services:
             if not school:
                 continue
             code = t.get("abbreviation") or school
+            self.teams.set_display("cfb", code, school)
             names = [school, code, f"{school} {t.get('mascot') or ''}", *(t.get("alternateNames") or [])]
             for n in names:
                 if n:
@@ -903,7 +909,7 @@ class Services:
 
     async def _job_expire(self, job: Job, now: datetime):
         ids = self.lifecycle.expire_due(now)
-        return [("info", f"expired {len(ids)} recommendation(s)")] if ids else []
+        return [("info", f"{len(ids)} bet idea(s) went stale")] if ids else []
 
     async def _job_rundown_scores(self, job: Job, now: datetime):
         if self.rundown is None:
@@ -1183,7 +1189,7 @@ class Services:
             saved, new = self.lifecycle.upsert_recommendation(rec, now)
             if not new:
                 continue
-            out.append(("rec", _describe(saved)))
+            out.append(("rec", _describe(saved, self.notifier.names)))
             if saved.observe_only:
                 continue
             res = self.notifier.notify(saved, now)
@@ -1193,7 +1199,7 @@ class Services:
                 self.lifecycle.mark_pending(saved.id)
                 sent = f"#{saved.id} sent via {res.channel}"
                 if res.channel == ConsoleNotifier.name:  # no phone channel worked: show the text here
-                    sent += f": {format_message(saved, PT)}"
+                    sent += f": {format_message(saved, PT, self.notifier.names)}"
                 out.append(("text", sent))
             else:
                 out.append(("error", f"text for #{saved.id} failed: {res.error}"))
@@ -1203,7 +1209,7 @@ class Services:
             out.append(("info", "player-prop model: no stats found for " + ", ".join(new_names[:10])
                         + (f" and {len(new_names) - 10} more" if len(new_names) > 10 else "")))
         if not out:
-            out.append(("info", f"scan {what}: {len(recs)} opportunities, nothing new"))
+            out.append(("info", f"checked for bets: {len(recs)} found, nothing new"))
         return out
 
     # -- commands ---------------------------------------------------------
@@ -1225,8 +1231,8 @@ class Services:
         out = []
         for api, guard in self.budgets.items():
             rem = guard.remaining()
-            out.append(f"{api}: {'unknown' if rem is None else rem} of {guard.monthly_cap} left")
-        out.append(f"kalshi: {'ok' if self.kalshi_ok else 'not reached yet'}")
+            out.append(f"{api}: {'unknown' if rem is None else rem} of {guard.monthly_cap} free calls left this month")
+        out.append(f"kalshi: {'working' if self.kalshi_ok else 'not reached yet'}")
         return out
 
     async def _first_run(self, now: datetime) -> list[tuple[str, str]]:
@@ -1402,6 +1408,7 @@ def build_services(settings: Settings, transports: dict[str, httpx.AsyncBaseTran
         channels.append(NtfyNotifier(settings.ntfy_topic))
     channels.append(ConsoleNotifier(sink))  # last resort: the text shows in the event log
     notifier = NotifyChain(conn, channels, settings.quiet_hours, settings.notify_enabled)
+    notifier.names = Names(teams.display_names)
 
     view = _RegistryView(registry, lambda: datetime.now(UTC))
     scheduler = Scheduler(view, budgets, state=_SchedulerState(conn, datetime.now(UTC)),
