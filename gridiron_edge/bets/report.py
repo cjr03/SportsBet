@@ -8,6 +8,7 @@ import json
 import math
 from collections import defaultdict
 from collections.abc import Iterable
+from datetime import datetime
 
 Z = 1.96
 
@@ -196,10 +197,23 @@ def _clv_series(conn) -> dict[str, list[tuple[str, float]]]:
     return out
 
 
-def drift(conn, window: int = 50) -> dict[str, dict]:
-    """Rolling-window CLV per segment; alarm when the window is full and mean + 2 SE is below 0."""
+def _after(ts: str, cutoff: str) -> bool:
+    try:
+        return datetime.fromisoformat(ts) > datetime.fromisoformat(cutoff)
+    except (TypeError, ValueError):
+        return ts > cutoff
+
+
+def drift(conn, window: int = 50, since: dict[str, str] | None = None) -> dict[str, dict]:
+    """Rolling-window CLV per segment; alarm when the window is full and mean + 2 SE is below 0.
+
+    since: segment -> ISO time of its last reset; only CLV recorded after it counts, so a reset
+    window has to refill with new data before it can alarm again.
+    """
     out = {}
     for seg, series in _clv_series(conn).items():
+        if (cut := (since or {}).get(seg)) is not None:
+            series = [t for t in series if _after(t[0], cut)]
         s = clv_stats(c for _, c in series[-window:])
         alarm = s["n"] >= window and s["hi"] is not None and s["hi"] < 0
         out[seg] = {**s, "window": window, "alarm": alarm, "label": segment_label(seg)}
@@ -248,10 +262,12 @@ def _net_deposits(conn) -> int:
                         "WHERE kind IN ('deposit','withdraw')").fetchone()[0]
 
 
-def build_report(conn, now, backtest: dict | None = None, window: int = 50) -> dict:
+def build_report(conn, now, backtest: dict | None = None, window: int = 50,
+                 drift_since: dict[str, str] | None = None) -> dict:
     """Everything the Performance tab shows, as plain data plus plain-English summary lines.
 
     backtest: the stored gate results per league (walkforward metrics), for calibration drift.
+    drift_since: segment -> last drift reset time (see drift()).
     """
     rows = _settled_rows(conn)
     bets = [r for r in rows if _get(r, "kind") != "arb"]
@@ -292,7 +308,7 @@ def build_report(conn, now, backtest: dict | None = None, window: int = 50) -> d
                 "by_segment": clv_by_seg},
         "calibration": _calibration(rows),
         "drawdown": drawdown(rows, starting_cents=_net_deposits(conn)),
-        "drift": {"window": window, "segments": drift(conn, window),
+        "drift": {"window": window, "segments": drift(conn, window, drift_since),
                   "calibration": _calibration_drift(rows, window, backtest)},
     }
     report["summary"] = summary_lines(report)

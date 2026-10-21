@@ -151,3 +151,56 @@ def test_record_clv_skips_work_when_nothing_kicks_off_soon(services_mocked):
     svc = services_mocked()
     svc.snapshot = None  # would raise if called
     assert svc._record_clv(NOW) == []
+
+
+def test_drift_reset_sticks_until_window_refills(services_mocked, mk):
+    svc = services_mocked()
+    gid = _bad_signals(svc, mk)
+    svc.check_drift(NOW)
+    assert len(services_mocked.sink) == 1
+    later = NOW + timedelta(minutes=5)
+    assert svc.reset_drift("nfl spread", now=later) == ["nfl spread"]
+    assert svc.check_drift(later) == []  # old bad window no longer counts
+    assert len(services_mocked.sink) == 1
+    assert "nfl spread" not in svc.drift_paused()
+    assert svc.snapshot(later).gates.get(("nfl", "spread"), False) is False
+    assert not svc.report(later)["drift"]["segments"]["nfl spread"]["alarm"]
+    # a fresh full window of bad prices after the reset alarms again
+    for i in range(55):
+        leg = Leg("kalshi", "x", "yes", 0.50, 0.6, gid, ticker=f"U{i}", team="BBB", line=3.5)
+        rec = Recommendation(None, "kalshi_game", [leg], 0, 10, 0.05, 0.6, None, later, KICK, observe_only=True)
+        rec, _ = svc.lifecycle.upsert_recommendation(rec, later)
+        svc.settler.record_rec_clv(rec.id, 0.46 + (i % 2) * 0.01, later + timedelta(seconds=i + 1))
+    assert any(k == "warn" for k, _ in svc.check_drift(later + timedelta(minutes=2)))
+    assert len(services_mocked.sink) == 2
+
+
+def test_pp_leg_clv_skips_legs_without_market_anchor(services_mocked, mk):
+    from gridiron_edge.types import PropQuote
+    svc = services_mocked()
+    gid = "nfl:20261031:AAA@BBB"
+    svc.registry.upsert(Game(gid, "nfl", 2026, 9, KICK, "BBB", "AAA"))
+    old = NOW - timedelta(hours=3)
+    svc.latest["props"] = [
+        PropQuote("odds_api", "draftkings", gid, "Player 1", "rush_yds", "over", 52.5, 1.70, old),
+        PropQuote("odds_api", "draftkings", gid, "Player 1", "rush_yds", "under", 52.5, 2.25, old)]
+    pleg = Leg("prizepicks", "x", "over", 0.0, 0.55, gid, player="Player 1", stat="rush_yds", line=50.5,
+               team="BBB")  # model-only leg: no p_mkt
+    prec = Recommendation(None, "pp_entry", [pleg, replace(pleg, p_mkt=0.55)], 0, None, 0.05, 0.3,
+                          "2-power", NOW - timedelta(hours=4), KICK, observe_only=True)
+    prec, _ = svc.lifecycle.upsert_recommendation(prec, NOW - timedelta(hours=4))
+    svc._record_clv(NOW)
+    legs = svc.conn.execute("SELECT * FROM leg_clv WHERE rec_id=? ORDER BY leg_idx", (prec.id,)).fetchall()
+    assert [r["leg_idx"] for r in legs] == [1]
+
+
+def test_close_games_shadow_skips_kalshi_props(services_mocked, mk):
+    svc = services_mocked()
+    gid = "nfl:20261031:AAA@BBB"
+    svc.registry.upsert(Game(gid, "nfl", 2026, 9, KICK, "BBB", "AAA"))
+    kleg = Leg("kalshi", "x", "yes", 0.45, 0.6, gid, ticker="P1", player="Player 1", stat="rush_yds", line=49.5)
+    svc.lifecycle.upsert_recommendation(
+        Recommendation(None, "kalshi_prop", [kleg], 0, 10, 0.05, 0.6, None, NOW - timedelta(hours=1), KICK,
+                       observe_only=True), NOW - timedelta(hours=1))
+    svc.odds.budget.record(400, 100, 1)  # plenty of budget
+    assert gid not in svc.close_games()  # prop CLV never uses game odds: no paid close pull

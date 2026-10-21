@@ -54,6 +54,7 @@ UPCOMING_WINDOW = timedelta(days=8)
 GATE_REFIT = timedelta(days=7)
 CLV_WINDOW = timedelta(minutes=30)
 DRIFT_PREFIX = "drift."
+DRIFT_RESET_PREFIX = "drift_reset."  # not matched by LIKE 'drift.%'
 # drift segment type -> pipeline gate keys it pauses
 _SEGMENT_GATES = {"ml": ("ml",), "spread": ("spread",), "total": ("total",), "prop": ("prop", "prop_model"),
                   "prizepicks": ("pp",)}
@@ -593,7 +594,7 @@ class Services:
         if self._shadow_budget_ok():
             since = (self.clock() - UPCOMING_WINDOW).isoformat()
             shadow = self.conn.execute("SELECT legs_json FROM recommendations WHERE created_at >= ? "
-                                       "AND kind IN ('kalshi_game','kalshi_prop')", (since,)).fetchall()
+                                       "AND kind='kalshi_game'", (since,)).fetchall()  # prop CLV skips game odds
             out |= {leg["game_id"] for leg in _bet_legs(shadow) if leg.get("game_id")}
         return out
 
@@ -794,10 +795,10 @@ class Services:
                     n += self.settler.record_rec_clv(r["id"], p, now, src, stale) is not None
                 continue
             for i, leg in enumerate(legs):
-                if soon(leg):
+                # line movement needs a market price at rec time; model-only legs would score model vs market
+                if soon(leg) and leg.get("p_mkt") is not None:
                     p, _, stale = self._close_p("pp_leg", leg, snap, markets)
-                    p_rec = leg.get("p_mkt") if leg.get("p_mkt") is not None else leg.get("p_fair")
-                    n += self.settler.record_leg_clv(r["id"], i, p_rec, p, now, stale) is not None
+                    n += self.settler.record_leg_clv(r["id"], i, leg["p_mkt"], p, now, stale) is not None
         if n:
             out.append(("info", f"recorded closing prices for {n} bet idea(s), including ones not placed"))
             out += self.check_drift(now)
@@ -924,12 +925,18 @@ class Services:
     def report(self, now: datetime) -> dict:
         """The full performance report (bets/report.py) as a plain dict, with plain-English summary lines."""
         stored = json.loads(self._get("gates") or "null") or {}
-        return build_report(self.conn, now, backtest=stored.get("leagues"), window=self.settings.drift_window)
+        return build_report(self.conn, now, backtest=stored.get("leagues"), window=self.settings.drift_window,
+                            drift_since=self._drift_resets())
 
     def drift_paused(self) -> dict[str, str]:
         """Segments paused by drift monitoring -> when they were paused."""
         return {r["key"].removeprefix(DRIFT_PREFIX): r["value"]
                 for r in self.conn.execute("SELECT key, value FROM settings WHERE key LIKE 'drift.%'")}
+
+    def _drift_resets(self) -> dict[str, str]:
+        """Segment -> when it was last reset; drift only counts CLV recorded after that."""
+        return {r["key"].removeprefix(DRIFT_RESET_PREFIX): r["value"] for r in self.conn.execute(
+            "SELECT key, value FROM settings WHERE key LIKE ?", (DRIFT_RESET_PREFIX + "%",))}
 
     def _drift_gates(self) -> dict[tuple[str, str], bool]:
         out = {}
@@ -943,7 +950,8 @@ class Services:
         """Pause (observe-only) any segment whose rolling CLV is significantly below 0; text once."""
         paused = self.drift_paused()
         out = []
-        for seg, d in report_mod.drift(self.conn, self.settings.drift_window).items():
+        for seg, d in report_mod.drift(self.conn, self.settings.drift_window,
+                                                  self._drift_resets()).items():
             if not d["alarm"] or seg in paused or seg == "arb":
                 continue
             self._put(DRIFT_PREFIX + seg, now.isoformat())
@@ -964,12 +972,17 @@ class Services:
             self.conn.execute("DELETE FROM settings WHERE key='drift_cal'")
         return out
 
-    def reset_drift(self, seg: str = "all") -> list[str]:
-        """Un-pause one drift-paused segment (e.g. 'nfl spread'), or all of them."""
+    def reset_drift(self, seg: str = "all", now: datetime | None = None) -> list[str]:
+        """Un-pause one drift-paused segment (e.g. 'nfl spread'), or all of them.
+
+        The rolling window restarts at the reset: it must refill with new CLV before it can alarm again.
+        """
         paused = self.drift_paused()
         names = list(paused) if seg == "all" else [seg] if seg in paused else []
+        at = (now or self.clock()).isoformat()
         for name in names:
             self.conn.execute("DELETE FROM settings WHERE key=?", (DRIFT_PREFIX + name,))
+            self._put(DRIFT_RESET_PREFIX + name, at)
         return names
 
     # -- views -------------------------------------------------------------
