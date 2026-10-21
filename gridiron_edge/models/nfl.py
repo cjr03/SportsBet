@@ -24,6 +24,11 @@ def _as_date(v) -> date:
     return v if isinstance(v, date) else date.fromisoformat(str(v)[:10])
 
 
+def is_neutral(r: dict) -> bool:
+    """nflverse marks neutral sites with location == "Neutral" (tests may pass neutral=True)."""
+    return bool(r.get("neutral")) or r.get("location") == "Neutral"
+
+
 class NflRatings:
     def __init__(self, ratings: dict[str, float], hfa: float, pts_for: dict[str, float],
                  pts_against: dict[str, float]):
@@ -46,7 +51,7 @@ class NflRatings:
         for k, r in enumerate(rows):
             X[k, idx[r["home_team"]]] = 1.0
             X[k, idx[r["away_team"]]] = -1.0
-            X[k, n] = 0.0 if r.get("neutral") else 1.0
+            X[k, n] = 0.0 if is_neutral(r) else 1.0
             y[k] = r["home_score"] - r["away_score"]
             age[k] = (asof - _as_date(r["gameday"])).days
         w = _weight(age)

@@ -6,7 +6,8 @@ import polars as pl
 
 RELEASES = "https://github.com/nflverse/nflverse-data/releases/download"
 SCHEDULE_COLS = ["game_id", "season", "week", "gameday", "home_team", "away_team",
-                 "home_score", "away_score", "result", "spread_line", "total_line"]
+                 "home_score", "away_score", "result", "spread_line", "total_line",
+                 "location", "home_qb_id", "away_qb_id"]  # location "Neutral" = no home field
 _RUSH_PASS = ("pass", "run")
 
 

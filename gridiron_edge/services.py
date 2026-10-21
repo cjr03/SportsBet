@@ -30,7 +30,7 @@ from gridiron_edge.models import cfb as cfb_models
 from gridiron_edge.models import nfl as nfl_models
 from gridiron_edge.models.blend import BlendFit, walkforward_ats
 from gridiron_edge.models.cfb import CfbRatings, cfb_prior, games_played
-from gridiron_edge.models.nfl import NflRatings
+from gridiron_edge.models.nfl import NflRatings, is_neutral
 from gridiron_edge.models.props import STAT_COLUMNS, PropProjector
 from gridiron_edge.notify.chain import NotifyChain
 from gridiron_edge.notify.console import ConsoleNotifier
@@ -179,6 +179,7 @@ def _nfl_history(sched: pl.DataFrame, before: date) -> list[dict]:
         d = _as_date(r["gameday"])
         if d < before:
             out.append({"date": d, "home": r["home_team"], "away": r["away_team"],
+                        "neutral": is_neutral(r), "season": r.get("season"),
                         "home_line": -float(r["spread_line"]), "margin": float(r["result"])})
     return out
 
@@ -346,23 +347,46 @@ class Services:
         return {name: self.teams.canonical("nfl", t) or t for name, t in df.iter_rows()}
 
     def _assign_nfl_weeks(self, sched: pl.DataFrame, now: datetime) -> int:
-        """Copy nflverse week numbers onto registered NFL games (props projection needs them)."""
+        """Copy nflverse week numbers and neutral sites onto registered NFL games."""
         if sched.is_empty():
             return 0
-        slots: dict[tuple[str, str], list[tuple[date, int, int]]] = {}
+        slots: dict[tuple[str, str], list[tuple[date, int, int, bool]]] = {}
         for r in sched.drop_nulls(["gameday", "week"]).iter_rows(named=True):
             home = self.teams.canonical("nfl", r["home_team"]) or r["home_team"]
             away = self.teams.canonical("nfl", r["away_team"]) or r["away_team"]
-            slots.setdefault((home, away), []).append((_as_date(r["gameday"]), int(r["season"]), int(r["week"])))
+            neutral = is_neutral(r)
+            slot = (_as_date(r["gameday"]), int(r["season"]), int(r["week"]), neutral)
+            slots.setdefault((home, away), []).append(slot)
+            if neutral:  # sources may list a neutral game's teams the other way round
+                slots.setdefault((away, home), []).append(slot)
         n = 0
         for g in self.registry.all_since(now - timedelta(days=1)):
-            if g.league != "nfl" or g.week is not None:
+            if g.league != "nfl":
                 continue
             local = g.kickoff.astimezone(PT).date()
-            match = next(((s, w) for d, s, w in slots.get((g.home, g.away), [])
+            match = next(((s, w, nt) for d, s, w, nt in slots.get((g.home, g.away), [])
                           if abs((d - local).days) <= 1), None)
-            if match:
-                self.registry.upsert(replace(g, season=match[0], week=match[1]))
+            if match and (g.week is None or g.neutral != match[2]):
+                self.registry.upsert(replace(g, season=match[0], week=match[1], neutral=match[2]))
+                n += 1
+        return n
+
+    def _assign_cfb_neutral(self, games: list[dict], now: datetime) -> int:
+        """Copy CFBD neutralSite onto registered CFB games (live predictions drop HFA there)."""
+        sites = {}
+        for r in games:
+            d = _as_date(r["startDate"])
+            sites[(r["homeTeam"], r["awayTeam"], d)] = sites[(r["awayTeam"], r["homeTeam"], d)] = \
+                bool(r.get("neutralSite"))
+        n = 0
+        for g in self.registry.all_since(now - timedelta(days=1)):
+            if g.league != "cfb":
+                continue
+            day = g.kickoff.astimezone(UTC).date()
+            neutral = next((sites[k] for k in ((g.home, g.away, day + timedelta(days=dd)) for dd in (0, -1, 1))
+                            if k in sites), None)
+            if neutral is not None and neutral != g.neutral:
+                self.registry.upsert(replace(g, neutral=neutral))
                 n += 1
         return n
 
@@ -388,6 +412,10 @@ class Services:
             return []
         year = CfbdClient.current_season(now)
         cur = self._cfb_games(await self.cfbd.games(year))
+        if now.month in (12, 1, 2):  # bowls and the CFP (mostly neutral sites): one cached call, in season only
+            post = self._cfb_games(await self.cfbd.games(year, season_type="postseason"))
+            cur += [g for g in post if g.get("startDate")]
+        self._assign_cfb_neutral(cur, now)
         prev = self._cfb_games(await self.cfbd.games(year - 1))
         canon = lambda n: self.teams.canonical("cfb", n) or n  # noqa: E731
         returning = {canon(r["team"]): float(r["percentPPA"]) for r in await self.cfbd.returning(year)
@@ -418,7 +446,7 @@ class Services:
 
         def predict_asof(d: date):
             model = NflRatings.fit(sched, epa, d)
-            return lambda g: model.predict(g["home"], g["away"])
+            return lambda g: model.predict(g["home"], g["away"], g.get("neutral", False))
 
         return _nfl_history(sched, before), predict_asof
 

@@ -73,7 +73,8 @@ class FakeNflverse:
 
         from gridiron_edge.clients.nflverse import SCHEDULE_COLS
 
-        text, ints = ("game_id", "gameday", "home_team", "away_team"), ("season", "week")
+        text = ("game_id", "gameday", "home_team", "away_team", "location", "home_qb_id", "away_qb_id")
+        ints = ("season", "week")
         return pl.DataFrame(schema={c: pl.Utf8 if c in text else pl.Int64 if c in ints else pl.Float64
                                     for c in SCHEDULE_COLS})
 
