@@ -503,8 +503,13 @@ class Services:
             if set(results) >= set(spans):
                 self._put("gates", json.dumps({"fitted_at": now.isoformat(), "leagues": results}))
         self.gates_complete = set(results) >= set(spans)
-        gates = {(lg, m): bool(r["gated"]) for lg, r in results.items() for m in ("ml", "spread", "total")}
-        gates.update({(lg, m): True for lg in closed for m in ("ml", "spread", "total")})
+        gates = {}
+        for lg, r in results.items():
+            # ml shares the spread's margin model; totals stay closed until a totals backtest passes
+            gates.update({(lg, "ml"): bool(r["gated"]), (lg, "spread"): bool(r["gated"]),
+                          (lg, "total"): bool(r.get("total_gated", True)),
+                          (lg, "prop"): False, (lg, "prop_model"): True})
+        gates.update({(lg, m): True for lg in closed for m in ("ml", "spread", "total", "prop_model")})
         self.gates = gates
         for lg, r in results.items():
             out.append(("info", f"gate {lg}: n={r['n']} b_model={r['b_model']:.2f}±{r['se']:.2f} "

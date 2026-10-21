@@ -82,3 +82,19 @@ async def test_nflverse_refresh_refits_gates_when_model_appears(services_mocked)
     assert not [ln for ln in out if ln[0] == "error"], out
     assert svc.gates[("nfl", "ml")] is True
     assert any("gate nfl" in m for _, m in out)
+
+
+async def test_totals_stay_gated_on_a_passing_spread_backtest(services_mocked):
+    svc = services_mocked()
+    live = BlendFit(a=0.0, b_model=0.5, b_market=0.5, b_model_se=0.05, n=600)
+
+    async def backtest(league, start, end, now):
+        return live, {"n": live.n}
+
+    svc.backtest = backtest
+    await svc.fit_gates(NOW)
+    for lg in ("nfl", "cfb"):
+        assert svc.gates[(lg, "spread")] is False and svc.gates[(lg, "ml")] is False
+        assert svc.gates[(lg, "total")] is True  # no totals backtest yet
+        assert svc.gates[(lg, "prop")] is False  # book-anchored props are market-derived
+        assert svc.gates[(lg, "prop_model")] is True  # projector-only props have no backtest

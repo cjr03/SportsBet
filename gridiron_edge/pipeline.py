@@ -148,11 +148,18 @@ def _best_side(m: KalshiMarket, p_yes: float, snap: Snapshot, s: Settings, extra
 
 
 def _kalshi_rec(kind: Literal["kalshi_game", "kalshi_prop"], m: KalshiMarket, g: Game, sd: _Side,
-                description: str, snap: Snapshot, gate: str, tie_risk: bool) -> Recommendation:
+                description: str, snap: Snapshot, gate: str, tie_risk: bool,
+                p_mkt: float | None = None, observe: bool = False) -> Recommendation:
     leg = Leg("kalshi", description, sd.side, sd.price, sd.p, g.game_id, ticker=m.ticker,
-              player=m.player, stat=m.stat, line=m.line, team=m.team)
+              player=m.player, stat=m.stat, line=m.line, team=m.team, p_mkt=p_mkt)
     return Recommendation(None, kind, [leg], 0, sd.qty, sd.ev, sd.p, None, snap.now, g.kickoff,
-                          observe_only=snap.gates.get((g.league, gate), False), tie_risk=tie_risk)
+                          observe_only=observe or snap.gates.get((g.league, gate), False), tie_risk=tie_risk,
+                          p_mkt=p_mkt)
+
+
+def _model_gated(snap: Snapshot, league: str) -> bool:
+    """Projector-only (non-anchored) props have no backtest: observe-only unless explicitly ungated."""
+    return snap.gates.get((league, "prop_model"), True)
 
 
 def kalshi_game_candidates(snap: Snapshot, s: Settings) -> list[Recommendation]:
@@ -176,7 +183,9 @@ def kalshi_game_candidates(snap: Snapshot, s: Settings) -> list[Recommendation]:
         desc = {"ml": f"{m.team} ML", "spread": f"{m.team} wins by >{m.line}",
                 "total": f"Total over {m.line}"}[m.market_type]
         tie = g.league == "nfl" and m.market_type == "ml"
-        out.append(_kalshi_rec("kalshi_game", m, g, sd, desc, snap, m.market_type, tie))
+        py = market_p_yes(m, g, snap, s)
+        p_mkt = None if py is None else (py if sd.side == "yes" else 1.0 - py)
+        out.append(_kalshi_rec("kalshi_game", m, g, sd, desc, snap, m.market_type, tie, p_mkt))
     return out
 
 
@@ -240,7 +249,7 @@ def _prop_p_sides(snap: Snapshot, s: Settings, projector: Projector, g: Game, pl
 
 def kalshi_prop_candidates(snap: Snapshot, s: Settings, projector: Projector) -> list[Recommendation]:
     """Best Kalshi prop recommendation per player (unsized)."""
-    best: dict[str, tuple[KalshiMarket, Game, _Side]] = {}
+    best: dict[str, tuple[KalshiMarket, Game, _Side, bool]] = {}
     for m in snap.kalshi:
         if m.market_type != "prop" or m.player is None or m.stat is None or m.line is None:
             continue
@@ -257,9 +266,11 @@ def kalshi_prop_candidates(snap: Snapshot, s: Settings, projector: Projector) ->
         sd = _best_side(m, p_over, snap, s, extra, p_no=p_under)
         key = m.player.lower()
         if sd is not None and (key not in best or sd.ev > best[key][2].ev):
-            best[key] = (m, g, sd)
-    return [_kalshi_rec("kalshi_prop", m, g, sd, f"{m.player} {m.stat} over {m.line}", snap, "prop", False)
-            for m, g, sd in best.values()]
+            best[key] = (m, g, sd, anchored)
+    # anchored props are priced from devigged books (market-derived) so sd.p is the market's p
+    return [_kalshi_rec("kalshi_prop", m, g, sd, f"{m.player} {m.stat} over {m.line}", snap, "prop", False,
+                        sd.p if anchored else None, not anchored and _model_gated(snap, g.league))
+            for m, g, sd, anchored in best.values()]
 
 
 def _player_team(snap: Snapshot, projector: Projector, player: str) -> str | None:
@@ -296,7 +307,8 @@ def pp_entry_candidates(snap: Snapshot, s: Settings, projector: Projector) -> li
     legs, st, ev, _ = found
     ps = [pk.p for pk in legs]
     games = [snap.games[pk.game_id] for pk in legs]
-    observe = any(snap.gates.get((g.league, "prop"), False) for g in games)
+    observe = any(snap.gates.get((g.league, "prop"), False) for g in games) or any(
+        not pk.anchored and _model_gated(snap, g.league) for pk, g in zip(legs, games))
     stake = 0
     if not observe:
         f, _ = kelly_entry(ps, st)
@@ -308,10 +320,12 @@ def pp_entry_candidates(snap: Snapshot, s: Settings, projector: Projector) -> li
     dist = hit_distribution(ps)
     p_win = sum(dist[k] for k, mult in PAYOUTS[st].items() if mult > 1)
     out_legs = [Leg("prizepicks", f"{pk.player} {pk.side} {pk.line} {pk.stat}", pk.side, 0.0, pk.p,
-                    pk.game_id, player=pk.player, stat=pk.stat, line=pk.line, team=pk.team)
+                    pk.game_id, player=pk.player, stat=pk.stat, line=pk.line, team=pk.team,
+                    p_mkt=pk.p if pk.anchored else None)
                 for pk in legs]
+    p_mkt = p_win if all(pk.anchored for pk in legs) else None  # all-anchored legs: p_win is market-only
     return [Recommendation(None, "pp_entry", out_legs, stake, None, ev, p_win, f"{st[0]}-{st[1]}",
-                           snap.now, min(g.kickoff for g in games), observe_only=observe)]
+                           snap.now, min(g.kickoff for g in games), observe_only=observe, p_mkt=p_mkt)]
 
 
 def arb_candidates(snap: Snapshot, s: Settings, league_of: Callable[[KalshiMarket], str]) -> list[Recommendation]:

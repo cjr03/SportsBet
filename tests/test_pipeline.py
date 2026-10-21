@@ -353,3 +353,52 @@ def test_market_p_yes_ml_matches_devig(mk, settings):
     assert 0.5 < p < 0.56
     m_away = mk("E1-A1", "E1", "ml", "A1", game_id="g1")
     assert market_p_yes(m_away, game(1), snap, settings) == pytest.approx(1 - p)
+
+
+def _prop_market(mk, yes_ask=0.50):
+    return replace(mk("P1", "EP", "prop", line=49.5, yes_ask=yes_ask, no_ask=0.60, game_id="g1"),
+                   player="Player 1", stat="rush_yds")
+
+
+def test_projector_only_kalshi_prop_is_observe_only(mk, settings):
+    strong = StubProjector({("Player 1", "rush_yds"): (75.0, 20.0)})
+    snap = snap_with(kalshi=[_prop_market(mk)])
+    recs = kalshi_prop_candidates(snap, settings, strong)
+    assert len(recs) == 1 and recs[0].observe_only and recs[0].legs[0].p_mkt is None
+    assert [r.stake_cents for r in scan(snap, settings, strong, lambda m: "nfl")] == [0]
+    live = kalshi_prop_candidates(replace(snap, gates={("nfl", "prop_model"): False}), settings, strong)
+    assert not live[0].observe_only
+
+
+def test_anchored_kalshi_prop_stays_live_and_keeps_market_p(mk, settings):
+    props = [PropQuote("odds_api", "draftkings", "g1", "Player 1", "rush_yds", "over", 52.5, 1.70, NOW),
+             PropQuote("odds_api", "draftkings", "g1", "Player 1", "rush_yds", "under", 52.5, 2.25, NOW)]
+    recs = kalshi_prop_candidates(snap_with(kalshi=[_prop_market(mk, 0.45)], props=props), settings,
+                                  StubProjector())
+    assert not recs[0].observe_only and recs[0].legs[0].p_mkt == recs[0].legs[0].p_fair
+    assert recs[0].p_mkt == recs[0].legs[0].p_mkt
+
+
+def test_pp_entry_with_projector_leg_is_observe_only(settings):
+    snap = _pp_snap()
+    snap = replace(snap, props=[q for q in snap.props if not (q.book == "draftkings" and q.player == "Player 0")])
+    proj = StubProjector({("Player 0", "rush_yds"): (90.0, 10.0)})
+    recs = pp_entry_candidates(snap, settings, proj)
+    assert len(recs) == 1
+    r = recs[0]
+    if any(leg.player == "Player 0" for leg in r.legs):
+        assert r.observe_only and r.stake_cents == 0 and r.p_mkt is None
+    else:  # pragma: no cover - the strong projection should make Player 0 a leg
+        pytest.fail("projector leg not chosen")
+
+
+def test_pp_entry_anchored_records_market_p(settings):
+    r = pp_entry_candidates(_pp_snap(), settings, StubProjector())[0]
+    assert not r.observe_only and all(leg.p_mkt == leg.p_fair for leg in r.legs)
+    assert r.p_mkt == pytest.approx(r.p_win)
+
+
+def test_kalshi_game_rec_records_market_p(mk, settings):
+    r = kalshi_game_candidates(_ml_snap(mk, 0.48), settings)[0]
+    assert r.legs[0].p_mkt is not None and r.p_mkt == r.legs[0].p_mkt
+    assert r.legs[0].p_mkt == pytest.approx(r.legs[0].p_fair)  # no model: fair is the market
