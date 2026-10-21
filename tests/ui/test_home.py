@@ -97,7 +97,7 @@ def test_open_bet_pp_legs_and_scheduled():
                   stake_cents=1000)
     stats = {"P0": 60.0, "P1": 20.0}
     v = home.open_bet_view(row, {GID: GAME}, {}, NOW, stat_lookup=lambda g, p, s: stats.get(p, "pending"))
-    assert v.worth == "1 hit, 1 missed, 1 pending" and v.game == "Kickoff 1:20 PM PT" and v.close == "not yet"
+    assert v.worth == "1 hit, 1 missed, 1 pending" and v.game == "kickoff 1:20 PM PT" and v.close == "not yet"
 
 
 def test_open_bet_pp_exact_line_is_a_push():
@@ -259,8 +259,8 @@ def test_place_now_detail_prizepicks_needed_chance():
     pp = rec(11, kind="pp_entry", legs=legs, structure="3-power", stake_cents=1000, qty=None)
     text = home.place_now_detail(pp, {}, {GID: GAME}, 0.025)
     need = home.pp_needed("3-power")
-    assert text == ("our chance per pick: Hurts 61%, Mahomes 62%, Goff 60% · each pick needs about "
-                    f"{need:.0%} · pays up to $60.00 if all 3 hit · from sportsbook player lines")
+    assert text == ("our chance per pick: Hurts 61%, Mahomes 62%, Goff 60% · breaks even at about "
+                    f"{need:.0%} per pick · pays up to $60.00 if all 3 hit · from sportsbook player lines")
 
 
 def test_watching_filters_dedupes_and_ranks():
@@ -324,3 +324,47 @@ def test_open_bet_pp_pick_progress_and_summary():
         "$28.80 in 2 open bets ($29.50 with fees)", "up to $100.00 back if all win",
         f"about {home.d.money(k.expected_cents + v.expected_cents)} expected back "
         f"(+{home.d.money(k.expected_cents + v.expected_cents - 2950)}) at our chances when placed"]
+
+
+# -- review fixes ----------------------------------------------------------------------------------
+def test_no_side_game_bet_sportsbooks_number_matches_why_panel():
+    from gridiron_edge import describe as d
+    why = {"fair_source": "pinnacle", "books": ["pinnacle"], "p_market": 0.42, "p_model": 0.40,
+           "model_weight": 0.3, "method": "h2h", "tie_prob": 0.0}
+    r = rec(16, legs=[leg(side="no", price=0.52, p_fair=0.60, p_mkt=0.58)], why=why)
+    detail = home.place_now_detail(r, {}, {GID: GAME}, 0.025)
+    assert "sportsbooks say 58%" in detail
+    why_text = "\n".join(d.why_lines(r, NOW))
+    assert "Sportsbooks say 58%; our team ratings say 60% and count for 30%" in why_text
+    no_mkt = rec(17, legs=[leg(side="no", price=0.52, p_fair=0.60)], why=why)  # older rec: no p_mkt on the leg
+    assert "Sportsbooks say 58%; our team ratings say 60%" in "\n".join(d.why_lines(no_mkt, NOW))
+    assert d.model_share_text(why) == ("Sportsbooks say 42%; our team ratings say 40% and count for 30% "
+                                       "of our number")
+
+
+def test_prizepicks_detail_says_break_even():
+    legs = [leg(venue="prizepicks", side="over", player=n, stat="pass_tds", line=1.5, ticker=None, p_fair=0.6,
+                p_mkt=0.6) for n in ("Jalen Hurts", "Patrick Mahomes", "Jared Goff")]
+    pp = rec(11, kind="pp_entry", legs=legs, structure="3-power", stake_cents=1000, qty=None)
+    text = home.place_now_detail(pp, {}, {GID: GAME}, 0.025)
+    assert f"breaks even at about {home.pp_needed('3-power'):.0%} per pick" in text and "needs" not in text
+
+
+def test_pair_without_worst_price_says_at_not_up_to():
+    spread = dict(market_type="spread")
+    ladder = {"A": market(ticker="A", line=2.5, **spread), "B": market(ticker="B", line=6.5, **spread)}
+    mid = rec(13, kind="middle", qty=20, p_win=0.16,
+              legs=[leg(ticker="A", line=2.5, price=0.47), leg(ticker="B", side="no", line=6.5, price=0.50)])
+    text = home.place_now_detail(mid, ladder, {GID: GAME}, 0.025)
+    assert "20 contracts of each side at 47 cents and 50 cents" in text and "up to" not in text.split(" · ")[1]
+    capped = rec(14, kind="middle", qty=20, p_win=0.16,
+                 legs=[leg(ticker="A", line=2.5, price=0.47, worst_price=0.48),
+                       leg(ticker="B", side="no", line=6.5, price=0.50, worst_price=0.51)])
+    assert "20 contracts of each side, pay up to 48 cents and 51 cents" in \
+        home.place_now_detail(capped, ladder, {GID: GAME}, 0.025)
+
+
+def test_open_bet_game_text_is_lowercase_and_zero_contracts_reason():
+    assert home.game_text(GAME, NOW) == "kickoff 1:20 PM PT"
+    v = home.open_bet_view(bet_row(qty=0), {GID: GAME}, {"KXNFLSPREAD-T": market()}, NOW)
+    assert v.worth == "no contracts to sell"

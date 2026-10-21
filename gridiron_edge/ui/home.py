@@ -138,7 +138,7 @@ def game_text(g: Game | None, now: datetime, names: d.Names = d.DEFAULT_NAMES) -
         return score + when
     if g.status == "final" and g.home_pts is not None and g.away_pts is not None:
         return f"Final: {score}"
-    return f"Kickoff {d.when(g.kickoff, now)} PT"
+    return f"kickoff {d.when(g.kickoff, now)} PT"
 
 
 @dataclass
@@ -248,9 +248,11 @@ def open_bet_view(bet, games: dict[str, Game], markets: dict[str, KalshiMarket],
                 no_buyer = True
             fee = round(taker_fee(qty, bid, leg.fee_multiplier) * 100) if 0 < bid < 1 else 0
             total += round(qty * bid * 100) - fee
-        if total is None:
+        if not qty:
+            worth = "no contracts to sell"
+        elif total is None:
             worth = "no current Kalshi price"
-        elif no_buyer or not qty:
+        elif no_buyer:
             worth = "no buyer right now"
         else:
             pnl = total - paid
@@ -510,14 +512,16 @@ def place_now_detail(rec: Recommendation, markets: dict[str, KalshiMarket], game
         top = round(rec.stake_cents * pp_top_multiplier(rec.structure, payouts))
         parts = [f"our chance per pick: {picks}"]
         if need is not None:
-            parts.append(f"each pick needs about {d.pct(need)}")
+            parts.append(f"breaks even at about {d.pct(need)} per pick")
         if top:
             parts.append(f"pays up to {d.money(top)} if all {len(rec.legs)} hit")
         return " · ".join(parts + [source_short(rec)])
     if rec.kind in ("arb", "middle"):
         pays = payout_text(rec.legs, qty, markets, games, rec.tie_risk)
-        limits = " and ".join(_cents_text(leg.worst_price or leg.price) for leg in rec.legs)
-        parts = [f"{_plural(qty, 'contract')} of each side, pay up to {limits}", pays]
+        capped = all(leg.worst_price for leg in rec.legs)
+        limits = " and ".join(_cents_text((leg.worst_price if capped else None) or leg.price) for leg in rec.legs)
+        parts = [f"{_plural(qty, 'contract')} of each side" + (f", pay up to {limits}" if capped else f" at {limits}"),
+                 pays]
         if rec.kind == "middle":
             parts.insert(0, f"both sides pay about {d.pct(rec.p_win)} of the time")
         return " · ".join(parts + [source_short(rec)])

@@ -143,7 +143,7 @@ async def test_scores_panel_rows_headings_and_blink():
     g = Game("g1", "nfl", 2026, 7, T0, "KC", "BUF", status="live", home_pts=14, away_pts=10,
              period="Q2", clock="3:00")
     later = Game("g2", "nfl", 2026, 7, T0 + timedelta(hours=3), "PHI", "DAL")
-    rows = score_rows([g, later], T0, bet_counts={"g2": 1}, bet_status={"g1": "winning"})
+    rows = score_rows([g, later], T0, bet_counts={"g2": 1}, bet_status={"g1": (1, 0)})
     app = Harness(ScoresPanel())
     async with app.run_test(size=(100, 30)) as pilot:
         p = app.query_one(ScoresPanel)
@@ -255,3 +255,20 @@ def test_append_packed_wraps_between_segments_with_the_indent():
     append_packed(t, ["our chance 52%", [("pays ", ""), ("$40.00", "green")], "from Pinnacle"], 36)
     assert t.plain == "head\n    our chance 52% · pays $40.00\n    from Pinnacle"
     assert all(len(line) <= 36 for line in t.plain.splitlines())
+
+
+def test_place_now_texted_stays_with_time_left_when_wrapped():
+    from dataclasses import replace
+
+    from rich.text import Text
+
+    from gridiron_edge.ui.widgets import append_packed, place_now_segments
+    cells = ["5", "Kalshi", "KC ML", "47 cents", "$14.10", "$0.85", "59 min left", "Sun 10:00 AM"]
+    segs = place_now_segments(replace(rec(5), state="PENDING"), cells)
+    for width in range(30, 170):
+        t = Text()
+        append_packed(t, segs, width)
+        lines = t.plain.split("\n")
+        assert all(ln.strip() != "texted" for ln in lines), (width, lines)
+        assert any("59 min left" in ln and "texted" in ln for ln in lines), (width, lines)
+    assert "texted" not in Text().join(Text(str(x)) for x in place_now_segments(rec(5), cells)).plain

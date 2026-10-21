@@ -27,9 +27,9 @@ def test_book_lines_middle_of_the_books():
               q(PHI.game_id, "spreads", "home", -3.0, book="fd"), q(PHI.game_id, "spreads", "home", -4.0, book="mgm"),
               q(PHI.game_id, "totals", "over", 44.5), q(PHI.game_id, "totals", "under", 44.5),
               q(CHI.game_id, "totals", "over", 40.0)]
-    assert sv.book_lines(quotes, PHI) == "Eagles by 3.5 · total 44.5 points"
-    assert sv.book_lines([q(PHI.game_id, "spreads", "home", 2.5)], PHI) == "Cowboys by 2.5"
-    assert sv.book_lines([q(PHI.game_id, "spreads", "home", 0.0)], PHI) == "even game (no favorite)"
+    assert sv.book_lines(quotes, PHI) == "sportsbooks: Eagles by 3.5 · total 44.5 points"
+    assert sv.book_lines([q(PHI.game_id, "spreads", "home", 2.5)], PHI) == "sportsbooks: Cowboys by 2.5"
+    assert sv.book_lines([q(PHI.game_id, "spreads", "home", 0.0)], PHI) == "sportsbooks: even game (no favorite)"
     assert sv.book_lines(quotes, LIVE) is None
 
 
@@ -66,14 +66,14 @@ def test_rows_grouped_by_league_and_day_with_bets_and_prices():
     rows = sv.score_rows(games, NOW, quotes=[q(PHI.game_id, "spreads", "home", -3.5)],
                          markets=[mkt(PHI.game_id, "PHI", 0.62), mkt(cfb_a.game_id, "ALA", 0.8)],
                          chances={PHI.game_id: ("PHI", 0.64)}, bet_counts={PHI.game_id: 2},
-                         bet_status={LIVE.game_id: "winning"}, names=NAMES, cfb_extra_limit=2)
+                         bet_status={LIVE.game_id: (1, 0)}, names=NAMES, cfb_extra_limit=2)
     heads = [r.head for r in rows]
     assert heads == ["NFL · Today (2 games)", "Chiefs at Bills", "Cowboys at Eagles",
                      "NFL · Tomorrow (1 game)", "Patriots at Bears",
                      "College football · Today (3 games)", "Auburn at Alabama", "A0 at B0", "A1 at B1",
                      "2 more college games with no Kalshi prices and none of your bets (not shown)"]
     phi = rows[2]
-    assert phi.details == ["Eagles by 3.5", "Kalshi win price: Eagles 62 cents", "our win chance: Eagles 64%",
+    assert phi.details == ["sportsbooks: Eagles by 3.5", "Kalshi win price: Eagles 62 cents", "our win chance: Eagles 64%",
                            "your bets: 2"]
     assert rows[1].details == ["your bet is winning right now"] and rows[1].bet_status == "winning"
     assert rows[-1].note and rows[0].game is None and not rows[0].note
@@ -91,3 +91,38 @@ def test_finished_games_go_last_within_the_day():
     rows = sv.score_rows([early_final, PHI, LIVE], NOW)
     assert [r.head for r in rows] == ["NFL · Today (3 games)", "Chiefs at Bills", "Cowboys at Eagles",
                                       "Jaguars at Saints"]
+
+
+def test_live_game_uses_only_pre_game_lines():
+    pre = Quote("odds_api", "dk", LIVE.game_id, "spreads", "home", -2.5, 1.9, LIVE.kickoff - timedelta(hours=1),
+                LIVE.kickoff - timedelta(hours=1))
+    inplay = Quote("odds_api", "fd", LIVE.game_id, "spreads", "home", 7.5, 1.9, NOW, NOW)
+    assert sv.book_lines([pre, inplay], LIVE) == "sportsbooks before kickoff: Bills by 2.5"
+    assert sv.book_lines([inplay], LIVE) is None
+
+
+def test_standing_text_counts_every_bet_on_the_game():
+    assert sv.standing_text(1, 1, 0) == ("your bet is winning right now", "winning")
+    assert sv.standing_text(1, 0, 1) == ("your bet is losing right now", "losing")
+    assert sv.standing_text(2, 1, 1) == ("1 of your 2 bets winning and 1 losing right now", "none")
+    assert sv.standing_text(2, 1, 0) == ("1 of your 2 bets winning right now", "none")
+    assert sv.standing_text(2, 2, 0) == ("2 of your 2 bets winning right now", "winning")
+    assert sv.standing_text(2, 0, 2) == ("2 of your 2 bets losing right now", "losing")
+    assert sv.standing_text(2, 0, 0) == (None, "none")
+
+
+def test_live_standing_with_two_bets_one_winning_one_losing():
+    import json
+    from dataclasses import asdict
+    from gridiron_edge.types import Leg
+
+    def bet(team, side="yes", kind="kalshi_game", n=1):
+        legs = [asdict(Leg("kalshi", "x", side, 0.5, 0.55, game_id=LIVE.game_id, ticker=f"KXNFLGAME-{team}",
+                           team=team, line=None)) for _ in range(n)]
+        return {"kind": kind, "legs_json": json.dumps(legs)}
+    bets = [bet("KC"), bet("BUF"), bet("KC", kind="arb", n=2)]  # Chiefs lead 14-10
+    st = sv.live_standing(bets, {LIVE.game_id: LIVE, PHI.game_id: PHI})
+    assert st == {LIVE.game_id: (1, 1)}
+    rows = sv.score_rows([LIVE], NOW, bet_counts={LIVE.game_id: 3}, bet_status=st)
+    assert rows[1].details == ["your bets: 3", "1 of your 3 bets winning and 1 losing right now"]
+    assert rows[1].bet_status == "none"

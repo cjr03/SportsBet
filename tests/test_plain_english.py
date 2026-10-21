@@ -306,7 +306,7 @@ def test_scores_tab_is_plain():
     m = _market()
     rows = sv.score_rows([live, CFB_GAME, replace(GAME, game_id="nfl:x", status="final", home_pts=3, away_pts=7)],
                          NOW, quotes=quotes, markets=[replace(m, market_type="ml", team="PHI")],
-                         chances={CFB: ("AUB", 0.3)}, bet_counts={CFB: 1}, bet_status={GID: "losing"},
+                         chances={CFB: ("AUB", 0.3)}, bet_counts={CFB: 1}, bet_status={GID: (0, 1)},
                          names=NAMES)
     text = []
     for r in rows:
@@ -318,6 +318,9 @@ def test_scores_tab_is_plain():
     assert "2nd quarter, 4:12 left" in joined and "qtr" not in joined
     assert "Alabama by 6.5" in joined and "total 51.5 points" in joined and "our win chance: Alabama 70%" in joined
     assert "ALA" not in joined and "your bets: 1" in joined
+    for n, w, lost in ((1, 1, 0), (1, 0, 1), (2, 1, 1), (2, 2, 0), (3, 0, 2)):
+        clean(sv.standing_text(n, w, lost)[0])
+    assert "1 bets" not in sv.standing_text(2, 1, 1)[0]
     assert sv.state_text(GAME, NOW) == "kickoff Sun 1:00 PM PT"
 
 
@@ -349,3 +352,11 @@ def test_prizepicks_best_picks_are_plain():
     for line in out:
         if line:
             sentence(line.strip())
+
+
+async def test_texts_not_set_up_line_has_no_setting_names(services_mocked):
+    svc = services_mocked(notify_phone="", ntfy_topic="")
+    lines = await svc.startup(NOW)
+    text = "\n".join(m for _, m in lines)
+    assert "bet ideas show up in this log only" in text
+    assert "NOTIFY_PHONE" not in text and "NTFY_TOPIC" not in text and ".env" not in text

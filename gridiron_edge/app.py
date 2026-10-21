@@ -15,13 +15,12 @@ from textual.widgets import Footer, Input, Static, TabbedContent, TabPane
 from gridiron_edge import describe as d
 
 from gridiron_edge.bets.lifecycle import LifecycleError
-from gridiron_edge.bets.settle import _yes_from_score
 from gridiron_edge.db import InsufficientFunds, InvalidAmount
 from gridiron_edge.notify.format import PT
 from gridiron_edge.bets.report import segment_label
 from gridiron_edge.scheduler import LEAGUES, Job
 from gridiron_edge.services import CHANNEL_WORDS, NOTIFY_TEST_TEXT, Services
-from gridiron_edge.types import Leg, Recommendation
+from gridiron_edge.types import Recommendation
 from gridiron_edge.ui import home
 from gridiron_edge.ui import prizepicks as pp_ui
 from gridiron_edge.ui.commands import COMMAND_WORDS, HELP, Command, CommandError, parse_command
@@ -217,21 +216,6 @@ class GridironApp(App):
             self._active_jobs.difference_update(j.key for j in jobs)
 
     # -- views ------------------------------------------------------------
-    def _bet_status(self) -> dict[str, str]:
-        """Live games where an open single-leg Kalshi game bet is currently winning or losing."""
-        out: dict[str, str] = {}
-        for bet in self.services.lifecycle.open_bets():
-            if bet["kind"] != "kalshi_game":
-                continue
-            leg = Leg(**json.loads(bet["legs_json"])[0])
-            g = self.services.registry.get(leg.game_id or "")
-            if g is None or g.status != "live":
-                continue
-            yes = _yes_from_score(leg, None, g)
-            if yes is not None:
-                out[g.game_id] = "winning" if yes == (leg.side == "yes") else "losing"
-        return out
-
     @property
     def names(self) -> d.Names:
         return self.services.notifier.names
@@ -365,7 +349,9 @@ class GridironApp(App):
         counts = scores_ui.bet_counts(s.lifecycle.open_bets(), lambda b: json.loads(b["legs_json"]))
         rows = scores_ui.score_rows(games, now, quotes=s.latest.get("quotes", []),
                                     markets=s.latest.get("kalshi", []), chances=chances, bet_counts=counts,
-                                    bet_status=self._bet_status(), names=self.names)
+                                    bet_status=scores_ui.live_standing(s.lifecycle.open_bets(),
+                                                                       {g.game_id: g for g in games}),
+                                    names=self.names)
         self.query_one(ScoresPanel).set_rows(rows, s.rundown.delay_seconds if s.rundown else None)
 
     # -- commands -----------------------------------------------------------

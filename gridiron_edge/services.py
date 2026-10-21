@@ -383,7 +383,7 @@ class Services:
         if missing:
             out.append(("info", f"Not set up yet (add a key to use it): {', '.join(API_NAMES[a] for a in missing)}."))
         if not (self.settings.notify_phone or self.settings.ntfy_topic):
-            out.append(("info", "Texts: no NOTIFY_PHONE or NTFY_TOPIC in .env, so bet ideas show up in this log only."))
+            out.append(("info", "Texts: no phone number or ntfy topic set up yet, so bet ideas show up in this log only."))
         out += await self._guarded("teams", self._seed_teams(now))
         out += await self._guarded("games", self._register_games(now))
         out += await self._guarded("nflverse", self._load_nflverse(now))

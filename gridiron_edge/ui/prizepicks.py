@@ -99,13 +99,13 @@ def _source(ln: PPLine, gated: bool) -> str:
 
 
 def line_text(ln: PPLine, gated: bool = True) -> str:
-    """e.g. 'Caleb Williams MORE than 249.5 passing yards - our chance 56% (sportsbooks)'."""
+    """e.g. 'Caleb Williams MORE than 249.5 passing yards - our chance 56.0% (sportsbooks)'."""
     line = f"{ln.line:g}"
     if ln.p is None or ln.side is None:
         why = "too old to use" if not ln.fresh else "no estimate yet" if ln.team else "team unknown"
         return f"{ln.player} {line} {d.stat_words(ln.stat)} - {why}"
     more = "MORE" if ln.side == "over" else "LESS"
-    return f"{ln.player} {more} than {line} {d.stat_words(ln.stat)} - our chance {ln.p:.0%} {_source(ln, gated)}"
+    return f"{ln.player} {more} than {line} {d.stat_words(ln.stat)} - our chance {ln.p:.1%} {_source(ln, gated)}"
 
 
 def _by_game(view: PPView) -> list[tuple[Game, list[PPLine]]]:
@@ -157,9 +157,9 @@ def clear_text(n_clear: int, n: int) -> str:
 
 
 def best_picks(view: PPView, n: int = 3) -> list[PPLine]:
-    """The n picks with the highest chance above what they need (usable lines only)."""
+    """The n picks with the highest chance above what they need (lines that reach it only)."""
     best = best_structure(view.settings)
-    usable = [ln for ln in view.lines if ln.game_id in view.games and ln.p is not None and ln.fresh]
+    usable = [ln for ln in view.lines if ln.game_id in view.games and _clears(ln, view.settings, best)]
 
     def room(ln: PPLine) -> float:
         need = needed_chance(ln, view.settings, best)

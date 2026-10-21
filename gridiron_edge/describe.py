@@ -309,11 +309,19 @@ def source_text(why: dict) -> str | None:
     return text
 
 
-def model_share_text(why: dict) -> str | None:
-    """'Sportsbooks say 54%; our team ratings say 57% and count for 30% of our number.'"""
+def model_share_text(why: dict, leg: Leg | None = None) -> str | None:
+    """'Sportsbooks say 54%; our team ratings say 57% and count for 30% of our number.'
+
+    The why dict holds the YES side; with the bet's leg the numbers are for the side being bet (the leg's
+    own market chance, which allows for ties, when it has one), so they match the PLACE NOW row."""
     p_mkt, p_model, w = why.get("p_market"), why.get("p_model"), why.get("model_weight")
     if p_mkt is None:
         return None
+    if leg is not None and leg.side == "no":
+        p_mkt = 1 - p_mkt
+        p_model = None if p_model is None else 1 - p_model
+    if leg is not None and leg.p_mkt is not None:
+        p_mkt = leg.p_mkt
     if not w or p_model is None:
         return f"Sportsbooks say {pct(p_mkt)}; our number is theirs (our team ratings are not used for this one)"
     return (f"Sportsbooks say {pct(p_mkt)}; our team ratings say {pct(p_model)} and count for "
@@ -361,7 +369,8 @@ def why_lines(rec: Recommendation, now: datetime, names: Names = DEFAULT_NAMES,
         leg = rec.legs[0]
         out.append(f"Our chance: {pct(leg.p_fair)}. The price implies {pct(leg.price)}.")
     out.append("Where our number came from: " + (source_text(why) or _default_source(rec)) + ".")
-    for extra_line in (model_share_text(why), kalshi_mid_text(why, rec.legs[0].side if rec.legs else "yes"),
+    game_leg = rec.legs[0] if rec.kind == "kalshi_game" and len(rec.legs) == 1 else None
+    for extra_line in (model_share_text(why, game_leg), kalshi_mid_text(why, rec.legs[0].side if rec.legs else "yes"),
                        _tie_text(why)):
         if extra_line:
             out.append(extra_line + ".")

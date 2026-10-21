@@ -27,9 +27,9 @@ def view(lines, blocker=None, active=0, **kw):
 
 def test_line_text_plain_english():
     assert ppv.line_text(line("Caleb Williams", 0.56)) == \
-        "Caleb Williams MORE than 249.5 passing yards - our chance 56% (sportsbooks)"
+        "Caleb Williams MORE than 249.5 passing yards - our chance 56.0% (sportsbooks)"
     assert ppv.line_text(line("D'Andre Swift", 0.58, side="under", anchored=False, stat="rush_yds", point=60.5)) == \
-        "D'Andre Swift LESS than 60.5 rushing yards - our chance 58% (our model only - not texted)"
+        "D'Andre Swift LESS than 60.5 rushing yards - our chance 58.0% (our model only - not texted)"
     assert ppv.line_text(line("X", 0.58, anchored=False), gated=False).endswith("(our model only)")
     assert ppv.line_text(line("Y", None)).endswith("- no estimate yet")
     assert ppv.line_text(line("Y", None, team=None)).endswith("- team unknown")
@@ -105,6 +105,8 @@ def test_best_picks_and_needed_chance():
     assert ppv.needed_chance(line("x", 0.5), s) == pytest.approx(be + s.pp_margin_market)
     assert ppv.needed_chance(line("x", 0.5, anchored=False), s) == pytest.approx(be + s.pp_margin_model)
     assert [ln.player for ln in ppv.best_picks(v)] == ["B", "E", "D"]  # most room above the needed chance
+    short = view([line("B", 0.61), line("G", be + s.pp_margin_market - 0.002)])  # just under what it needs
+    assert [ln.player for ln in ppv.best_picks(short)] == ["B"]
     out = ppv.board_lines(v, NOW)
     k = out.index("Best picks now:")
     assert out[k + 1] == "  1. B MORE than 249.5 passing yards: our chance 61.0%, needs 56.2% (Patriots at Bears)"

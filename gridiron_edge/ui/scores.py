@@ -20,7 +20,7 @@ class ScoreRow:
     game: Game | None = None
     state: str = ""  # 'LIVE ...', 'Final: ...', 'Sun 1:25 PM PT'
     details: list[str] = field(default_factory=list)
-    bet_status: str = "none"  # winning / losing / none
+    bet_status: str = "none"  # winning / losing (every bet we can judge) / none
     note: bool = False  # a plain line (e.g. how many games are not shown), not a heading
 
 
@@ -34,8 +34,11 @@ def _latest_per_book(quotes: Iterable[Quote]) -> list[Quote]:
 
 
 def book_lines(quotes: Iterable[Quote], g: Game, names: d.Names = d.DEFAULT_NAMES) -> str | None:
-    """'Eagles by 3.5 · total 44.5' from the middle sportsbook line; None when no line is loaded."""
-    qs = _latest_per_book(q for q in quotes if q.game_id == g.game_id and q.point is not None)
+    """'sportsbooks: Eagles by 3.5 · total 44.5 points' from the middle sportsbook line; None when no line
+    is loaded. Once a game has started only lines from before kickoff count (never in-game lines)."""
+    started = g.status != "scheduled"
+    qs = _latest_per_book(q for q in quotes if q.game_id == g.game_id and q.point is not None
+                          and (not started or q.last_update <= g.kickoff))
     home = [q.point for q in qs if q.market == "spreads" and q.side == "home"]
     home += [-q.point for q in qs if q.market == "spreads" and q.side == "away"]
     totals = [q.point for q in qs if q.market == "totals"]
@@ -49,7 +52,9 @@ def book_lines(quotes: Iterable[Quote], g: Game, names: d.Names = d.DEFAULT_NAME
             parts.append(f"{names.team(g.league, fav)} by {abs(pt):g}")
     if totals:
         parts.append(f"total {median(totals):g} points")
-    return " · ".join(parts) if parts else None
+    if not parts:
+        return None
+    return ("sportsbooks before kickoff: " if started else "sportsbooks: ") + " · ".join(parts)
 
 
 def kalshi_prices(markets: Iterable[KalshiMarket], g: Game) -> dict[str, int]:
@@ -117,12 +122,48 @@ def _bets_text(n: int) -> str | None:
     return f"your bets: {n}" if n else None
 
 
-_STATUS_WORDS = {"winning": "your bet is winning right now", "losing": "your bet is losing right now"}
+def standing_text(n_bets: int, winning: int, losing: int) -> tuple[str | None, str]:
+    """('1 of your 2 bets winning and 1 losing right now', color key) for a live game. The color key is
+    'winning' / 'losing' only when every bet we could check points the same way and none is left out."""
+    total = max(n_bets, winning + losing)
+    if not winning and not losing:
+        return None, "none"
+    color = ("winning" if winning == total else "losing" if losing == total else "none")
+    if total == 1:
+        return f"your bet is {'winning' if winning else 'losing'} right now", color
+    if winning and losing:
+        return f"{winning} of your {total} bets winning and {losing} losing right now", color
+    n, word = (winning, "winning") if winning else (losing, "losing")
+    return f"{n} of your {total} bets {word} right now", color
+
+
+def live_standing(open_bets: Iterable, games: dict[str, Game]) -> dict[str, tuple[int, int]]:
+    """Live game id -> (bets winning, bets losing) right now, from the score. Only single-pick Kalshi game
+    bets can be judged this way; other bets on the game are counted by bet_counts but not here."""
+    import json
+
+    from gridiron_edge.bets.settle import _yes_from_score
+    from gridiron_edge.types import Leg
+    out: dict[str, tuple[int, int]] = {}
+    for bet in open_bets:
+        legs = json.loads(bet["legs_json"])
+        if bet["kind"] != "kalshi_game" or len(legs) != 1:
+            continue
+        leg = Leg(**legs[0])
+        g = games.get(leg.game_id or "")
+        if g is None or g.status != "live":
+            continue
+        yes = _yes_from_score(leg, None, g)
+        if yes is None:
+            continue
+        w, lost = out.get(g.game_id, (0, 0))
+        out[g.game_id] = (w + 1, lost) if yes == (leg.side == "yes") else (w, lost + 1)
+    return out
 
 
 def score_rows(games: Iterable[Game], now: datetime, *, quotes: Iterable[Quote] = (),
                markets: Iterable[KalshiMarket] = (), chances: dict[str, tuple[str, float]] | None = None,
-               bet_counts: dict[str, int] | None = None, bet_status: dict[str, str] | None = None,
+               bet_counts: dict[str, int] | None = None, bet_status: dict[str, tuple[int, int]] | None = None,
                names: d.Names = d.DEFAULT_NAMES, cfb_extra_limit: int = CFB_EXTRA_LIMIT) -> list[ScoreRow]:
     """Headings and game rows: NFL then college; Earlier / Today / Tomorrow / Later under each league.
     Within a day, live games first, then upcoming games (those with Kalshi prices or your bets first), then
@@ -156,10 +197,11 @@ def score_rows(games: Iterable[Game], now: datetime, *, quotes: Iterable[Quote] 
                 n = sum(day_heading(x.kickoff, now) == h for x in gs)
                 out.append(ScoreRow(f"{label} · {h} ({n} game{'s' * (n != 1)})"))
             matchup = f"{names.team(g.league, g.away)} at {names.team(g.league, g.home)}"
-            status = bet_status.get(g.game_id, "none")
+            won, lost = bet_status.get(g.game_id, (0, 0))
+            standing, status = standing_text(bet_counts.get(g.game_id, 0), won, lost)
             details = [x for x in (book_lines(quotes, g, names), kalshi_text(info[g.game_id], g, names),
                                    chance_text(chances.get(g.game_id), g, names),
-                                   _bets_text(bet_counts.get(g.game_id, 0)), _STATUS_WORDS.get(status)) if x]
+                                   _bets_text(bet_counts.get(g.game_id, 0)), standing) if x]
             out.append(ScoreRow(matchup, g, state_text(g, now, names), details, status))
         if hidden:
             out.append(ScoreRow(f"{hidden} more college game{'s' * (hidden != 1)} with no Kalshi prices and "

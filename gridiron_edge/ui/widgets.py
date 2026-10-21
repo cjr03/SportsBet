@@ -414,6 +414,17 @@ def _list_width(w) -> int:
     return max(30, (w.size.width or 160) - 4)
 
 
+def place_now_segments(r: Recommendation, cells: list[str]) -> list:
+    """The first detail line of a PLACE NOW row as packable segments; 'texted' rides with the time left so
+    it never wraps onto a line by itself."""
+    _, _, _, price, stake, profit, left, kick = cells
+    profit_word = "locked profit" if r.kind == "arb" else "expected profit"
+    time_left: list[Piece] = [(left, PENDING if "min left" in left and "hr" not in left else "")]
+    if r.state == "PENDING":
+        time_left.append((" (texted)", "dim"))
+    return [price, f"bet {stake}", [(f"{profit_word} ", ""), (profit, PROFIT)], time_left, f"kickoff {kick} PT"]
+
+
 class PlaceNowList(OptionList):
     """Recs that can be placed right now, two lines each; Enter confirm, s skip, d why."""
 
@@ -469,12 +480,7 @@ class PlaceNowList(OptionList):
         out.append(where, style=f"bold {PROFIT}" if r.kind == "arb" else "bold")
         out.append(f"  {bet}")
         width = _list_width(self)
-        profit_word = "locked profit" if r.kind == "arb" else "expected profit"
-        segs: list = [price, f"bet {stake}", [(f"{profit_word} ", ""), (profit, PROFIT)],
-                      [(left, PENDING if "min left" in left and "hr" not in left else "")], f"kickoff {kick} PT"]
-        if r.state == "PENDING":
-            segs.append([("texted", "dim")])
-        append_packed(out, segs, width)
+        append_packed(out, place_now_segments(r, [rid, where, bet, price, stake, profit, left, kick]), width)
         if self.details.get(r.id):
             append_packed(out, self.details[r.id].split(SEP), width, style="#94a3b8")
         if r.id in self.flash_ids:
