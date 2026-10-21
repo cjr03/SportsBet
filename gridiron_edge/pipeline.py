@@ -47,6 +47,10 @@ class Snapshot:
     open_game_ids: set[str] = field(default_factory=set)
     open_players: set[str] = field(default_factory=set)
     open_leg_keys: set[str] = field(default_factory=set)
+    # walk-forward blend fits: (league, ml|spread|total) -> (b_model, se); weight = clip(b - se, 0, default)
+    blend_fits: dict[tuple[str, str], tuple[float, float]] = field(default_factory=dict)
+    # league -> 95th percentile of |model - closing line| in the backtest (pts)
+    disagree_caps: dict[str, float] = field(default_factory=dict)
 
 
 class Projector(Protocol):
@@ -82,6 +86,19 @@ def _margin_model(snap: Snapshot, league: str, mtype: str) -> MarginModel:
     return snap.margin_models.get(key) or snap.margin_models[_MODEL_FALLBACK.get(key, key)]
 
 
+def model_weight(league: str, mtype: str, hours_to_kickoff: float, snap: Snapshot) -> float:
+    """The model's share of the logit blend: the fitted b_model less one se, capped at the prior default.
+
+    With no fit, the prior default; NFL totals (a naive model) get 0 until their own backtest fits.
+    """
+    default = default_weight(league, hours_to_kickoff)
+    fit = snap.blend_fits.get((league, mtype))
+    if fit is None:
+        return 0.0 if (league, mtype) == ("nfl", "total") else default
+    b, se = fit
+    return float(min(max(b - se, 0.0), default))
+
+
 @dataclass(frozen=True)
 class GameFair:
     """P(YES)/P(NO) for a Kalshi game market and where it came from."""
@@ -100,6 +117,13 @@ class GameFair:
                 "p_model": None if self.p_model is None else round(self.p_model, 4),
                 "model_weight": round(self.model_weight, 4), "method": self.method,
                 "tie_prob": self.tie_prob}
+
+
+class _MarketFair(NamedTuple):
+    p_mkt: float
+    mkt_mean: float | None
+    fair: FairPrice
+    method: str
 
 
 def _sharp_at(quotes: list[Quote], market: str, threshold: float, model: MarginModel,
@@ -134,9 +158,9 @@ def kalshi_tie_rule(m: KalshiMarket) -> str | None:
     return None
 
 
-def _game_fair(m: KalshiMarket, g: Game, snap: Snapshot, s: Settings,
-               cache: dict | None = None) -> GameFair | None:
-    """Blended P(YES) for a Kalshi game market, or None when inputs are missing or CFB agrees.
+def _market(m: KalshiMarket, g: Game, snap: Snapshot, s: Settings,
+            cache: dict | None = None) -> _MarketFair | None:
+    """Sportsbook-only P(YES), market mean and fair source, or None when inputs are missing.
 
     cache: shared across one scan so each game's implied mean is solved once, not per Kalshi strike.
     """
@@ -178,20 +202,47 @@ def _game_fair(m: KalshiMarket, g: Game, snap: Snapshot, s: Settings,
             p_mkt = _p_yes(mtype, model, im.mean, m.line, home_side)
         else:
             return None
+    return _MarketFair(p_mkt, mkt_mean, fp, method)
 
+
+def market_p_yes(m: KalshiMarket, g: Game, snap: Snapshot, s: Settings) -> float | None:
+    """Devigged sportsbook P(YES) with no model (closing-line value, pure market edges)."""
+    mkt = _market(m, g, snap, s)
+    return None if mkt is None else mkt.p_mkt
+
+
+def _game_fair(m: KalshiMarket, g: Game, snap: Snapshot, s: Settings,
+               cache: dict | None = None) -> GameFair | None:
+    """Blended P(YES)/P(NO) for a Kalshi game market, or None when inputs are missing.
+
+    The model gets no weight when its gap to the market exceeds the league cap (likely missing
+    information), when it is vetoed (QB change), for NFL totals until validated, and for CFB
+    unless the CFB gate passes and the model disagrees by at least cfb_min_disagree.
+    """
+    mkt = _market(m, g, snap, s, cache)
+    if mkt is None:
+        return None
+    p_mkt, mkt_mean, fp, method = mkt
+    mtype = m.market_type
     pred = snap.predictions.get(g.game_id)
     model_mean = None if pred is None else (pred.mean_total if mtype == "total" else pred.mean_margin)
-    if g.league == "cfb":
-        # CFB bets need the model to disagree with the line; without both means we can't tell.
-        if model_mean is None or mkt_mean is None or abs(model_mean - mkt_mean) < s.cfb_min_disagree:
-            return None
-    p_model, w = None, 0.0
-    p = p_mkt
+    p_model, w, p = None, 0.0, p_mkt
     if model_mean is not None:
-        p_model = _p_yes(mtype, model, model_mean, m.line, home_side)
         hours = (g.kickoff - snap.now).total_seconds() / 3600
-        w = default_weight(g.league, hours)
-        p = blend(p_model, p_mkt, w)
+        w = model_weight(g.league, mtype, hours, snap)
+        cap = snap.disagree_caps.get(g.league, s.nfl_max_disagree if g.league == "nfl" else s.cfb_max_disagree)
+        gap = None if mkt_mean is None else abs(model_mean - mkt_mean)
+        if pred.veto or (gap is not None and gap > cap):
+            w = 0.0
+        if g.league == "cfb" and (snap.gates.get((g.league, mtype), False) or gap is None
+                                  or gap < s.cfb_min_disagree):
+            w = 0.0  # CFB: model only as a bonus once gated in and clearly disagreeing
+        if w > 0.0:
+            p_model = _p_yes(mtype, _margin_model(snap, g.league, mtype), model_mean, m.line,
+                             m.team == g.home)
+            p = blend(p_model, p_mkt, w)
+        else:
+            w = 0.0
     p_no, tie = 1.0 - p, 0.0
     if g.league == "nfl" and mtype == "ml":
         # sportsbook moneylines and the model are P(win | no tie); a tie loses YES for both teams.
@@ -203,8 +254,14 @@ def _game_fair(m: KalshiMarket, g: Game, snap: Snapshot, s: Settings,
     return GameFair(p, p_no, p_mkt, p_model, w, fp, method, tie)
 
 
+def game_p_yes_w(m: KalshiMarket, g: Game, snap: Snapshot, s: Settings) -> tuple[float, float] | None:
+    """(Blended P(YES), model weight) for a Kalshi game market, or None when inputs are missing."""
+    gf = _game_fair(m, g, snap, s)
+    return None if gf is None else (gf.p_yes, gf.model_weight)
+
+
 def _game_p_yes(m: KalshiMarket, g: Game, snap: Snapshot, s: Settings) -> float | None:
-    """Blended P(YES) for a Kalshi game market, or None when inputs are missing or CFB agrees."""
+    """Blended P(YES) for a Kalshi game market, or None when inputs are missing."""
     gf = _game_fair(m, g, snap, s)
     return None if gf is None else gf.p_yes
 
@@ -235,12 +292,13 @@ def _best_side(m: KalshiMarket, p_yes: float, snap: Snapshot, s: Settings, extra
 
 def _kalshi_rec(kind: Literal["kalshi_game", "kalshi_prop"], m: KalshiMarket, g: Game, sd: _Side,
                 description: str, snap: Snapshot, gate: str, tie_risk: bool, why: dict | None = None,
-                observe: bool = False) -> Recommendation:
+                observe: bool | None = None) -> Recommendation:
+    """observe: None takes the (league, gate) gate; True/False overrides it."""
     leg = Leg("kalshi", description, sd.side, sd.price, sd.p, g.game_id, ticker=m.ticker,
               player=m.player, stat=m.stat, line=m.line, team=m.team)
+    observe_only = snap.gates.get((g.league, gate), False) if observe is None else observe
     return Recommendation(None, kind, [leg], 0, sd.qty, sd.ev, sd.p, None, snap.now, g.kickoff,
-                          observe_only=observe or snap.gates.get((g.league, gate), False), tie_risk=tie_risk,
-                          why=why)
+                          observe_only=observe_only, tie_risk=tie_risk, why=why)
 
 
 def kalshi_game_candidates(snap: Snapshot, s: Settings) -> list[Recommendation]:
@@ -267,8 +325,11 @@ def kalshi_game_candidates(snap: Snapshot, s: Settings) -> list[Recommendation]:
         desc = {"ml": f"{m.team} ML", "spread": f"{m.team} wins by >{m.line}",
                 "total": f"Total over {m.line}"}[m.market_type]
         tie = g.league == "nfl" and m.market_type == "ml"
+        # the gate judges the model: a market-only edge (w=0) may go live when market_only_live is on
+        gated = snap.gates.get((g.league, m.market_type), False) and (gf.model_weight > 0
+                                                                       or not s.market_only_live)
         # soft-book median only: no sharp price behind it, so log it rather than stake it
-        observe = gf.fair.source == "median" and s.median_fair_policy == "observe"
+        observe = gated or (gf.fair.source == "median" and s.median_fair_policy == "observe")
         out.append(_kalshi_rec("kalshi_game", m, g, sd, desc, snap, m.market_type, tie, gf.why(), observe))
     return out
 

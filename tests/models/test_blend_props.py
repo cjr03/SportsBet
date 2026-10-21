@@ -106,3 +106,33 @@ def test_team_of(weekly_df):
     p = PropProjector(weekly_df)
     assert p.team_of("VET back") == "KC"
     assert p.team_of("Nobody") is None
+
+
+def test_walkforward_reports_disagreement_p95():
+    games = [{"date": date(2026, 9, 1) + timedelta(days=k), "home": "A", "away": "B", "neutral": False,
+              "home_line": -3.0, "margin": 10 if k % 2 else -10} for k in range(100)]
+    _, m = walkforward_ats("nfl", games, lambda d: (lambda g: 3.0 + (d.day % 5)))
+    assert 3.0 <= m["disagree_p95"] <= 4.0
+
+
+def test_walkforward_totals_and_production_margin_model():
+    from gridiron_edge.models.blend import walkforward_totals
+    from gridiron_edge.strategy.distributions import NormalModel
+
+    rng = np.random.default_rng(5)
+    games = []
+    for k in range(400):
+        true = 44 + rng.normal(0, 5)
+        games.append({"date": date(2025, 9, 1) + timedelta(days=k // 10), "season": 2025,
+                      "total_line": round(true * 2) / 2 + 0.25, "total": round(true + rng.normal(0, 13))})
+    fit, m = walkforward_totals(games, lambda d: (lambda g: g["total_line"] + 1.0))
+    assert m["n"] == fit.n > 0 and set(m["by_season"]) == {"2025"} and "sim_roi" in m
+    wide = walkforward_totals(games, lambda d: (lambda g: g["total_line"] + 1.0), NormalModel(40.0))[1]
+    assert wide["brier"] != m["brier"]
+
+
+def test_walkforward_early_late_split():
+    games = [{"date": date(2025, 9, 1) + timedelta(days=7 * k), "season": 2025, "home_line": -3.0,
+              "margin": 10 if k % 2 else -10} for k in range(10)]
+    _, m = walkforward_ats("nfl", games, lambda d: (lambda g: 4.0))
+    assert m["early"]["n"] == 4 and m["late"]["n"] == 6

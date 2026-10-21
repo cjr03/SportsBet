@@ -117,6 +117,23 @@ def test_cfb_unknown_team_prior_and_no_leakage():
 def test_cfb_prior_formula():
     out = cfb_prior({"A": 10.0, "B": -4.0}, {"A": 0.8}, {"A": 900.0, "B": 300.0})
     z = (900 - 600) / 300  # population std of [900, 300] is 300
-    assert out["A"] == pytest.approx(0.6 * 10 + 0.25 * 10 * 0.3 + 0.15 * z * 7)
-    assert out["B"] == pytest.approx(0.6 * -4 + 0.25 * -4 * 0.0 + 0.15 * -1 * 7)
-    assert cfb_prior({"C": 5.0}, {}, {})["C"] == pytest.approx(3.0)
+    # ratings are centred on their mean (3.0) before regressing, so A is +7 and B is -7
+    assert out["A"] == pytest.approx(0.6 * 7 + 0.25 * 7 * 0.3 + 0.15 * z * 7)
+    assert out["B"] == pytest.approx(0.6 * -7 + 0.25 * -7 * 0.0 + 0.15 * -1 * 7)
+    assert cfb_prior({"C": 5.0}, {}, {})["C"] == pytest.approx(0.0)
+
+
+def test_cfb_prior_top_team_does_not_fall_with_returning_production():
+    # last-season ratings from a priors={} fit sit around UNKNOWN_PRIOR (-20), all negative
+    prev = {"Top": -5.7, "Mid": -20.0, "Low": -36.4}
+    lo = cfb_prior(prev, {"Top": 0.5}, {})["Top"]
+    hi = cfb_prior(prev, {"Top": 0.9}, {})["Top"]
+    assert hi > lo > 0
+    assert cfb_prior(prev, {"Low": 0.9}, {})["Low"] < cfb_prior(prev, {"Low": 0.5}, {})["Low"] < 0
+
+
+def test_cfb_prior_centres_on_teams_with_enough_games():
+    prev = {"A": -10.0, "B": -30.0, "FCS": -60.0}
+    out = cfb_prior(prev, {}, {}, games={"A": 12, "B": 12, "FCS": 1})
+    assert out["A"] == pytest.approx(0.6 * 10) and out["B"] == pytest.approx(-0.6 * 10)
+    assert out["FCS"] == pytest.approx(0.6 * -40)

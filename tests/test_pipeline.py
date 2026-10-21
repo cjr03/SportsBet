@@ -126,17 +126,21 @@ def test_prediction_blends_into_probability(mk, settings):
     assert blended > base
 
 
-def test_cfb_requires_disagreement(mk, settings):
+def test_cfb_model_counts_only_when_it_disagrees(mk, settings):
     g = game(1, league="cfb")
     m = mk("E1-H1", "E1", "ml", "H1", yes_ask=0.40, game_id="g1")
     quotes = h2h("g1", 1.80, 2.10) + spreads("g1", -3.0)
     close = Prediction("g1", 4.0, None, "t")
     far = Prediction("g1", 8.0, None, "t")
-    assert kalshi_game_candidates(snap_with(games={"g1": g}, quotes=quotes, kalshi=[m],
-                                            predictions={"g1": close}), settings) == []
+    # below cfb_min_disagree the model is ignored: a pure Kalshi-vs-book edge, like NFL
+    near = kalshi_game_candidates(snap_with(games={"g1": g}, quotes=quotes, kalshi=[m],
+                                            predictions={"g1": close}), settings)
+    market = kalshi_game_candidates(snap_with(games={"g1": g}, quotes=quotes, kalshi=[m]), settings)
+    assert len(near) == 1 and near[0].legs[0].p_fair == pytest.approx(market[0].legs[0].p_fair)
     recs = kalshi_game_candidates(snap_with(games={"g1": g}, quotes=quotes, kalshi=[m],
                                             predictions={"g1": far}), settings)
     assert len(recs) == 1 and not recs[0].tie_risk
+    assert recs[0].legs[0].p_fair > near[0].legs[0].p_fair
 
 
 def test_unmatched_market_ignored(mk, settings):

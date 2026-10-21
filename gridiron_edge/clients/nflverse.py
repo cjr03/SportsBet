@@ -6,8 +6,29 @@ import polars as pl
 
 RELEASES = "https://github.com/nflverse/nflverse-data/releases/download"
 SCHEDULE_COLS = ["game_id", "season", "week", "gameday", "home_team", "away_team",
-                 "home_score", "away_score", "result", "spread_line", "total_line"]
+                 "home_score", "away_score", "result", "spread_line", "total_line",
+                 "location", "home_qb_id", "away_qb_id"]  # location "Neutral" = no home field
 _RUSH_PASS = ("pass", "run")
+
+
+def qb1_from_depth_chart(df: pl.DataFrame) -> dict[str, str]:
+    """Each team's latest listed starting QB (gsis id) from an nflverse depth chart.
+
+    Handles the 2025+ daily schema (dt, team, pos_abb, pos_rank) and the older weekly one
+    (season, week, club_code, position, depth_team).
+    """
+    if df.is_empty() or "gsis_id" not in df.columns:
+        return {}
+    if {"dt", "team", "pos_abb", "pos_rank"} <= set(df.columns):
+        qbs = df.filter((pl.col("pos_abb") == "QB") & (pl.col("pos_rank") == 1))
+        team, order = "team", ["dt"]
+    elif {"club_code", "position", "depth_team", "week"} <= set(df.columns):
+        qbs = df.filter((pl.col("position") == "QB") & (pl.col("depth_team").cast(pl.String) == "1"))
+        team, order = "club_code", [c for c in ("season", "week") if c in df.columns]
+    else:
+        return {}
+    qbs = qbs.drop_nulls([team, "gsis_id"]).sort(order)
+    return {t: q for t, q in qbs.group_by(team, maintain_order=True).agg(pl.col("gsis_id").last()).iter_rows()}
 
 
 class NflverseSource:
@@ -41,3 +62,7 @@ class NflverseSource:
             pl.col("epa").mean().alias("def_epa"))
         return (off.join(deff, on=[*keys, "game_id", "team"], how="full", coalesce=True)
                 .select("season", "week", "team", "off_epa", "def_epa", "plays"))
+
+    def depth_chart_qb1(self, season: int) -> dict[str, str]:
+        """Latest depth-chart QB1 per team (free nflverse release; feeds the QB-change veto)."""
+        return qb1_from_depth_chart(self._load("load_depth_charts", "depth_charts", "depth_charts_{season}", [season]))
