@@ -105,3 +105,14 @@ def test_kalshi_resolver(registry):
               "yes_sub_title": "Over 44.5 points scored"}) == (g.game_id, None)
     assert r({"event_ticker": "KXNFLGAME-26NOV02ZZZYYY", "yes_sub_title": "x"}) == (None, None)
     assert r({"event_ticker": "garbage", "yes_sub_title": ""}) == (None, None)
+
+
+def test_normalize_name_strips_suffix_punctuation_accents_and_nicknames():
+    from gridiron_edge.matching import normalize_name
+    assert normalize_name("A.J. Brown") == normalize_name("AJ Brown") == "aj brown"
+    assert normalize_name("Kenneth Walker III") == normalize_name("Ken Walker") == "kenneth walker"
+    assert normalize_name("Marvin Harrison Jr.") == "marvin harrison"
+    assert normalize_name("Ja'Marr Chase") == "jamarr chase"
+    assert normalize_name("Amon-Ra St. Brown") == "amon ra st brown"
+    assert normalize_name("Gabe Davis") == normalize_name("Gabriel Davis")
+    assert normalize_name("José  Ramírez ") == "jose ramirez"

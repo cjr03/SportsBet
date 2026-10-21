@@ -106,3 +106,12 @@ def test_team_of(weekly_df):
     p = PropProjector(weekly_df)
     assert p.team_of("VET back") == "KC"
     assert p.team_of("Nobody") is None
+
+
+def test_projector_matches_normalised_names(weekly_df):
+    df = weekly_df.with_columns(pl.col("player_display_name").replace("Vet Back", "Vet Back Jr."))
+    p = PropProjector(df)
+    assert p.project("Vet Back", "rush_yds", 2026, 9) is not None
+    assert p.team_of("VET BACK") == "KC"
+    assert p.project("Nobody Here", "rush_yds", 2026, 9) is None
+    assert "Nobody Here" in p.unmatched

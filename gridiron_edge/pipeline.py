@@ -1,11 +1,15 @@
 """Recommendation pipeline: turn a market snapshot into Kalshi, PrizePicks and arb recommendations."""
+import inspect
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Literal, NamedTuple, Protocol
 
+import numpy as np
+
 from gridiron_edge.config import Settings
+from gridiron_edge.matching import normalize_name
 from gridiron_edge.models import Prediction
 from gridiron_edge.models.blend import blend, default_weight
 from gridiron_edge.strategy.arb import filter_arbs, kalshi_ladders, kalshi_ml_pairs
@@ -44,6 +48,8 @@ class Snapshot:
     open_game_ids: set[str] = field(default_factory=set)
     open_players: set[str] = field(default_factory=set)
     open_leg_keys: set[str] = field(default_factory=set)
+    # projector-only props may stake only once the projector's backtest shows an edge
+    projector_live: bool = False
 
 
 class Projector(Protocol):
@@ -169,67 +175,115 @@ def _stat_kind(stat: str) -> Literal["yards", "count"]:
     return "yards" if stat.endswith("_yds") else "count"
 
 
+def _max_shift(stat: str, s: Settings) -> float:
+    if stat == "pass_yds":
+        return s.props_max_shift_pass_yds
+    return s.props_max_shift_yds if _stat_kind(stat) == "yards" else s.props_max_shift_count
+
+
+def _prop_fresh(q: PropQuote, snap: Snapshot, s: Settings) -> bool:
+    """Prop lines are pulled once near kickoff: age them from fetch time against the props TTL."""
+    return (snap.now - q.seen_at).total_seconds() <= s.props_stale_seconds
+
+
+def _book_quotes(snap: Snapshot, s: Settings, game_id: str, player: str, stat: str) -> list[PropQuote]:
+    """Fresh sportsbook (non-PrizePicks) prop quotes for one player and stat."""
+    key = normalize_name(player)
+    return [q for q in snap.props
+            if q.book != "prizepicks" and q.decimal is not None and q.game_id == game_id and q.stat == stat
+            and normalize_name(q.player) == key and _prop_fresh(q, snap, s)]
+
+
 def _book_p_sides(snap: Snapshot, s: Settings, game_id: str, player: str, stat: str,
                   line: float) -> tuple[float, float] | None:
-    """(P(over), P(under)) at the line from the sportsbook nearest it, each side worst-case.
+    """(P(over), P(under)) at the line from the consensus of books at the point nearest it.
 
-    Each side is devigged with its own most conservative method and shifted to the line through
-    its own implied mean, so neither side is the optimistic complement of the other and
-    P(over) + P(under) <= 1.
+    Each book's sides are devigged with their own most conservative method; the anchor is the median
+    across books of each side (so P(over) + P(under) <= 1). Each side is then shifted to the line
+    through its own implied mean, never further than the stat's max shift.
     """
     pairs: dict[tuple[str, float], dict[str, PropQuote]] = {}
-    for q in snap.props:
-        if (q.book == "prizepicks" or q.decimal is None or q.game_id != game_id or q.stat != stat
-                or q.player.lower() != player.lower()
-                or (snap.now - q.last_update).total_seconds() > s.stale_seconds):
-            continue
+    for q in _book_quotes(snap, s, game_id, player, stat):
         sides = pairs.setdefault((q.book, q.point), {})
         if q.side not in sides or q.last_update > sides[q.side].last_update:
             sides[q.side] = q
-    both = [(k, v) for k, v in pairs.items() if "over" in v and "under" in v]
+    both = {k: v for k, v in pairs.items() if "over" in v and "under" in v}
     if not both:
         return None
-    (_, point), sides = min(both, key=lambda kv: (abs(kv[0][1] - line), kv[0][0]))
-    decimals = [sides["over"].decimal, sides["under"].decimal]
-    p_over_at_point = devig_worst(decimals, 0)
-    p_under_at_point = devig_worst(decimals, 1)
+    point = min({pt for _, pt in both}, key=lambda pt: (abs(pt - line), pt))
+    if abs(line - point) > _max_shift(stat, s):
+        return None
+    overs, unders = [], []
+    for (_, pt), sides in both.items():
+        if pt == point:
+            decimals = [sides["over"].decimal, sides["under"].decimal]
+            overs.append(devig_worst(decimals, 0))
+            unders.append(devig_worst(decimals, 1))
+    p_over_at_point, p_under_at_point = float(np.median(overs)), float(np.median(unders))
+    if line == point:
+        return p_over_at_point, p_under_at_point
     kind = _stat_kind(stat)
     try:  # a separate implied mean for each side's worst-case probability
-        mean_over = implied_mean_from_line(point, p_over_at_point, kind)
-        mean_under = implied_mean_from_line(point, 1.0 - p_under_at_point, kind)
+        mean_over = implied_mean_from_line(point, p_over_at_point, kind, stat=stat)
+        mean_under = implied_mean_from_line(point, 1.0 - p_under_at_point, kind, stat=stat)
     except ValueError:  # no mean reproduces this probability
         return None
-    return prop_p_over(line, mean_over, kind), 1.0 - prop_p_over(line, mean_under, kind)
+    return (prop_p_over(line, mean_over, kind, stat=stat),
+            1.0 - prop_p_over(line, mean_under, kind, stat=stat))
 
 
-def _model_p_over(projector: Projector, g: Game, player: str, stat: str, line: float) -> float | None:
+def _game_context(snap: Snapshot, projector: Projector, g: Game, player: str) -> dict:
+    """Opponent and market game script (team implied total, team spread) for the projector."""
+    team = _player_team(snap, projector, player)
+    if team not in (g.home, g.away):
+        return {}
+    home = team == g.home
+    quotes = [q for q in snap.quotes if q.game_id == g.game_id]
+    margin = fair_spread_mean(quotes, now=snap.now)  # expected home margin
+    total = fair_total_mean(quotes, now=snap.now)
+    ctx: dict = {"opponent": g.away if home else g.home}
+    if margin is not None:
+        ctx["team_spread"] = -margin if home else margin
+        if total is not None:
+            ctx["team_total"] = (total + (margin if home else -margin)) / 2
+    return ctx
+
+
+def _model_p_over(projector: Projector, g: Game, player: str, stat: str, line: float,
+                  ctx: dict | None = None) -> float | None:
     if g.week is None:
         return None
-    proj = projector.project(player, stat, g.season, g.week)
+    if ctx and "opponent" in inspect.signature(projector.project).parameters:
+        proj = projector.project(player, stat, g.season, g.week, **ctx)
+    else:
+        proj = projector.project(player, stat, g.season, g.week)
     if proj is None:
         return None
     mean, sd = proj
     kind = _stat_kind(stat)
-    return prop_p_over(line, mean, kind, sd if sd > 0 else None)
+    return prop_p_over(line, mean, kind, sd if sd > 0 else None, stat=stat)
 
 
 def _prop_p_sides(snap: Snapshot, s: Settings, projector: Projector, g: Game, player: str, stat: str,
                   line: float) -> tuple[float, float, bool] | None:
-    """(P(over), P(under), anchored): sportsbook-anchored when possible, else the projector."""
-    sides = _book_p_sides(snap, s, g.game_id, player, stat, line)
-    if sides is not None:
-        return sides[0], sides[1], True
-    p = _model_p_over(projector, g, player, stat, line)
+    """(P(over), P(under), anchored): sportsbook-anchored when any fresh book quote exists, else the
+    projector. A known market price is never replaced by the weaker model."""
+    if _book_quotes(snap, s, g.game_id, player, stat):
+        sides = _book_p_sides(snap, s, g.game_id, player, stat, line)
+        return None if sides is None else (sides[0], sides[1], True)
+    p = _model_p_over(projector, g, player, stat, line, _game_context(snap, projector, g, player))
     return None if p is None else (p, 1.0 - p, False)
 
 
 def kalshi_prop_candidates(snap: Snapshot, s: Settings, projector: Projector) -> list[Recommendation]:
-    """Best Kalshi prop recommendation per player (unsized)."""
-    best: dict[str, tuple[KalshiMarket, Game, _Side]] = {}
+    """Best Kalshi prop recommendation per player (unsized). Projector-only picks are observe-only
+    until the projector passes its backtest (snap.projector_live)."""
+    best: dict[str, tuple[KalshiMarket, Game, _Side, bool]] = {}
     for m in snap.kalshi:
         if m.market_type != "prop" or m.player is None or m.stat is None or m.line is None:
             continue
-        if m.player.lower() in snap.open_players:  # already holding a prop on this player
+        key = normalize_name(m.player)
+        if key in snap.open_players:  # already holding a prop on this player
             continue
         g = _upcoming(snap, m.game_id)
         if g is None:
@@ -240,25 +294,44 @@ def kalshi_prop_candidates(snap: Snapshot, s: Settings, projector: Projector) ->
         p_over, p_under, anchored = got
         extra = 0.0 if anchored else s.pp_margin_model - s.pp_margin_market
         sd = _best_side(m, p_over, snap, s, extra, p_no=p_under)
-        key = m.player.lower()
         if sd is not None and (key not in best or sd.ev > best[key][2].ev):
-            best[key] = (m, g, sd)
-    return [_kalshi_rec("kalshi_prop", m, g, sd, f"{m.player} {m.stat} over {m.line}", snap, "prop", False)
-            for m, g, sd in best.values()]
+            best[key] = (m, g, sd, anchored)
+    out = []
+    for m, g, sd, anchored in best.values():
+        r = _kalshi_rec("kalshi_prop", m, g, sd, f"{m.player} {m.stat} over {m.line}", snap, "prop", False)
+        if not anchored and not snap.projector_live:
+            r = replace(r, observe_only=True)
+        out.append(r)
+    return out
 
 
 def _player_team(snap: Snapshot, projector: Projector, player: str) -> str | None:
-    return snap.player_teams.get(player) or projector.team_of(player)
+    team = snap.player_teams.get(player)
+    if team is None:
+        key = normalize_name(player)
+        team = next((t for name, t in snap.player_teams.items() if normalize_name(name) == key), None)
+    return team or projector.team_of(player)
+
+
+def _pp_standard(q: PropQuote) -> bool:
+    """Spec 6.3: only standard lines; Demon/Goblin-type lines carry an adjusted payout multiplier."""
+    return q.multiplier is None or q.multiplier == 1.0
 
 
 def pp_entry_candidates(snap: Snapshot, s: Settings, projector: Projector) -> list[Recommendation]:
-    """At most one PrizePicks entry: the best structure and legs by Kelly growth."""
+    """At most one PrizePicks entry: the best structure and legs by Kelly growth.
+
+    Until the projector passes its backtest, the live entry uses book-anchored legs only; if none can
+    be built, an entry including projector legs is logged observe-only.
+    """
     picks: list[Pick] = []
     seen: set[tuple] = set()
     for q in snap.props:
-        if q.book != "prizepicks":
+        if q.book != "prizepicks" or not _pp_standard(q):
             continue
-        key = (q.game_id, q.player.lower(), q.stat, q.point)
+        if q.source != "manual" and not _prop_fresh(q, snap, s):
+            continue
+        key = (q.game_id, normalize_name(q.player), q.stat, q.point)
         if key in seen:
             continue
         seen.add(key)
@@ -275,13 +348,19 @@ def pp_entry_candidates(snap: Snapshot, s: Settings, projector: Projector) -> li
         side, p = ("over", p_over) if p_over >= p_under else ("under", p_under)
         picks.append(Pick(q.player, team, g.game_id, q.stat, q.point, side, p, anchored))
 
-    found = build_best_entry(picks, s)
+    unproven = False
+    if snap.projector_live:
+        found = build_best_entry(picks, s)
+    else:
+        found = build_best_entry([pk for pk in picks if pk.anchored], s)
+        if found is None:
+            found, unproven = build_best_entry(picks, s), True
     if found is None:
         return []
     legs, st, ev, _ = found
     ps = [pk.p for pk in legs]
     games = [snap.games[pk.game_id] for pk in legs]
-    observe = any(snap.gates.get((g.league, "prop"), False) for g in games)
+    observe = unproven or any(snap.gates.get((g.league, "prop"), False) for g in games)
     stake = 0
     if not observe:
         f, _ = kelly_entry(ps, st)
@@ -365,7 +444,7 @@ def _extra_ev(r: Recommendation, snap: Snapshot, s: Settings) -> float:
     if r.kind != "kalshi_prop" or leg.game_id is None or leg.player is None or leg.stat is None \
             or leg.line is None:
         return 0.0
-    anchored = _book_p_sides(snap, s, leg.game_id, leg.player, leg.stat, leg.line) is not None
+    anchored = bool(_book_quotes(snap, s, leg.game_id, leg.player, leg.stat))
     return 0.0 if anchored else s.pp_margin_model - s.pp_margin_market
 
 

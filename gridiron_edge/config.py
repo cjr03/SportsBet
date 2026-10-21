@@ -47,6 +47,15 @@ class Settings:
     quiet_hours: tuple[int, int] = (23, 8)
     notify_enabled: bool = True
     stale_seconds: int = 600
+    # props are pulled once near kickoff, so their anchors age from fetch time over a longer window
+    props_stale_seconds: int = 10800
+    # furthest a prop is repriced from the book's point (yards / pass yards / counts)
+    props_max_shift_yds: float = 15.0
+    props_max_shift_pass_yds: float = 30.0
+    props_max_shift_count: float = 1.0
+    # projector inputs: nflverse snap counts / injury reports (free), usage x efficiency mean
+    props_use_snaps_injuries: bool = True
+    props_usage_model: bool = True
     # secrets
     odds_api_key: str = ""
     cfbd_api_key: str = ""
@@ -89,8 +98,8 @@ def _validate(s: Settings) -> None:
             raise ValueError(f"{name} must be in [0, 1], got {v}")
     if s.kelly_fraction <= 0.0:
         raise ValueError(f"kelly_fraction must be in (0, 1], got {s.kelly_fraction}")
-    if s.min_stake_cents < 0 or s.stale_seconds < 0:
-        raise ValueError("min_stake_cents and stale_seconds must be >= 0")
+    if s.min_stake_cents < 0 or s.stale_seconds < 0 or s.props_stale_seconds < 0:
+        raise ValueError("min_stake_cents, stale_seconds and props_stale_seconds must be >= 0")
     if len(s.quiet_hours) != 2 or not all(0 <= h <= 23 for h in s.quiet_hours):
         raise ValueError(f"quiet_hours must be two hours 0-23, got {s.quiet_hours}")
 

@@ -2,8 +2,10 @@
 import json
 import re
 import sqlite3
+import unicodedata
 from collections.abc import Callable, Iterable
 from datetime import date, datetime, timedelta, timezone
+from functools import lru_cache
 from pathlib import Path
 
 from gridiron_edge.db import register_schema
@@ -23,6 +25,28 @@ register_schema(
 
 _TEAMS_JSON = Path(__file__).parent / "data" / "nfl_teams.json"
 _WINDOW = timedelta(hours=36)
+
+
+_NAME_SUFFIX = re.compile(r"\s+(jr|sr|ii|iii|iv|v)$")
+# full-name aliases seen across the Odds API, Kalshi and nflverse (both sides map to one form)
+_NAME_ALIASES = {
+    "gabe davis": "gabriel davis", "hollywood brown": "marquise brown", "mitch trubisky": "mitchell trubisky",
+    "josh palmer": "joshua palmer", "chig okonkwo": "chigoziem okonkwo", "tank dell": "nathaniel dell",
+    "patrick freiermuth": "pat freiermuth", "cam ward": "cameron ward", "joshua dobbs": "josh dobbs",
+    "scott miller": "scotty miller", "jeff wilson": "jeffery wilson", "ken walker": "kenneth walker",
+    "bam knight": "zonovan knight",
+}
+
+
+@lru_cache(maxsize=16384)
+def normalize_name(name: str) -> str:
+    """Player-name join key: ASCII, lower-case, no punctuation or Jr/Sr/II-V suffix, known nicknames
+    mapped (in the spirit of nflreadr's clean_player_names)."""
+    s = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode().lower()
+    s = re.sub(r"[.'`,]", "", s)  # D.J. -> dj, Ja'Marr -> jamarr
+    s = re.sub(r"[^a-z0-9]+", " ", s).strip()
+    s = _NAME_SUFFIX.sub("", s)
+    return _NAME_ALIASES.get(s, s)
 
 
 def _norm(name: str) -> str:
