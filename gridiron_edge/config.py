@@ -1,4 +1,6 @@
 """Settings: strategy defaults, behaviour flags, secrets from .env."""
+import json
+import math
 import os
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
@@ -10,6 +12,8 @@ _FRACTIONS = (
     "kelly_fraction", "cap_bet", "cap_game", "cap_slate", "cap_pp_daily",
     "kalshi_price_lo", "kalshi_price_hi", "arb_fraction", "arb_max_roi",
     "odds_reserve_frac", "nfl_tie_prob",
+    "cap_day", "cap_same_dir", "copula_rho", "shrink_game",
+    "shrink_prop_anchored", "shrink_prop_model", "pp_unverified_mult", "arb_min_roi", "middle_max_over",
 )
 MEDIAN_FAIR_POLICIES = ("observe", "block", "allow")
 
@@ -52,6 +56,33 @@ class Settings:
     nfl_tie_prob: float = 0.004  # P(tie) per NFL game since 2012: Kalshi YES on either team loses it
     # game recs whose fair price is only the soft-book median: observe (log, no stake), block or allow
     median_fair_policy: str = "observe"
+    # cumulative caps (fractions of bankroll incl. open stakes): stakes placed per PT day, and
+    # same-direction Kalshi legs on one game (stopgap for same-game correlation)
+    cap_day: float = 0.20
+    cap_same_dir: float = 0.02
+    copula_rho: float = 0.3  # Gaussian-copula correlation of same-direction legs in a game; 0 = off
+    # Kelly multipliers per probability source (parameter-uncertainty shrinkage)
+    shrink_game: float = 1.0
+    shrink_prop_anchored: float = 0.75
+    shrink_prop_model: float = 0.5
+    # rolling closing-line-value throttle for game bets, per league
+    clv_throttle_window: int = 50
+    clv_throttle_min: int = 10
+    # PrizePicks payouts: "fixed" tables or "arena" (only a perfect card pays); structures as
+    # "n-kind"; optional JSON table override {"5-flex": {"5": 10, "4": 2, "3": 0.4}}
+    pp_mode: str = "fixed"
+    pp_payouts_verified: bool = False
+    pp_unverified_mult: float = 0.5
+    pp_structures: tuple[str, ...] = ("3-power", "4-flex", "5-flex", "6-flex", "5-power", "6-power")
+    pp_payouts_json: str = ""
+    pp_max_entries: int = 3
+    pp_brute_force: bool = False
+    # arbs: quotes older than this are not texted; smallest ROI worth legging into
+    arb_stale_seconds: int = 90
+    arb_min_roi: float = 0.01
+    # ladder middles (not risk-free): max cost over $1 per pair; live = sized and texted
+    middle_max_over: float = 0.10
+    middles_live: bool = False
     # behaviour
     venues: tuple[str, ...] = ("kalshi", "prizepicks")
     quiet_hours: tuple[int, int] = (23, 8)
@@ -101,6 +132,44 @@ def _coerce(name: str, raw: str, default):
         raise ValueError(f"invalid value for {name}: {raw!r}") from None
 
 
+def parse_pp_structure(text: str) -> tuple[int, str]:
+    """'5-flex' -> (5, 'flex'); 2-6 picks, power or flex."""
+    try:
+        n, kind = text.strip().lower().split("-")
+        size = int(n)
+    except ValueError:
+        raise ValueError(f"bad PrizePicks structure {text!r} (use e.g. 5-flex or 3-power)") from None
+    if kind not in ("power", "flex") or not 2 <= size <= 6:
+        raise ValueError(f"bad PrizePicks structure {text!r} (use e.g. 5-flex or 3-power)")
+    return size, kind
+
+
+def parse_pp_payouts(raw: str) -> dict[tuple[int, str], dict[int, float]]:
+    """pp_payouts_json -> {(n, kind): {hits: multiplier}}; tiers 0..n, multipliers finite and >= 0."""
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        raise ValueError("pp_payouts_json is not valid JSON") from None
+    if not isinstance(data, dict):
+        raise ValueError('pp_payouts_json must look like {"5-flex": {"5": 10, "4": 2}}')
+    out: dict[tuple[int, str], dict[int, float]] = {}
+    for key, tiers in data.items():
+        st = parse_pp_structure(str(key))
+        if not isinstance(tiers, dict):
+            raise ValueError(f"pp_payouts_json {key}: tiers must be an object of hits -> payout")
+        table = {}
+        for k, v in tiers.items():
+            try:
+                hits, mult = int(k), float(v)
+            except (TypeError, ValueError):
+                raise ValueError(f"pp_payouts_json {key}: {k!r}: {v!r} is not a number") from None
+            if not 0 <= hits <= st[0] or not math.isfinite(mult) or mult < 0:
+                raise ValueError(f"pp_payouts_json {key}: {k!r}: {v!r} out of range")
+            table[hits] = mult
+        out[st] = table
+    return out
+
+
 def _validate(s: Settings) -> None:
     for name in _FRACTIONS:
         v = getattr(s, name)
@@ -112,8 +181,16 @@ def _validate(s: Settings) -> None:
         raise ValueError("min_stake_cents, stale_seconds and props_stale_seconds must be >= 0")
     if s.median_fair_policy not in MEDIAN_FAIR_POLICIES:
         raise ValueError(f"median_fair_policy must be one of {', '.join(MEDIAN_FAIR_POLICIES)}")
+    if s.pp_mode not in ("fixed", "arena"):
+        raise ValueError(f"pp_mode must be fixed or arena, got {s.pp_mode!r}")
+    if s.arb_stale_seconds < 0 or s.pp_max_entries < 0 or s.clv_throttle_window < 1:
+        raise ValueError("arb_stale_seconds and pp_max_entries must be >= 0, clv_throttle_window >= 1")
     if len(s.quiet_hours) != 2 or not all(0 <= h <= 23 for h in s.quiet_hours):
         raise ValueError(f"quiet_hours must be two hours 0-23, got {s.quiet_hours}")
+    for st in s.pp_structures:
+        parse_pp_structure(st)
+    if s.pp_payouts_json:
+        parse_pp_payouts(s.pp_payouts_json)
 
 
 def load_settings(env_file: Path | None = None, overrides: dict[str, str] | None = None) -> Settings:

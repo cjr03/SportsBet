@@ -6,7 +6,7 @@ from typing import Literal
 
 from scipy.optimize import brentq, minimize_scalar
 
-from gridiron_edge.config import Settings
+from gridiron_edge.config import Settings, parse_pp_payouts, parse_pp_structure
 
 Structure = tuple[int, Literal["power", "flex"]]
 
@@ -25,6 +25,26 @@ PAYOUTS: dict[Structure, dict[int, float]] = {
 ALLOWED: list[Structure] = [(3, "power"), (4, "flex"), (5, "flex"), (6, "flex"), (5, "power"), (6, "power")]
 
 _COMBO_LIMIT = 200_000
+Payouts = dict[Structure, dict[int, float]]
+
+
+def _parse_structure(text: str) -> Structure:
+    return parse_pp_structure(text)  # type: ignore[return-value]
+
+
+def payout_table(s: Settings) -> Payouts:
+    """Payout multipliers from settings: the fixed tables (or a JSON override), and in arena
+    mode only a perfect card pays (the group prize for a non-perfect card is unknowable)."""
+    table = {st: dict(tiers) for st, tiers in PAYOUTS.items()}
+    if s.pp_payouts_json:
+        table.update(parse_pp_payouts(s.pp_payouts_json))  # type: ignore[arg-type]
+    if s.pp_mode == "arena":
+        table = {(n, kind): {n: tiers[n]} if n in tiers else {} for (n, kind), tiers in table.items()}
+    return table
+
+
+def allowed_structures(s: Settings) -> list[Structure]:
+    return [_parse_structure(x) for x in s.pp_structures]
 _MAX_FRACTION = 0.99
 
 
@@ -84,8 +104,34 @@ def _valid(legs) -> bool:
     return len({p.game_id for p in legs}) == len(legs) and len({p.team for p in legs}) >= 2
 
 
-def build_best_entry(picks: list[Pick], s: Settings, allowed=ALLOWED, max_brute: int = 25
+def _greedy(qual: list[Pick], n: int) -> list[list[Pick]]:
+    """Candidate entries that contain the optimum for n legs.
+
+    Payouts never fall with more hits, so growth rises with every pick's p: the top n per-game
+    bests dominate any valid entry. If they are one team, the optimum is some pick x plus the
+    top n-1 per-game bests from other games; try every x.
+    """
+    per_game: dict[str, Pick] = {}
+    for pk in qual:
+        if pk.game_id not in per_game or pk.p > per_game[pk.game_id].p:
+            per_game[pk.game_id] = pk
+    ranked = sorted(per_game.values(), key=lambda pk: pk.p, reverse=True)
+    top = ranked[:n]
+    if len(top) == n and _valid(top):
+        return [top]
+    out = []
+    for x in qual:
+        rest = [pk for pk in ranked if pk.game_id != x.game_id][:n - 1]
+        if len(rest) == n - 1 and _valid([x, *rest]):
+            out.append([x, *rest])
+    return out
+
+
+def build_best_entry(picks: list[Pick], s: Settings, allowed=ALLOWED, max_brute: int = 25,
+                     payouts: Payouts = PAYOUTS, brute: bool = False
                      ) -> tuple[list[Pick], Structure, float, float] | None:
+    """Best entry by full-Kelly growth: (legs, structure, EV, growth). Greedy per structure
+    (exact under independent picks); brute=True enumerates combinations instead."""
     best_per_player: dict[str, Pick] = {}
     for pk in picks:
         cur = best_per_player.get(pk.player)
@@ -96,11 +142,15 @@ def build_best_entry(picks: list[Pick], s: Settings, allowed=ALLOWED, max_brute:
     best: tuple[list[Pick], Structure, float, float] | None = None
     for st in allowed:
         n = st[0]
-        be = breakeven(st)
+        if st not in payouts or n not in payouts[st] or payouts[st][n] <= 1:
+            continue
+        be = breakeven(st, payouts)
         qual = [pk for pk in pool if pk.p >= be + (s.pp_margin_market if pk.anchored else s.pp_margin_model)]
         if len(qual) < n:
             continue
-        if math.comb(len(qual), n) > _COMBO_LIMIT:
+        if not brute:
+            candidates = _greedy(qual, n)
+        elif math.comb(len(qual), n) > _COMBO_LIMIT:
             chosen: list[Pick] = []
             games: set[str] = set()
             for pk in qual:  # already sorted by p descending
@@ -114,10 +164,10 @@ def build_best_entry(picks: list[Pick], s: Settings, allowed=ALLOWED, max_brute:
             candidates = (list(c) for c in itertools.combinations(qual, n) if _valid(c))
         for legs in candidates:
             ps = [pk.p for pk in legs]
-            ev = entry_ev(ps, st)
+            ev = entry_ev(ps, st, payouts)
             if ev <= 0:
                 continue
-            _, g = kelly_entry(ps, st)
+            _, g = kelly_entry(ps, st, payouts)
             if best is None or g > best[3]:
                 best = (legs, st, ev, g)
     return best

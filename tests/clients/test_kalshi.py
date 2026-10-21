@@ -67,3 +67,11 @@ def test_parse_keeps_rules_secondary(kalshi):
     m = kalshi._parse(raw, "KXNFLGAME", datetime.now(UTC))
     assert m.rules_secondary.startswith("If the game ends in a tie")
     assert kalshi._parse({**raw, "rules_secondary": None}, "KXNFLGAME", datetime.now(UTC)).rules_secondary == ""
+
+
+async def test_rules_primary_kept_for_tie_handling(respx_mock, kalshi):
+    raw = {"ticker": "KXNFLGAME-X-SEA", "event_ticker": "KXNFLGAME-X", "status": "active",
+           "rules_primary": "If the game ends in a tie, the market resolves to a 50/50 split."}
+    respx_mock.get(url__regex=r".*/markets\?.*").mock(return_value=httpx.Response(200, json={"markets": [raw], "cursor": None}))
+    (m,) = await kalshi.markets("KXNFLGAME")
+    assert "tie" in m.rules_primary

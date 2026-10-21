@@ -138,14 +138,14 @@ class Lifecycle:
         fee = 0
         if rec.kind == "pp_entry":
             cost = stake_cents if stake_cents is not None else rec.stake_cents
-        elif rec.kind == "arb":
-            # qty is shared by both legs; prices are the leg prices
+        elif rec.kind in ("arb", "middle"):
+            # qty is shared by both legs; prices are the leg prices; fees use each market's multiplier
             cost = sum(round(bet_qty * g.price * 100) for g in rec.legs)
-            fee = sum(round(taker_fee(bet_qty, g.price, 1.0) * 100) for g in rec.legs)
+            fee = sum(round(taker_fee(bet_qty, g.price, g.fee_multiplier) * 100) for g in rec.legs)
         else:
             bet_price = price if price is not None else rec.legs[0].price
             cost = round(bet_qty * bet_price * 100)
-            fee = round(taker_fee(bet_qty, bet_price, 1.0) * 100)
+            fee = round(taker_fee(bet_qty, bet_price, rec.legs[0].fee_multiplier) * 100)
 
         legs_json = json.dumps([asdict(g) for g in rec.legs])
         with self.conn:
@@ -194,6 +194,18 @@ class Lifecycle:
     def open_exposure_cents(self) -> int:
         return self.conn.execute(
             "SELECT COALESCE(SUM(stake_cents), 0) FROM bets WHERE state='PLACED'").fetchone()[0]
+
+    def open_positions(self) -> list[tuple[str, int, list[Leg]]]:
+        """(kind, stake_cents, legs) of every PLACED bet, for cumulative exposure caps."""
+        return [(r["kind"], r["stake_cents"], [Leg(**d) for d in json.loads(r["legs_json"])])
+                for r in self.open_bets()]
+
+    def placed_today_cents(self, now: datetime, tz: tzinfo, exclude: tuple[str, ...] = ("arb", "middle")) -> int:
+        """Stakes placed on the local calendar day of `now` (hedged kinds excluded)."""
+        start = now.astimezone(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+        end = start + timedelta(days=1)
+        return sum(r["stake_cents"] for r in self.conn.execute("SELECT kind, stake_cents, placed_at FROM bets")
+                   if r["kind"] not in exclude and start <= _dt(r["placed_at"]) < end)
 
     def pp_staked_today_cents(self, now: datetime, tz: tzinfo) -> int:
         start = now.astimezone(tz).replace(hour=0, minute=0, second=0, microsecond=0)

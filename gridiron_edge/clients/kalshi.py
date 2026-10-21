@@ -53,6 +53,7 @@ class KalshiClient:
             status=raw.get("status") or "", result=raw.get("result") or "",
             fee_multiplier=self._fees.get(series, 1.0), fetched_at=fetched_at,
             rules_secondary=raw.get("rules_secondary") or "",
+            rules_primary=raw.get("rules_primary") or "",
         )
 
     async def markets(self, series: str, status: str = "open") -> list[KalshiMarket]:

@@ -139,3 +139,27 @@ def test_arb_confirm_sums_legs(lc):
     lc.confirm(rec.id, NOW)
     fees = round(taker_fee(10, 0.40) * 100) + round(taker_fee(10, 0.55) * 100)
     assert lc.ledger.balance() == 10000 - 950 - fees
+
+
+# -- quant upgrade: market fee multiplier, exposure queries -------------------------------------
+
+def test_confirm_uses_market_fee_multiplier(lc):
+    rec = kalshi_rec(price=0.46, qty=40)
+    rec = replace(rec, legs=[replace(rec.legs[0], fee_multiplier=0.5)])
+    saved, _ = lc.upsert_recommendation(rec, NOW)
+    bet_id = lc.confirm(saved.id, NOW)
+    row = lc.conn.execute("SELECT fee_cents FROM bets WHERE id=?", (bet_id,)).fetchone()
+    assert row["fee_cents"] == round(taker_fee(40, 0.46, 0.5) * 100)
+
+
+def test_open_positions_and_placed_today(lc):
+    from zoneinfo import ZoneInfo
+    a, _ = lc.upsert_recommendation(kalshi_rec(), NOW)
+    lc.confirm(a.id, NOW)
+    b, _ = lc.upsert_recommendation(kalshi_rec(ticker="OTHER"), NOW)
+    lc.confirm(b.id, NOW - timedelta(days=2))
+    pos = lc.open_positions()
+    assert [(k, s) for k, s, _ in pos] == [("kalshi_game", round(40 * 0.46 * 100))] * 2
+    assert pos[0][2][0].ticker == "KXNFLGAME-26OCT25DALPHI-DAL"
+    pt = ZoneInfo("America/Los_Angeles")
+    assert lc.placed_today_cents(NOW, pt) == round(40 * 0.46 * 100)

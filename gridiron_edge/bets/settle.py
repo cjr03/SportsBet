@@ -48,8 +48,10 @@ def grade_kalshi_leg(leg: Leg, market: KalshiMarket | None, game: Game | None,
     return "pending"
 
 
-def grade_pp_entry(legs: list[Leg], structure: tuple, stats: dict[tuple[str, str], float | None]
-                   ) -> tuple[Result, float]:
+def grade_pp_entry(legs: list[Leg], structure: tuple, stats: dict[tuple[str, str], float | None],
+                   payouts: dict = PAYOUTS) -> tuple[Result, float]:
+    """Grade from the payout table in use (arena: only a perfect card pays automatically; a
+    group prize for a non-perfect card is settled by hand)."""
     hits = dnps = ties = 0
     teams: set[str] = set()
     for leg in legs:
@@ -68,7 +70,7 @@ def grade_pp_entry(legs: list[Leg], structure: tuple, stats: dict[tuple[str, str
     new = revert(structure, dnps, ties, len(teams))
     if new is None:
         return "refund", 1.0
-    mult = PAYOUTS[new].get(hits, 0)
+    mult = payouts.get(new, {}).get(hits, 0)
     return ("won" if mult > 0 else "lost"), float(mult)
 
 
@@ -78,14 +80,16 @@ def _structure(s: str) -> tuple:
 
 
 class Settler:
-    def __init__(self, conn: sqlite3.Connection, lifecycle: Lifecycle, registry: GameRegistry):
+    def __init__(self, conn: sqlite3.Connection, lifecycle: Lifecycle, registry: GameRegistry,
+                 payouts: dict | None = None):
         self.conn = conn
         self.lc = lifecycle
         self.registry = registry
+        self.payouts = payouts if payouts is not None else PAYOUTS
 
     # -- grading ---------------------------------------------------------
     def _leg_refund_cents(self, bet: sqlite3.Row, leg: Leg) -> int:
-        return round(bet["qty"] * leg.price * 100) + round(taker_fee(bet["qty"], leg.price, 1.0) * 100)
+        return round(bet["qty"] * leg.price * 100) + round(taker_fee(bet["qty"], leg.price, leg.fee_multiplier) * 100)
 
     def _grade_bet(self, bet: sqlite3.Row, now: datetime, kalshi_lookup, stat_lookup
                    ) -> tuple[Result, int, int]:
@@ -99,7 +103,7 @@ class Settler:
                 v = stat_lookup(leg.game_id, leg.player, leg.stat)
                 if v != "pending":
                     stats[(leg.player, leg.stat)] = v
-            result, mult = grade_pp_entry(legs, _structure(bet["structure"]), stats)
+            result, mult = grade_pp_entry(legs, _structure(bet["structure"]), stats, self.payouts)
             if result == "pending" and any(
                     (g := self.registry.get(leg.game_id)) is not None and g.status != "final"
                     and now >= g.kickoff + VOID_AFTER for leg in legs):
@@ -111,7 +115,7 @@ class Settler:
                   for leg in legs]
         if "pending" in grades:
             return "pending", 0, 0
-        if bet["kind"] != "arb":
+        if bet["kind"] not in ("arb", "middle"):  # a middle settles like a pair: each leg pays alone
             result = grades[0]
             if result == "won":
                 return result, bet["qty"] * 100, 0

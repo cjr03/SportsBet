@@ -56,8 +56,8 @@ def midnight():
 def test_format_kalshi_ascii_and_fields(rec_kalshi):
     t = format_message(rec_kalshi)
     assert t.isascii() and t.startswith("GE KALSHI BUY YES") and t.endswith(" PT | id 42")
-    # 20 x $0.55 = $11.00 plus the $0.35 taker fee confirm will debit
-    assert "@ $0.55 x20 = $11.35 w/fee | fair 60.0% EV +5.0% | verify availability before placing | 10:05 PT" in t
+    # 20 x $0.55 = $11.00 plus the $0.35 taker fee confirm will debit, shown apart
+    assert "@ $0.55 x20 = $11.00 + $0.35 fee | fair 60.0% EV +5.0% | verify availability before placing | 10:05 PT" in t
 
 
 def test_format_pp_has_confirm(rec_pp):
@@ -66,9 +66,12 @@ def test_format_pp_has_confirm(rec_pp):
     assert "1) Player 0 Rec Yds LESS 50.5 (60%) 2) Player 1 Rec Yds MORE 51.5 (60%)" in t
 
 
-def test_format_arb_has_verify_and_tie(rec_arb):
+def test_format_arb_plain_english(rec_arb):
     t = format_message(rec_arb)
-    assert "verify" in t and "tie risk" in t and t.startswith("GE ARB KALSHI +4.0% | KC ML YES + DEN ML YES x10 | tie risk |")
+    assert t.isascii() and len(t) <= 480 and t.startswith("Locked profit #42 (Kalshi): ")
+    assert 'Buy 10 "Yes" on "KC ML YES" AND 10 "Yes" on "DEN ML YES".' in t
+    assert "Total $9.50 + $0.36 fees; you get $10.00 back" in t and "tie" in t.lower()
+    assert " x10" not in t and "KXNFL" not in t and t.endswith("When placed, type: confirm 42")
 
 
 def test_imessage_passes_argv_not_interpolated():
@@ -178,3 +181,34 @@ def test_cooldown_does_not_hold_back_arbs(conn, rec_arb, noon):
     legs = [replace(leg, price=leg.price - 0.01) for leg in rec_arb.legs]
     b, _ = lc.upsert_recommendation(_rec("arb", legs, qty=10, ev=0.05), noon)
     assert ch.notify(a, noon).ok and ch.notify(b, noon + timedelta(minutes=5)).ok and len(sink) == 2
+
+
+def test_format_kalshi_fee_uses_market_multiplier(rec_kalshi):
+    from dataclasses import replace
+    rec = replace(rec_kalshi, legs=[replace(rec_kalshi.legs[0], fee_multiplier=0.5)])
+    assert "= $11.00 + $0.18 fee" in format_message(rec)
+
+
+def test_format_arb_legging_guidance(rec_arb):
+    from dataclasses import replace
+    legs = [replace(rec_arb.legs[0], worst_price=0.45), replace(rec_arb.legs[1], worst_price=0.52)]
+    t = format_message(replace(rec_arb, legs=legs))
+    assert 'Buy the "KC ML YES" leg first at 45 cents or less, then the other at 52 cents or less.' in t
+    assert t.endswith("When placed, type: confirm 42")
+
+
+def test_format_middle_plain_english(rec_arb):
+    from dataclasses import replace
+    legs = [Leg("kalshi", "Eagles win by 3 or more points", "yes", 0.52, 0.6, "g", ticker="KXNFLSPREAD-A",
+                line=2.5, team="PHI", worst_price=0.52),
+            Leg("kalshi", "Eagles win by 7 or more points", "no", 0.50, 0.6, "g", ticker="KXNFLSPREAD-B",
+                line=6.5, team="PHI", worst_price=0.56)]
+    t = format_message(replace(rec_arb, kind="middle", legs=legs, qty=20, p_win=0.18, stake_cents=0,
+                               tie_risk=False, id=44))
+    assert t.isascii() and len(t) <= 480 and t.startswith("Not risk-free #44 (Kalshi): ")
+    assert ('Buy 20 "Yes" on "Eagles win by 3 or more points" AND 20 "No" on "Eagles win by 7 or more points".'
+            in t)
+    assert "Total $20.40 + $0.70 fees; you get $20.00 back, or $40.00 if the Eagles win by 3 to 6 points" in t
+    assert "(about 18% chance)" in t
+    assert 'Buy the "Eagles win by 3 or more points" leg first, then the other at 56 cents or less.' in t
+    assert "KXNFL" not in t and " x20" not in t and t.endswith("When placed, type: confirm 44")

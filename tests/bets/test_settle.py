@@ -247,3 +247,26 @@ def test_record_clv_is_committed(env):
     bet = place(lc, [kleg()])
     st.record_clv(bet, 0.55)
     assert conn.in_transaction is False
+
+
+def test_middle_settles_like_a_pair(env):
+    conn, lc, reg, st = env
+    reg.upsert(game(home=27, away=24))  # PHI by 3: both a YES PHI >2.5 and a NO PHI >3.5 pay
+    lo = Leg("kalshi", "x", "yes", 0.52, 0.5, GID, ticker="SP-PHI3", team="PHI", line=2.5)
+    hi = Leg("kalshi", "x", "no", 0.50, 0.5, GID, ticker="SP-PHI4", team="PHI", line=3.5)
+    bet_id = place(lc, [lo, hi], kind="middle", qty=10)
+    done = st.settle_ready(KICK + timedelta(hours=4), lambda t: None, no_stat)
+    assert done == [(bet_id, "won", 2000)]
+
+
+def test_pp_grading_uses_configured_table():
+    legs = [pleg(f"P{i}", team=f"T{i}", game_id=f"g{i}") for i in range(5)]
+    stats = {(f"P{i}", "rec_yds"): 60.0 if i < 4 else 10.0 for i in range(5)}
+    arena = {(5, "flex"): {5: 10}, (4, "flex"): {4: 6}}
+    assert grade_pp_entry(legs, (5, "flex"), stats, arena) == ("lost", 0.0)
+
+
+def test_settler_takes_payout_table(env):
+    conn, lc, reg, _ = env
+    st = Settler(conn, lc, reg, payouts={(2, "power"): {2: 3.5}})
+    assert st.payouts[(2, "power")] == {2: 3.5}

@@ -69,3 +69,28 @@ def test_fair_pricing_settings(tmp_path):
         load_settings(env_file=tmp_path / "x", overrides={"median_fair_policy": "sometimes"})
     with pytest.raises(ValueError):
         load_settings(env_file=tmp_path / "x", overrides={"nfl_tie_prob": "2"})
+
+@pytest.mark.parametrize("name,raw", [
+    ("pp_payouts_json", "{bad"),
+    ("pp_payouts_json", '{"5-flx": {"5": 10}}'),
+    ("pp_payouts_json", '{"abc": {"5": 10}}'),
+    ("pp_payouts_json", '{"5-flex": {"5": "x"}}'),
+    ("pp_payouts_json", '{"5-flex": {"5": -1}}'),
+    ("pp_payouts_json", '{"5-flex": {"9": 2}}'),
+    ("pp_payouts_json", '["5-flex"]'),
+    ("pp_structures", "5-flx"),
+    ("pp_structures", "abc"),
+    ("pp_structures", "x-power"),
+])
+def test_prizepicks_settings_validated_before_save(name, raw):
+    from gridiron_edge.config import Settings, apply_override
+    with pytest.raises(ValueError):
+        apply_override(Settings(), name, raw)
+
+
+def test_prizepicks_settings_accept_good_values():
+    from gridiron_edge.config import Settings, apply_override
+    s = apply_override(Settings(), "pp_payouts_json", '{"5-flex": {"5": 9.5, "4": 2, "3": 0.4}}')
+    assert s.pp_payouts_json
+    assert apply_override(s, "pp_structures", "3-power, 5-flex").pp_structures == ("3-power", "5-flex")
+    assert apply_override(s, "pp_payouts_json", "").pp_payouts_json == ""

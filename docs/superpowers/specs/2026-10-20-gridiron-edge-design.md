@@ -58,7 +58,7 @@ The bankroll is a notional paper pool. The user adds to it with `deposit` and ta
 - **Inflated paper profit.** Stale prices never count as fills, and Kalshi fees and top-of-book depth are always applied. Headline ROI shows a ±2σ band, and results under ~1,500 bets are labelled "inconclusive".
 - **Burning a month of API credits in a day.** A hard budget guard stops this.
 - **Spamming the phone.** Texts are deduplicated, with a cooldown and quiet hours. Arbitrage alerts are exempt.
-- **Calling something "arbitrage" when it isn't risk-free.** PrizePicks entries are "edge". Kalshi moneyline pairs carry an NFL-tie flag.
+- **Calling something "arbitrage" when it isn't risk-free.** PrizePicks entries are "edge". Kalshi NFL moneyline pairs carry a tie flag only when the market rules lack the 50/50 tie split. Ladder middles are labelled "middle" (not risk-free), never arbitrage.
 
 ## 3. Constraints
 
@@ -260,7 +260,7 @@ tests/
 | markets per game | one, unless props on different players |
 
 **Flags:**
-- NFL ties: a moneyline is not exhaustive.
+- NFL ties: Kalshi rules (`rules_primary`) settle a tie at $0.50 per side, so YES+YES and NO+NO moneyline pairs both pay $1; without that clause a YES+YES pair can lose on a tie.
 - CFB cancelled games: a "fair price" resolution.
 
 **Optional maker mode, off by default.** Suggest a resting limit price at the lower 0.0175 maker fee. It is shown as "may not fill".
@@ -301,7 +301,7 @@ Only standard lines are used; no Demons or Goblins.
 **Moneyline pair:**
 - The test is P_eff(A) + P_eff(B) < 1.
 - The size is the minimum of the two top-of-book sizes.
-- An NFL-tie flag is shown, because both legs can lose on a tie.
+- An NFL-tie flag is shown only when the market rules have no 50/50 tie split (then both YES legs can lose on a tie). NO+NO pairs never carry it.
 
 **Ladder monotonicity:**
 - For one team's spread ladder, or a total ladder, a violation is bid(higher X) > ask(lower X) net of fees.

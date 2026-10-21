@@ -88,6 +88,7 @@ class KalshiMarket:
     fee_multiplier: float
     fetched_at: datetime
     rules_secondary: str = ""  # settlement fine print (tie handling for NFL moneylines)
+    rules_primary: str = ""  # settlement rules text (tie handling)
 
 
 @dataclass(frozen=True)
@@ -103,6 +104,8 @@ class Leg:
     stat: str | None = None
     line: float | None = None
     team: str | None = None
+    fee_multiplier: float = 1.0  # the market's Kalshi fee multiplier, used by confirm and texts
+    worst_price: float | None = None  # arbs: the most this leg can cost and still lock a profit
 
     def identity(self) -> str:
         if self.ticker:
@@ -113,7 +116,7 @@ class Leg:
 @dataclass
 class Recommendation:
     id: int | None
-    kind: Literal["kalshi_game", "kalshi_prop", "pp_entry", "arb"]
+    kind: Literal["kalshi_game", "kalshi_prop", "pp_entry", "arb", "middle"]
     legs: list[Leg]
     stake_cents: int
     qty: int | None
