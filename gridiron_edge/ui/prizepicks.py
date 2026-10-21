@@ -168,17 +168,6 @@ def best_picks(view: PPView, n: int = 3) -> list[PPLine]:
     return sorted(usable, key=lambda ln: (-room(ln), ln.player))[:n]
 
 
-def _best_lines(view: PPView, names: d.Names) -> list[str]:
-    picks = best_picks(view)
-    if not picks:
-        return []
-    best = best_structure(view.settings)
-    out = ["Best picks now:"]
-    for i, ln in enumerate(picks, 1):
-        out.append(f"  {i}. {best_pick_text(ln, view, names, best)}")
-    return out
-
-
 def best_pick_text(ln: PPLine, view: PPView, names: d.Names = d.DEFAULT_NAMES, best=None) -> str:
     """'Patrick Mahomes MORE than 1.5 passing touchdowns: our chance 59.1%, needs 56.2% (Dolphins at Chiefs)'."""
     g = view.games[ln.game_id]
@@ -191,34 +180,46 @@ def best_pick_text(ln: PPLine, view: PPView, names: d.Names = d.DEFAULT_NAMES, b
             f"({_matchup(g, names)}){src}")
 
 
-def board_lines(view: PPView, now: datetime, names: d.Names = d.DEFAULT_NAMES) -> list[str]:
-    """The PrizePicks tab, line by line."""
+def board_sections(view: PPView, now: datetime, names: d.Names = d.DEFAULT_NAMES
+                   ) -> tuple[list[str], list[str], list[str]]:
+    """The PrizePicks tab as its three boxes: (summary, best picks now, every line by game)."""
     if "prizepicks" not in view.settings.venues:
-        return ["PrizePicks is turned off. To turn it on, type: set venues kalshi,prizepicks"]
+        return ["PrizePicks is turned off. To turn it on, type: set venues kalshi,prizepicks"], [], []
     groups = _by_game(view)
     if not groups:
-        return ["No PrizePicks lines are loaded yet. " + _next_text(view, now),
-                needed_text(view.settings),
-                'If they never show up, your odds plan may not include PrizePicks; type lines in with "pp add".']
+        return (["No PrizePicks lines are loaded yet. " + _next_text(view, now),
+                 needed_text(view.settings),
+                 'If they never show up, your odds plan may not include PrizePicks; type lines in with "pp add".'],
+                [], [])
     stamps = [ln.fetched_at for ln in view.lines if ln.game_id in view.games]
     n = sum(len(lines) for _, lines in groups)
-    out = [f"Lines as of {d.when(max(stamps), now)} PT - {n} line{'s' * (n != 1)} for "
-           f"{len(groups)} game{'s' * (len(groups) != 1)}. " + _next_text(view, now),
-           needed_text(view.settings),
-           _entry_text(view)]
     best = best_structure(view.settings)
     n_clear = sum(_clears(ln, view.settings, best) for _, lines in groups for ln in lines)
-    out.append(clear_text(n_clear, n).capitalize() + ".")
-    top = _best_lines(view, names)
-    out += ["", *top] if top else []
-    out.append("")
+    summary = [f"Lines as of {d.when(max(stamps), now)} PT - {n} line{'s' * (n != 1)} for "
+               f"{len(groups)} game{'s' * (len(groups) != 1)}. " + _next_text(view, now),
+               needed_text(view.settings),
+               _entry_text(view),
+               clear_text(n_clear, n).capitalize() + "."]
+    top = [f"{i}. {best_pick_text(ln, view, names, best)}" for i, ln in enumerate(best_picks(view), 1)]
+    lines_out: list[str] = []
     for g, lines in groups:
         k = sum(_clears(ln, view.settings, best) for ln in lines)
-        out.append(f"{_matchup(g, names)} - kickoff {d.when(g.kickoff, now)} PT - {clear_text(k, len(lines))}")
+        lines_out.append(f"{_matchup(g, names)} - kickoff {d.when(g.kickoff, now)} PT - {clear_text(k, len(lines))}")
         gated = view.model_gated.get(g.league, True)
-        out += [f"  {line_text(ln, gated)}" for ln in lines]
-        out.append("")
-    return out[:-1]
+        lines_out += [f"  {line_text(ln, gated)}" for ln in lines]
+        lines_out.append("")
+    return summary, top, lines_out[:-1]
+
+
+def board_lines(view: PPView, now: datetime, names: d.Names = d.DEFAULT_NAMES) -> list[str]:
+    """The PrizePicks tab, line by line (all three boxes in order)."""
+    summary, top, lines = board_sections(view, now, names)
+    out = list(summary)
+    if top:
+        out += ["", "Best picks now:", *(f"  {t}" for t in top)]
+    if lines:
+        out += ["", *lines]
+    return out
 
 
 def status_line(view: PPView, now: datetime, names: d.Names = d.DEFAULT_NAMES) -> str:

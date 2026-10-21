@@ -404,9 +404,12 @@ async def test_prizepicks_tab_and_home_status_line(services_mocked):
         assert "See tab 5." in status
         await pilot.press("5")
         await pilot.pause()
+        summary = str(app.query_one("#pp-summary", Static).render())
         board = str(app.query_one("#pp-board", Static).render())
-        assert "Lines as of" in board and "Bears at Seahawks - kickoff" in board
-        assert "needs about" in board and "per pick" in board
+        assert "Lines as of" in summary and "Bears at Seahawks - kickoff" in board
+        assert "needs about" in summary and "per pick" in summary
+        titles = [app.query_one(f"#{i}").border_title for i in ("pp-summary-box", "pp-best-box", "pp-scroll")]
+        assert titles == ["PRIZEPICKS", "BEST PICKS NOW", "ALL LINES"]
 
 
 async def test_pp_refresh_asks_first_then_loads(services_mocked):

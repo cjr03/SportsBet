@@ -75,8 +75,18 @@ WatchList > .option-list--option { padding: 0 1; }
     padding: 0 2;
     color: #94a3b8;
 }
-#pp-scroll { height: 1fr; background: $surface; }
-#pp-board { padding: 1 2; }
+#prizepicks { layout: vertical; }
+#pp-summary-box, #pp-best-box { height: auto; }
+#pp-scroll { height: 1fr; }
+#pp-summary-box, #pp-best-box, #pp-scroll {
+    background: $surface;
+    border: round $accent 40%;
+    border-title-color: $accent;
+    border-title-style: bold;
+}
+#pp-scroll:focus-within { border: round $accent; }
+#pp-best-box { border: round $profit 40%; border-title-color: $profit; }
+#pp-summary, #pp-best, #pp-board { padding: 0 1; }
 
 #performance { layout: vertical; }
 #perf-top { height: 16; }

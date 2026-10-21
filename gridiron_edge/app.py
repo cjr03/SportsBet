@@ -8,7 +8,7 @@ from rich.text import Text
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.suggester import SuggestFromList
 from textual.widgets import Footer, Input, Static, TabbedContent, TabPane
 
@@ -145,7 +145,14 @@ class GridironApp(App):
             with TabPane("4 Log", id="log"):
                 yield EventLog()
             with TabPane("5 PrizePicks", id="prizepicks"):
-                with VerticalScroll(id="pp-scroll"):
+                with Vertical(id="pp-summary-box") as box:
+                    box.border_title = "PRIZEPICKS"
+                    yield Static("", id="pp-summary")
+                with Vertical(id="pp-best-box") as box:
+                    box.border_title = "BEST PICKS NOW"
+                    yield Static("", id="pp-best")
+                with VerticalScroll(id="pp-scroll") as box:
+                    box.border_title = "ALL LINES"
                     yield Static("", id="pp-board")
         yield Static("", id="status")
         with Horizontal(id="command-bar"):
@@ -283,7 +290,12 @@ class GridironApp(App):
             return
         view.active = active
         self.query_one("#pp-status", Static).update(Text(pp_ui.status_line(view, now, self.names)))
-        self.query_one("#pp-board", Static).update(Text("\n".join(pp_ui.board_lines(view, now, self.names))))
+        summary, best, lines = pp_ui.board_sections(view, now, self.names)
+        self.query_one("#pp-summary", Static).update(Text("\n".join(summary)))
+        self.query_one("#pp-best", Static).update(Text("\n".join(best) or "No pick clears its needed chance yet."))
+        self.query_one("#pp-best-box").display = bool(lines)
+        self.query_one("#pp-scroll").display = bool(lines)
+        self.query_one("#pp-board", Static).update(Text("\n".join(lines)))
 
     def _settled_today(self, now: datetime) -> list:
         day = now.astimezone(PT).replace(hour=0, minute=0, second=0, microsecond=0)
