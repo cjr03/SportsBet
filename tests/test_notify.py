@@ -23,24 +23,30 @@ def _rec(kind, legs, **kw):
     return Recommendation(**base)
 
 
+GID = "nfl:20261025:DAL@PHI"
+
+
 @pytest.fixture
 def rec_kalshi():
-    leg = Leg("kalshi", "Kansas City ML — café", "yes", 0.55, 0.60, "g", ticker="KXNFLGAME-X")
-    return _rec("kalshi_game", [leg], stake_cents=1100, qty=20)
+    leg = Leg("kalshi", "PHI wins by >3.5", "yes", 0.47, 0.52, GID, ticker="KXNFLSPREAD-26OCT25DALPHI-PHI3",
+              team="PHI", line=3.5)
+    return _rec("kalshi_game", [leg], stake_cents=1880, qty=40, id=41)
 
 
 @pytest.fixture
 def rec_pp():
-    legs = [Leg("prizepicks", f"P{i}", "over" if i % 2 else "under", 0.0, 0.6, "g",
+    legs = [Leg("prizepicks", f"P{i}", "over" if i % 2 else "under", 0.0, 0.6, GID,
                 player=f"Player {i}", stat="rec_yds", line=50.5 + i) for i in range(3)]
-    return _rec("pp_entry", legs, structure="3-power", stake_cents=500)
+    legs[0] = Leg("prizepicks", "JH", "over", 0.0, 0.61, GID, player="Jalen Hurts", stat="pass_tds", line=1.5)
+    return _rec("pp_entry", legs, structure="3-flex", stake_cents=1000, ev=0.094)
 
 
 @pytest.fixture
 def rec_arb():
-    legs = [Leg("kalshi", "KC ML YES", "yes", 0.45, 1.0, "g", ticker="A"),
-            Leg("kalshi", "DEN ML YES", "yes", 0.50, 1.0, "g", ticker="B")]
-    return _rec("arb", legs, qty=10, ev=0.04, tie_risk=True)
+    legs = [Leg("kalshi", "A", "yes", 0.47, 0.47, GID, ticker="KXNFLGAME-X-PHI", team="PHI"),
+            Leg("kalshi", "B", "yes", 0.48, 0.48, GID, ticker="KXNFLGAME-X-DAL", team="DAL")]
+    return _rec("arb", legs, qty=20, ev=0.004, tie_risk=True, id=43, structure="kalshi_ml_pair",
+                stake_cents=2010)
 
 
 @pytest.fixture
@@ -53,22 +59,56 @@ def midnight():
     return datetime(2026, 10, 26, 0, 30, tzinfo=PT)
 
 
-def test_format_kalshi_ascii_and_fields(rec_kalshi):
+JARGON = ("EV", "CLV", "fair", "Brier", "KXNFL", "YES @", " x40", " x20", "|")
+
+
+def _plain(t):
+    assert t.isascii() and len(t) <= 480
+    assert not [w for w in JARGON if w in t], t
+
+
+def test_format_kalshi_plain_english(rec_kalshi):
     t = format_message(rec_kalshi)
-    assert t.isascii() and t.startswith("GE KALSHI BUY YES") and t.endswith(" PT | id 42")
-    # 20 x $0.55 = $11.00 plus the $0.35 taker fee confirm will debit
-    assert "@ $0.55 x20 = $11.35 w/fee | fair 60.0% EV +5.0% | verify availability before placing | 10:05 PT" in t
+    _plain(t)
+    assert t == ('Bet idea #41 (Kalshi): Buy 40 "Yes" contracts on "Eagles win by 4 or more points vs Cowboys" '
+                 'at 47 cents. Cost $18.80 + $0.70 fee. We put this at 52%; the price implies 47%. '
+                 'Expected profit about $1.30. Place before 1:00 PM PT. When placed, type: confirm 41')
 
 
-def test_format_pp_has_confirm(rec_pp):
+def test_format_kalshi_no_side_explains(rec_kalshi):
+    rec_kalshi.legs = [replace(rec_kalshi.legs[0], side="no", price=0.53, p_fair=0.58)]
+    t = format_message(rec_kalshi)
+    _plain(t)
+    assert '"No" contracts on "Eagles win by 4 or more points vs Cowboys"' in t
+    assert "you win if it does NOT happen" in t and t.endswith("When placed, type: confirm 41")
+
+
+def test_format_pp_plain_english(rec_pp):
     t = format_message(rec_pp)
-    assert "confirm payout in app" in t and t.startswith("GE PP 3-POWER $5 |")
-    assert "1) Player 0 Rec Yds LESS 50.5 (60%) 2) Player 1 Rec Yds MORE 51.5 (60%)" in t
+    _plain(t)
+    assert t.startswith("Bet idea #42 (PrizePicks 3-pick Flex Play, $10.00): "
+                        "1) Jalen Hurts MORE than 1.5 passing touchdowns (61%) "
+                        "2) Player 1 MORE than 51.5 receiving yards (60%) ")
+    assert "Expected profit about $0.94." in t and "Check the app shows 3x / 1x payouts" in t
+    assert "Lines as of 10:05 AM." in t and t.endswith("When placed, type: confirm 42")
 
 
-def test_format_arb_has_verify_and_tie(rec_arb):
+def test_format_pp_long_entry_fits(rec_pp):
+    legs = [Leg("prizepicks", "x", "over", 0.0, 0.6, GID, player=f"Christian McCaffrey-Longname {i}",
+                stat="rush_reception_yds", line=100.5) for i in range(6)]
+    t = format_message(_rec("pp_entry", legs, structure="6-flex", stake_cents=2000))
+    _plain(t)
+    assert t.endswith("When placed, type: confirm 42")
+
+
+def test_format_arb_locked_profit(rec_arb):
     t = format_message(rec_arb)
-    assert "verify" in t and "tie risk" in t and t.startswith("GE ARB KALSHI +4.0% | KC ML YES + DEN ML YES x10 | tie risk |")
+    _plain(t)
+    assert t.startswith('Locked profit #43 (Kalshi): Buy 20 "Yes" on "Eagles beat Cowboys" AND '
+                        '20 "Yes" on "Cowboys beat Eagles". Total $19.00 + $0.70 fees; you get $20.00 back '
+                        'whichever team wins (profit about $0.30).')
+    assert "a tie pays nothing" in t and "Place both right away; prices move fast." in t
+    assert t.endswith("When placed, type: confirm 43")
 
 
 def test_imessage_passes_argv_not_interpolated():

@@ -105,3 +105,9 @@ def test_kalshi_resolver(registry):
               "yes_sub_title": "Over 44.5 points scored"}) == (g.game_id, None)
     assert r({"event_ticker": "KXNFLGAME-26NOV02ZZZYYY", "yes_sub_title": "x"}) == (None, None)
     assert r({"event_ticker": "garbage", "yes_sub_title": ""}) == (None, None)
+
+
+def test_display_names_for_cfb(resolver):
+    resolver.set_display("cfb", "OSU", "Ohio State")
+    resolver.set_display("cfb", "OSU", "Ohio State")
+    assert resolver.display_names() == {("cfb", "OSU"): "Ohio State"}

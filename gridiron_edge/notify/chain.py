@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 from gridiron_edge.bets import lifecycle as _lifecycle  # noqa: F401 - registers the recommendations table
 from gridiron_edge.db import register_schema
 from gridiron_edge.notify import NotifyResult
+from gridiron_edge.describe import DEFAULT_NAMES
 from gridiron_edge.notify.format import PT, format_message
 from gridiron_edge.types import Recommendation
 
@@ -26,6 +27,7 @@ class NotifyChain:
         self.quiet_hours = quiet_hours
         self.enabled = enabled
         self.tz = tz
+        self.names = DEFAULT_NAMES  # build_services swaps in one that knows CFB school names
 
     def _quiet(self, now: datetime) -> bool:
         start, end = self.quiet_hours
@@ -63,7 +65,7 @@ class NotifyChain:
         if not force and (self._already_sent(rec.dedupe_key)
                           or (rec.kind != "arb" and (self._quiet(now) or self._cooling_down(rec.leg_key, now)))):
             return None
-        return self._send(format_message(rec, self.tz), now, rec, only_first_ok=rec.kind != "arb")
+        return self._send(format_message(rec, self.tz, self.names), now, rec, only_first_ok=rec.kind != "arb")
 
     def send_text(self, text: str, now: datetime) -> NotifyResult:
         """For `notify test`: ignores dedupe and quiet hours."""

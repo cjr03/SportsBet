@@ -96,7 +96,7 @@ async def test_scan_job_creates_rec_and_texts_once(services_mocked, load):
         app.refresh_views()
         await pilot.pause()
         assert app.query_one("#tab-kalshi_game", DataTable).row_count == 1
-        assert len(services_mocked.sink) == 1 and services_mocked.sink[0].startswith("GE KALSHI BUY YES")
+        assert len(services_mocked.sink) == 1 and services_mocked.sink[0].startswith("Bet idea #")
         assert {k for k, _ in first} >= {"rec", "text"}
         assert not [ln for ln in second if ln[0] in ("rec", "text")]
         (rec,) = svc.lifecycle.pending()
