@@ -106,3 +106,40 @@ def test_team_of(weekly_df):
     p = PropProjector(weekly_df)
     assert p.team_of("VET back") == "KC"
     assert p.team_of("Nobody") is None
+
+
+def _wf_games(n=400, seed=5):
+    rng = np.random.default_rng(seed)
+    out = []
+    for k in range(n):
+        true = rng.normal(0, 7)
+        line = round(true * 0.6 * 2) / 2
+        out.append({"date": date(2026, 9, 1) + timedelta(days=k // 12), "home": "A", "away": "B",
+                    "neutral": False, "home_line": -line, "margin": round(true + rng.normal(0, 13))})
+    return out
+
+
+def test_walkforward_reports_baselines_and_reliability():
+    fit, m = walkforward_ats("nfl", _wf_games(), lambda d: (lambda g: -g["home_line"] / 0.6))
+    assert m["brier_baseline"] == 0.25 and m["logloss_baseline"] == pytest.approx(np.log(2))
+    assert m["breakeven"] == pytest.approx(110 / 210)
+    assert m["bss"] == pytest.approx(1 - m["brier"] / 0.25)
+    rel = m["reliability"]
+    assert len(rel) == 5 and sum(b["n"] for b in rel) == m["n"]
+    assert all(b["n"] == 0 or 0 <= b["hit_rate"] <= 1 for b in rel)
+
+
+def test_walkforward_drops_dead_market_column_and_skips_burn_in():
+    games = _wf_games()
+    first_week = min(g["date"] for g in games)
+    first_week -= timedelta(days=first_week.weekday())
+
+    def predict_asof(d):
+        if d == first_week:
+            return lambda g: None  # nothing fitted yet: no forecast, not a 0-margin underdog pick
+        return lambda g: -g["home_line"] / 0.6
+
+    fit, m = walkforward_ats("nfl", games, predict_asof)
+    full, _ = walkforward_ats("nfl", games, lambda d: (lambda g: -g["home_line"] / 0.6))
+    assert fit.b_market == 0.0 and fit.n < full.n
+    assert m["skipped_burn_in"] > 0

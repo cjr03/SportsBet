@@ -1,4 +1,5 @@
 """fit_gates fails closed: one league's backtest failure never ungates another."""
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import httpx
@@ -98,3 +99,26 @@ async def test_totals_stay_gated_on_a_passing_spread_backtest(services_mocked):
         assert svc.gates[(lg, "total")] is True  # no totals backtest yet
         assert svc.gates[(lg, "prop")] is False  # book-anchored props are market-derived
         assert svc.gates[(lg, "prop_model")] is True  # projector-only props have no backtest
+
+
+def test_cfb_gate_span_uses_setting(services_mocked):
+    svc = services_mocked(cfb_gate_seasons=2)
+    assert svc._gate_spans(NOW)["cfb"] == (2024, 2025)
+    svc.settings = replace(svc.settings, cfb_gate_seasons=1)
+    assert svc._gate_spans(NOW)["cfb"] == (2025, 2025)
+
+
+async def test_cfb_backtest_skips_weeks_without_enough_history(services_mocked):
+    from datetime import date
+    svc = services_mocked()
+    rows = [{"homeTeam": "Aaa", "awayTeam": "Bbb", "homeScore": 21, "awayScore": 14,
+             "startDate": "2025-09-06T19:00:00Z", "neutralSite": False, "week": 2,
+             "lines": [{"spread": -3.5}]}]
+
+    async def lines(year, week):
+        return rows
+
+    svc.cfbd.lines = lines
+    games, predict_asof = await svc._cfb_inputs([2025], date(2026, 1, 1))
+    assert len(games) == 1
+    assert predict_asof(date(2025, 9, 1))(games[0]) is None  # nothing fitted: no forecast

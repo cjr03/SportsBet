@@ -56,6 +56,8 @@ LINES_HORIZON = timedelta(hours=48)
 # sportsbook quotes and prop lines, written through to api_cache so a restart keeps them
 _PERSISTED = {"quotes": Quote, "props": PropQuote}
 NFL_SEASONS = 3
+NFL_BURN_IN_GAMES = 48  # ~3 weeks: the first weeks of the backtest span have nothing to fit on
+CFB_BURN_IN_GAMES = 150
 # Settings the `set` command may not touch: secrets and paths live in .env / --db.
 LOCKED_SETTINGS = {"odds_api_key", "cfbd_api_key", "therundown_api_key", "notify_phone", "ntfy_topic",
                    "kalshi_base_url", "db_path"}
@@ -418,7 +420,12 @@ class Services:
         sched = sched.filter(pl.col("season").is_in(years))
         epa = self.history.get("nfl_epa")
 
+        played = [_as_date(d) for d, h in zip(sched["gameday"].to_list(), sched["home_score"].to_list())
+                  if d is not None and h is not None] if "home_score" in sched.columns else []
+
         def predict_asof(d: date):
+            if sum(x < d for x in played) < NFL_BURN_IN_GAMES:  # start of the span: no forecast yet
+                return lambda g: None
             model = NflRatings.fit(sched, epa, d)
             return lambda g: model.predict(g["home"], g["away"])
 
@@ -455,10 +462,12 @@ class Services:
                               "margin": float(r["homeScore"] - r["awayScore"])})
 
         def predict_asof(d: date):
+            if sum(g["startDate"] < d for g in fit_games) < CFB_BURN_IN_GAMES:
+                return lambda g: None  # an empty fit would predict 0 and always pick the underdog
             try:
                 model = CfbRatings.fit(fit_games, {}, d)
             except np.linalg.LinAlgError:  # nothing played before d yet
-                return lambda g: 0.0
+                return lambda g: None
             return lambda g: model.predict(g["home"], g["away"], g["neutral"])
 
         return games, predict_asof
@@ -518,10 +527,10 @@ class Services:
                                 f"-> {'observe-only' if r['gated'] else 'live'}"))
         return out
 
-    @staticmethod
-    def _gate_spans(now: datetime) -> dict[str, tuple[int, int]]:
+    def _gate_spans(self, now: datetime) -> dict[str, tuple[int, int]]:
         cur = _season(now)
-        return {"nfl": (cur - NFL_SEASONS + 1, cur), "cfb": (cur - 1, cur - 1)}
+        n_cfb = max(1, self.settings.cfb_gate_seasons)
+        return {"nfl": (cur - NFL_SEASONS + 1, cur), "cfb": (cur - n_cfb, cur - 1)}
 
     def _league_model(self, league: str):
         return self.nfl_model if league == "nfl" else self.cfb_model
