@@ -129,3 +129,24 @@ class NflRatings:
         if home not in self._pf or away not in self._pf:
             return None
         return ((self._pf[home] + self._pa[home]) / 2 + (self._pf[away] + self._pa[away]) / 2)
+
+
+def qb_changes(schedules: pl.DataFrame, qb1: dict[str, str], asof: date) -> set[str]:
+    """Teams whose depth-chart QB1 is not the QB who started their last completed game.
+
+    The ratings are team-level, so a new starter is information the model lacks (FPI values a
+    starting QB at about 3 pts). Teams with no started game or no QB1 listed are not flagged.
+    """
+    if not qb1 or not {"home_qb_id", "away_qb_id"} <= set(schedules.columns):
+        return set()
+    last: dict[str, tuple[date, str]] = {}
+    for r in schedules.iter_rows(named=True):
+        if r["home_score"] is None or r["away_score"] is None or r["gameday"] is None:
+            continue
+        d = _as_date(r["gameday"])
+        if d >= asof:
+            continue
+        for team, qb in ((r["home_team"], r["home_qb_id"]), (r["away_team"], r["away_qb_id"])):
+            if qb and (team not in last or d > last[team][0]):
+                last[team] = (d, qb)
+    return {t for t, (_, qb) in last.items() if t in qb1 and qb1[t] != qb}

@@ -30,7 +30,7 @@ from gridiron_edge.models import cfb as cfb_models
 from gridiron_edge.models import nfl as nfl_models
 from gridiron_edge.models.blend import BlendFit, walkforward_ats, walkforward_totals
 from gridiron_edge.models.cfb import CfbRatings, cfb_prior, games_played
-from gridiron_edge.models.nfl import NflRatings, is_neutral
+from gridiron_edge.models.nfl import NflRatings, is_neutral, qb_changes
 from gridiron_edge.models.props import STAT_COLUMNS, PropProjector
 from gridiron_edge.models.ridge import implied_ratings
 from gridiron_edge.notify.chain import NotifyChain
@@ -237,6 +237,7 @@ class Services:
     gates_complete: bool = False  # last fit_gates backtested every league
     blend_fits: dict[tuple[str, str], tuple[float, float]] = field(default_factory=dict)
     disagree_caps: dict[str, float] = field(default_factory=dict)
+    qb_changes: set[str] = field(default_factory=set)  # NFL teams with a new depth-chart QB1
     margin_models: dict = field(default_factory=_default_margin_models)
     latest: dict = field(default_factory=lambda: {"quotes": [], "props": [], "kalshi": [], "stats": None})
     player_teams: dict[str, str] = field(default_factory=dict)
@@ -366,7 +367,24 @@ class Services:
         self.projector = PropProjector(weekly) if "player_display_name" in weekly.columns else _NoProjector()
         self.player_teams = self._latest_teams(weekly)
         weeks = self._assign_nfl_weeks(sched, now)
-        return [("info", f"nflverse: {sched.height} games, {weekly.height} player-weeks, {weeks} weeks set")]
+        return ([("info", f"nflverse: {sched.height} games, {weekly.height} player-weeks, {weeks} weeks set")]
+                + await self._check_qbs(sched, cur, now))
+
+    async def _check_qbs(self, sched: pl.DataFrame, season: int, now: datetime) -> list[tuple[str, str]]:
+        """Teams whose listed starting QB changed since their last game (their games get no model weight)."""
+        self.qb_changes = set()
+        if not self.settings.qb_veto:
+            return []
+        try:
+            qb1 = await asyncio.to_thread(self.nflverse.depth_chart_qb1, season)
+        except Exception as e:  # noqa: BLE001 - the disagreement cap still guards these games
+            return [("info", f"QB change check unavailable ({type(e).__name__}); using the disagreement cap only")]
+        teams = qb_changes(sched, qb1, now.date())
+        self.qb_changes = {self.teams.canonical("nfl", t) or t for t in teams}
+        if not self.qb_changes:
+            return []
+        return [("info", f"QB change since last game: {', '.join(sorted(self.qb_changes))} - "
+                         "those games use the betting market only")]
 
     def _latest_teams(self, weekly: pl.DataFrame) -> dict[str, str]:
         """Ruling R2: each player's latest team from the weekly stats."""
@@ -864,8 +882,10 @@ class Services:
         out = {}
         for g in games.values():
             if g.league == "nfl" and self.nfl_model and {g.home, g.away} <= self.nfl_model.ratings.keys():
+                qb = sorted({g.home, g.away} & self.qb_changes) if self.settings.qb_veto else []
                 out[g.game_id] = Prediction(g.game_id, self.nfl_model.predict(g.home, g.away, g.neutral),
-                                            self.nfl_model.predict_total(g.home, g.away), nfl_models.MODEL_VERSION)
+                                            self.nfl_model.predict_total(g.home, g.away), nfl_models.MODEL_VERSION,
+                                            veto=f"QB change: {', '.join(qb)}" if qb else None)
             elif g.league == "cfb" and self.cfb_model and {g.home, g.away} <= self.cfb_model.ratings.keys():
                 out[g.game_id] = Prediction(g.game_id, self.cfb_model.predict(g.home, g.away, g.neutral),
                                             None, cfb_models.MODEL_VERSION)

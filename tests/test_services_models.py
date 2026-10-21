@@ -124,3 +124,37 @@ async def test_cfb_backtest_uses_last_season_prior(services_mocked):
     assert {g["season"] for g in games} == {2024}
     early = predict_asof(date(2024, 8, 26))  # before any 2024 game: the 2023-based prior alone
     assert early({"home": "Georgia", "away": "Akron", "neutral": True}) > 5.0
+
+
+async def test_qb_change_vetoes_model_for_that_game(services_mocked):
+    from conftest import FakeNflverse
+
+    from gridiron_edge.models.nfl import NflRatings
+
+    class Nflverse(FakeNflverse):
+        def schedules(self, seasons):
+            return pl.DataFrame([{"season": 2026, "week": 8, "gameday": "2026-10-26", "home_team": "KC",
+                                  "away_team": "BUF", "home_score": 20, "away_score": 17, "result": 3.0,
+                                  "spread_line": 2.5, "total_line": 47.5, "location": "Home",
+                                  "home_qb_id": "mahomes", "away_qb_id": "allen"}])
+
+        def depth_chart_qb1(self, season):
+            return {"KC": "backup", "BUF": "allen"}
+
+    svc = services_mocked(cfbd_api_key="")
+    svc.nflverse = Nflverse()
+    out = await svc._load_nflverse(NOW)
+    assert svc.qb_changes == {"KC"} and any("QB change" in m for _, m in out)
+    svc.nfl_model = NflRatings({"KC": 3.0, "BUF": 2.0, "MIA": 0.0}, 2.0, {}, {})
+    kc = _game("nfl", "KC", "MIA", NOW + timedelta(days=2))
+    ok = _game("nfl", "MIA", "BUF", NOW + timedelta(days=2))
+    preds = svc._predictions({g.game_id: g for g in (kc, ok)})
+    assert preds[kc.game_id].veto and preds[ok.game_id].veto is None
+    svc.settings = svc.set_setting("qb_veto", "off")
+    assert svc._predictions({kc.game_id: kc})[kc.game_id].veto is None
+
+
+async def test_qb_check_failure_is_soft(services_mocked):
+    svc = services_mocked(cfbd_api_key="")  # FakeNflverse has no depth charts at all
+    out = await svc._load_nflverse(NOW)
+    assert svc.qb_changes == set() and not [ln for ln in out if ln[0] == "error"]
