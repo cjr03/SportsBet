@@ -51,3 +51,13 @@ def test_unknown_message_and_words():
     with pytest.raises(CommandError, match=r"usage: withdraw <amount>"):
         parse_command("withdraw")
     assert "pp add" in COMMAND_WORDS and "notify test" in COMMAND_WORDS
+
+
+def test_help_covers_every_command_in_plain_english():
+    from gridiron_edge.ui.commands import HELP
+
+    usages = " ".join(u for u, _ in HELP)
+    for word in {w.split()[0] for w in COMMAND_WORDS} - {"help"}:
+        assert word in usages, word
+    for _, what in HELP:
+        assert not any(j in what for j in ("EV", "CLV", "Brier", "fair"))

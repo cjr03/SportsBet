@@ -167,7 +167,8 @@ def empty_reason(now: datetime, *, odds_key: bool, games: list[Game], markets: l
     priced = {m.game_id for m in markets if m.game_id}
     if not any(g.game_id in priced for g in upcoming):
         return f"Kalshi lines for the {d.when(upcoming[0].kickoff, now)} games aren't open yet." + tail
-    if gates and all(gates.values()):
+    leagues = {g.league for g in upcoming}
+    if all(gates.get((lg, m), False) for lg in leagues for m in ("ml", "spread", "total")):
         return ("Every market is tracking-only until our numbers prove themselves, "
                 "so nothing is suggested as a bet." + tail)
     return "No good bets right now." + tail

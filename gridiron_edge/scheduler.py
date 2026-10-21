@@ -121,8 +121,7 @@ class Scheduler:
             if any(g.kickoff - now <= LINES_HORIZON for g in lg_up):
                 add(Job("rundown_lines", league), RUNDOWN_LINES_EVERY)
 
-        near = live or [g for g in upcoming if g.kickoff - now <= timedelta(hours=24)]
-        add(Job("kalshi_refresh"), timedelta(minutes=3 if near else 30))
+        add(Job("kalshi_refresh"), self._kalshi_every(now, upcoming, live))
 
         out += self._odds_games(now, local, upcoming)
         out += self._odds_props(now, local, upcoming)
@@ -139,6 +138,19 @@ class Scheduler:
         if self._scan_pending and self._elapsed(scan, now, SCAN_DEBOUNCE):
             out.append(scan)
         return out
+
+    @staticmethod
+    def _kalshi_every(now: datetime, upcoming, live) -> timedelta:
+        near = live or [g for g in upcoming if g.kickoff - now <= timedelta(hours=24)]
+        return timedelta(minutes=3 if near else 30)
+
+    def next_check(self, now: datetime) -> datetime:
+        """When the next Kalshi price refresh (and the scan it triggers) is due."""
+        upcoming = [g for g in self.registry.upcoming() if g.kickoff >= now]
+        last = self.state.get(Job("kalshi_refresh").key)
+        if last is None:
+            return now
+        return max(now, last + self._kalshi_every(now, upcoming, list(self.registry.live())))
 
     def _odds_games(self, now: datetime, local: datetime, upcoming) -> list[Job]:
         out: list[Job] = []

@@ -226,3 +226,13 @@ def test_kalshi_cadence_and_expire():
     run_all(far, far.due(T0), T0)
     assert not names(far.due(T0 + timedelta(minutes=10)), "kalshi_refresh")
     assert names(far.due(T0 + timedelta(minutes=31)), "kalshi_refresh")
+
+
+def test_next_check_follows_kalshi_refresh_pace():
+    s = sched(FakeRegistry([game("g", T0 + timedelta(hours=2))]))
+    assert s.next_check(T0) == T0  # never refreshed: due now
+    s.mark_done(Job("kalshi_refresh"), T0)
+    assert s.next_check(T0 + timedelta(minutes=1)) == T0 + timedelta(minutes=3)
+    far = sched(FakeRegistry([game("g", T0 + timedelta(days=3))]))
+    far.mark_done(Job("kalshi_refresh"), T0)
+    assert far.next_check(T0) == T0 + timedelta(minutes=30)

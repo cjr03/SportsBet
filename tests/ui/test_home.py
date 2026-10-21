@@ -102,5 +102,7 @@ def test_empty_reasons():
     assert "isn't set" in home.empty_reason(NOW, **{**base, "odds_key": False})
     assert home.empty_reason(NOW, **{**base, "markets": []}) == \
         "Kalshi lines for the 1:20 PM games aren't open yet. Next check in 3 min."
-    assert "tracking-only" in home.empty_reason(NOW, **{**base, "gates": {("nfl", "ml"): True}})
+    assert "tracking-only" not in home.empty_reason(NOW, **{**base, "gates": {("nfl", "ml"): True}})
+    gated = {("nfl", m): True for m in ("ml", "spread", "total")} | {("cfb", "ml"): False}
+    assert "tracking-only" in home.empty_reason(NOW, **{**base, "gates": gated})
     assert home.empty_reason(NOW, **{**base, "games": []}).startswith("No games on the schedule")
