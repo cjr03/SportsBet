@@ -154,3 +154,12 @@ def test_clv_throttle():
     assert clv_throttle([0.02, 0.01, 0.03, -0.01] * 5) == 1.0
     assert clv_throttle([0.02, -0.03, 0.01, -0.02] * 5) == 0.5  # mean below 0, not significant
     assert clv_throttle([-0.02, -0.03, -0.01, 0.005] * 5) == 0.0  # t < -2: observe only
+
+
+def test_shrunk_bet_never_gets_more_than_identical_unshrunk_when_cap_binds():
+    # review repro: a binding game cap used to favour the 0.5-shrunk bet 2.5x
+    bets = [Bet(0.6, 0, 2.0, "g1"), Bet(0.6, 0, 2.0, "g1")]
+    f = optimize_slate(bets, 0.25, 0.02, 0.02, 0.2, scales=[1, 0.5])
+    assert f[1] <= f[0] + 1e-6
+    assert sum(f) <= 0.02 + 1e-9
+    assert f[1] <= 0.5 * 0.2 * 0.25 + 1e-9  # never above its shrunk single-bet Kelly

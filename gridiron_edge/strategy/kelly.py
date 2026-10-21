@@ -126,9 +126,12 @@ def optimize_slate(bets: list[Bet], fraction: float, cap_bet: float, cap_game: f
                    game_caps: dict[str, float] | None = None,
                    groups: Sequence[tuple[Sequence[int], float]] | None = None,
                    corr=None) -> list[float]:
-    """Maximize E[log(1 + sum x_i r_i)] under caps; returns bankroll fractions f_i = x_i * fraction * scale_i.
+    """Maximize E[log(1 + sum y_i r_i)] under caps; returns bankroll fractions f_i = y_i * fraction.
 
-    scales: per-bet Kelly multipliers (uncertainty shrinkage, throttles), default 1.
+    y is the real (full-Kelly-unit) portfolio, so every cap and the objective see the same stakes.
+    scales: per-bet Kelly multipliers (uncertainty shrinkage, throttles), default 1. A scale s < 1
+    caps y_i at s * single-bet Kelly (a bound, not a change of variable, so a binding cap never
+    favours the more-shrunk bet).
     game_caps: per-game cap overriding cap_game (remaining headroom after open bets).
     groups: extra (bet indices, cap) limits, e.g. a slate window or same-direction legs.
     corr: bet-outcome correlation matrix for the Gaussian copula (None = independent).
@@ -139,25 +142,32 @@ def optimize_slate(bets: list[Bet], fraction: float, cap_bet: float, cap_game: f
     n = len(bets)
     sc = np.array([1.0] * n if scales is None else [max(0.0, float(x)) for x in scales])
     cons = _constraints(bets, cap_game, cap_slate, game_caps, groups)
+    if fraction <= 0:
+        return [0.0] * n
     try:
         R, w = _scenarios(bets, seed, corr)
-        k = fraction * sc  # f = k * x
 
-        def neg(x):
-            g = np.maximum(1.0 + R @ x, _EPS)
+        def neg(y):
+            g = np.maximum(1.0 + R @ y, _EPS)
             return -float(w @ np.log(g))
 
-        def grad(x):
-            g = np.maximum(1.0 + R @ x, _EPS)
+        def grad(y):
+            g = np.maximum(1.0 + R @ y, _EPS)
             return -(R.T @ (w / g))
 
-        scipy_cons = [{"type": "ineq", "fun": lambda x, m=m * k, c=c: c - m @ x, "jac": lambda x, m=m * k: -m}
-                      for m, c in cons]
-        bounds = [(0.0, cap_bet / ki if ki > 0 else 0.0) for ki in k]
+        scipy_cons = [{"type": "ineq", "fun": lambda y, m=m * fraction, c=c: c - m @ y,
+                       "jac": lambda y, m=m * fraction: -m} for m, c in cons]
+        top = []
+        for b, s in zip(bets, sc):
+            hi = cap_bet / fraction
+            if s < 1.0:
+                hi = min(hi, s * _kelly_bet(b))
+            top.append(max(0.0, hi))
+        bounds = [(0.0, t) for t in top]
         res = minimize(neg, np.zeros(n), jac=grad, method="SLSQP", bounds=bounds, constraints=scipy_cons)
         if not res.success or not np.all(np.isfinite(res.x)):
             raise RuntimeError(res.message)
-        return [float(max(0.0, x)) * ki for x, ki in zip(res.x, k)]
+        return [float(min(max(0.0, y), t)) * fraction for y, t in zip(res.x, top)]
     except Exception:
         return _fallback(bets, fraction, cap_bet, cons, sc)
 
