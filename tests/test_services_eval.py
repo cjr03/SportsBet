@@ -128,3 +128,26 @@ def test_services_report_returns_plain_dict(services_mocked, mk):
     r = svc.report(NOW)
     assert r["clv"]["all_signals"]["n"] == 55 and r["drift"]["segments"]["nfl spread"]["alarm"]
     assert isinstance(r["summary"], list) and r["summary"]
+
+
+def test_calibration_drift_logged_once(services_mocked, mk):
+    import json
+    svc = services_mocked()
+    svc.ledger.deposit(100_000)
+    gid, m = setup_game(svc, mk, league="nfl", gid="nfl:20261031:AAA@BBB")
+    svc._put("gates", json.dumps({"fitted_at": NOW.isoformat(), "leagues": {"nfl": {"brier": 0.24}}}))
+    for i in range(12):
+        leg = Leg("kalshi", "x", "yes", 0.50, 0.9, gid, ticker=f"T{i}", team="BBB", line=3.5)
+        rec, _ = svc.lifecycle.upsert_recommendation(
+            Recommendation(None, "kalshi_game", [leg], 500, 10, 0.05, 0.9, None, NOW, KICK), NOW)
+        bet = svc.lifecycle.confirm(rec.id, NOW)
+        svc.settler.manual_settle(bet, "lost", now=NOW)
+    out = svc.check_drift(NOW)
+    assert any(k == "warn" and "less accurate" in msg for k, msg in out)
+    assert not [1 for k, msg in svc.check_drift(NOW) if "less accurate" in msg]
+
+
+def test_record_clv_skips_work_when_nothing_kicks_off_soon(services_mocked):
+    svc = services_mocked()
+    svc.snapshot = None  # would raise if called
+    assert svc._record_clv(NOW) == []

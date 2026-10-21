@@ -239,6 +239,10 @@ def _calibration_drift(rows, window: int, backtest: dict | None) -> dict:
     return out
 
 
+def calibration_drift(conn, window: int = 50, backtest: dict | None = None) -> dict:
+    return _calibration_drift(_settled_rows(conn), window, backtest)
+
+
 def _net_deposits(conn) -> int:
     return conn.execute("SELECT COALESCE(SUM(amount_cents), 0) FROM ledger "
                         "WHERE kind IN ('deposit','withdraw')").fetchone()[0]

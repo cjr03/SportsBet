@@ -698,7 +698,8 @@ class Services:
                     except ApiError:
                         continue
         done = self.settler.settle_ready(now, markets.get, self._stat_lookup)
-        return [("settle", f"bet {i} {result}: ${payout / 100:,.2f}") for i, result, payout in done]
+        out = [("settle", f"bet {i} {result}: ${payout / 100:,.2f}") for i, result, payout in done]
+        return out + (self.check_drift(now) if done else [])
 
     def _stat_lookup(self, game_id: str, player: str, stat: str):
         """A player's stat from nflverse weekly stats: value, None (did not play) or "pending"."""
@@ -761,6 +762,8 @@ class Services:
 
         Uses only data already fetched: no API calls are made here.
         """
+        if not self.registry.upcoming(CLV_WINDOW, now):
+            return []
         markets = {m.ticker: m for m in self.latest["kalshi"]}
         snap = self.snapshot(now)
 
@@ -950,6 +953,15 @@ class Services:
             out.append(("warn", msg))
             if self.notifier.enabled:
                 self.notifier.send_text(msg, now)
+        stored = json.loads(self._get("gates") or "null") or {}
+        cal = report_mod.calibration_drift(self.conn, self.settings.drift_window, stored.get("leagues"))
+        flagged = self._get("drift_cal") is not None
+        if cal["worse"] and not flagged:
+            self._put("drift_cal", now.isoformat())
+            out.append(("warn", f"Warning: our chances have been less accurate lately ({cal['rolling_brier']:.3f}) "
+                                f"than in testing ({cal['backtest_brier']:.3f}). Bets are not paused for this."))
+        elif not cal["worse"] and flagged:
+            self.conn.execute("DELETE FROM settings WHERE key='drift_cal'")
         return out
 
     def reset_drift(self, seg: str = "all") -> list[str]:
