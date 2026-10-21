@@ -79,7 +79,11 @@ WatchList > .option-list--option { padding: 0 1; }
 #pp-board { padding: 1 2; }
 
 #performance { layout: vertical; }
-BalanceChart { height: 1fr; }
+#perf-top { height: 16; }
+BalanceChart { width: 1fr; height: 1fr; }
+PerfMoney { width: 36; height: 1fr; padding: 1 1; }
+#perf-scroll { height: 1fr; }
+PerfTables { height: auto; padding: 0 1; }
 ScoresPanel, EventLog { height: 1fr; }
 QuotaBar { width: 1fr; }
 
@@ -99,7 +103,7 @@ QuotaBar { width: 1fr; }
     border: round $accent 40%;
 }
 
-BalanceChart, KpiTiles, QuotaBar, ScoresPanel, EventLog {
+BalanceChart, PerfMoney, PerfTables, KpiTiles, QuotaBar, ScoresPanel, EventLog {
     background: $surface;
     border: round $accent 40%;
 }
@@ -107,6 +111,8 @@ BalanceChart, KpiTiles, QuotaBar, ScoresPanel, EventLog {
 KpiTiles { height: auto; padding: 0 1; }
 QuotaBar { height: auto; padding: 0 1; }
 QuotaBar.low { color: $loss; }
+ScoresPanel > .option-list--option { padding: 0 1; }
+ScoresPanel > .option-list--option-disabled { padding: 0 1; color: $accent; }
 
 .profit { color: $profit; }
 .loss { color: $loss; }

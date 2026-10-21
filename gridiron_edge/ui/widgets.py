@@ -1,7 +1,6 @@
 """TUI widgets: header, PLACE NOW / OPEN BETS lists, chart, KPI tiles, quota bars, scores, event log."""
 import math
 from datetime import datetime
-from typing import Literal
 
 from rich.text import Text
 from textual.app import ComposeResult
@@ -9,14 +8,16 @@ from textual.binding import Binding
 from textual.containers import Vertical
 from textual.message import Message
 from textual.reactive import reactive
-from textual.widgets import DataTable, OptionList, RichLog, Static
+from textual.widgets import OptionList, RichLog, Static
 from textual.widgets.option_list import Option
 from textual_plotext import PlotextPlot
 
 from gridiron_edge.bets import report
 from gridiron_edge import describe as d
-from gridiron_edge.types import Game, Recommendation
+from gridiron_edge.types import Recommendation
 from gridiron_edge.ui.home import OpenBetView, pack, place_now_cells
+from gridiron_edge.ui import performance as perf
+from gridiron_edge.ui.scores import ScoreRow
 
 PROFIT, LOSS, PENDING, ACCENT = "#22c55e", "#ef4444", "#f59e0b", "#22d3ee"
 _RGB = {"profit": (34, 197, 94), "loss": (239, 68, 68)}
@@ -62,6 +63,7 @@ class BalanceChart(PlotextPlot):
 
     status = ""
     line_color = "profit"
+    ticks: tuple[list[float], list[str]] = ([], [])
 
     def update_series(self, history: list[tuple[datetime, int]],
                       markers: list[tuple[datetime, int, str]]) -> None:
@@ -89,9 +91,12 @@ class BalanceChart(PlotextPlot):
             if pts:
                 plt.scatter([p[0] for p in pts], [p[1] for p in pts], marker=glyph,
                             color=(255, 255, 255))
+        cents = [c for _, c in history] + [c for _, c, _ in markers]
+        self.ticks = perf.dollar_ticks(min(cents), max(cents))
+        plt.yticks(*self.ticks)
         plt.title("Bankroll over time")
         plt.xlabel("hours since first deposit")
-        plt.ylabel("Bankroll ($)")
+        plt.ylabel("Bankroll")
         self.refresh()
 
 
@@ -144,6 +149,65 @@ class KpiTiles(Static):
         self.update(Text(self.text))
 
 
+class PerfMoney(Static):
+    """Beside the chart: profit today / this week / all time, money deposited and withdrawn."""
+
+    text = ""
+
+    def update_money(self, windows: dict[str, int], deposited: int, withdrawn: int) -> None:
+        lines = perf.money_lines(windows, deposited, withdrawn)
+        self.text = "\n".join(lines)
+        out = Text()
+        for i, line in enumerate(lines):
+            label, _, value = line.partition(": ")
+            color = "" if not value.startswith(("+", "-")) else PROFIT if value.startswith("+") else LOSS
+            out.append(("\n" if i else "") + label + ": ")
+            out.append(value, style=f"bold {color}".strip())
+        self.update(out)
+
+
+class PerfTables(Static):
+    """Results by bet type and the last settled bets."""
+
+    text = ""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self._args: tuple = ([], [], None, d.DEFAULT_NAMES)
+
+    def update_tables(self, by_type: list[dict], recent: list, now: datetime,
+                      names: d.Names = d.DEFAULT_NAMES) -> None:
+        self._args = (by_type, recent, now, names)
+        self._draw()
+
+    def on_resize(self) -> None:
+        if self._args[2] is not None:
+            self._draw()
+
+    def _draw(self) -> None:
+        by_type, recent, now, names = self._args
+        width = max(40, (self.size.width or 160) - 2)
+        table = perf.type_table_lines(by_type)
+        last = perf.recent_lines(recent, now, width, names) if now is not None else []
+        out = Text()
+        out.append("Results by bet type\n", style=f"bold {ACCENT}")
+        for i, line in enumerate(table):
+            out.append(line + "\n", style="bold" if i == 0 and len(table) > 1 else "")
+        n = len(recent)
+        out.append(f"\nLast {n} settled bet{'s' * (n != 1)}\n" if n else "\nLast settled bets\n",
+                   style=f"bold {ACCENT}")
+        for line in last:
+            styled = Text(line)
+            for word, color in ((" won ", PROFIT), (" lost ", LOSS)):
+                at = line.find(word)
+                if 0 <= at < 30:
+                    styled.stylize(color, at, at + len(word))
+            out.append_text(styled)
+            out.append("\n")
+        self.text = "\n".join(["Results by bet type", *table, "", "Last settled bets", *last])
+        self.update(out)
+
+
 class QuotaBar(Static):
     # free monthly allowances: Odds API credits, college-data calls, scores-service data points
     CAPS = {"Odds API": 500, "College data": 1000, "Scores data": 200000}
@@ -170,7 +234,7 @@ class QuotaBar(Static):
             out.append("█" * filled + "░" * (self.BAR_W - filled),
                        style=LOSS if is_low else ACCENT)
             out.append(f" {val:,} {self.UNITS[name]} left this month  ")
-        out.append("Kalshi ")
+        out.append("Kalshi: ")
         out.append("working" if kalshi_ok else "not reachable", style=PROFIT if kalshi_ok else LOSS)
         self.set_class(low, "low")
         self.update(out)
@@ -190,53 +254,59 @@ class QuotaBar(Static):
         self.styles.animate("opacity", target, duration=0.8, on_complete=self._pulse)
 
 
-class ScoresPanel(DataTable):
+class ScoresPanel(OptionList):
+    """Scores tab: league and day headings, then one game each (score or kickoff on the first line;
+    sportsbook lines, Kalshi win prices, our win chance and your bets under it). Live games blink."""
+
     def __init__(self, **kw):
-        super().__init__(cursor_type="row", **kw)
+        super().__init__(**kw)
         self.border_title = "Scores"
-        self._live_keys: list[str] = []
+        self.rows: list[ScoreRow] = []
+        self._live: list[int] = []
         self._lit = True
 
     def on_mount(self) -> None:
-        self.add_columns("Game", "Score", "State")
         self.set_interval(0.6, self._blink)
 
-    def set_games(self, games: list[Game],
-                  bet_status: dict[str, Literal["winning", "losing", "none"]],
-                  delay_s: int | None, names: d.Names = d.DEFAULT_NAMES) -> None:
+    def set_rows(self, rows: list[ScoreRow], delay_s: int | None = None) -> None:
         self.border_title = (f"Scores (about {round(delay_s / 60)} min behind)"
                              if delay_s is not None and delay_s >= 60 else "Scores")
-        self.clear()
-        self._live_keys = []
-        colors = {"winning": PROFIT, "losing": LOSS}
-        for g in games:
-            style = colors.get(bet_status.get(g.game_id, "none"), "")
-            score = ("-" if g.home_pts is None or g.away_pts is None
-                     else f"{g.away_pts}-{g.home_pts}")
-            if g.status == "live":
-                state = self._live_cell(g, True)
-                self._live_keys.append(g.game_id)
-            elif g.status == "scheduled":
-                state = Text(f"{g.kickoff.astimezone(d.PT):%a} {d.clock(g.kickoff)} PT")
-            else:
-                state = Text(g.status.replace("_", " ").capitalize())
-            matchup = f"{names.team(g.league, g.away)} at {names.team(g.league, g.home)}"
-            self.add_row(Text(matchup, style=style), Text(score, style=style),
-                         state, key=g.game_id)
-        self._games = {g.game_id: g for g in games}
+        self.rows = list(rows)
+        self._render()
 
-    @staticmethod
-    def _live_cell(g: Game, lit: bool) -> Text:
-        cell = Text("LIVE", style=f"bold {LOSS}" if lit else "dim")
-        if g.period:
-            cell.append(f" {d.period_text(g.period, g.clock, short=True)}")
-        return cell
+    def on_resize(self) -> None:
+        if self.rows:
+            self._render()
+
+    def prompt(self, row: ScoreRow, lit: bool = True) -> Text:
+        if row.game is None:
+            return Text(row.head, style="#94a3b8" if row.note else f"bold {ACCENT}")
+        color = {"winning": PROFIT, "losing": LOSS}.get(row.bet_status, "")
+        t = Text()
+        t.append(row.head, style=f"bold {color}".strip())
+        if row.state.startswith("LIVE"):
+            t.append("  ")
+            t.append("LIVE", style=f"bold {LOSS}" if lit else "dim")
+            t.append(row.state[4:])
+        else:
+            t.append(f"  {row.state}", style="" if row.state.startswith("Final") else "#94a3b8")
+        if row.details:
+            append_packed(t, row.details, _list_width(self), style="#94a3b8")
+        return t
+
+    def _render(self) -> None:
+        keep = self.highlighted
+        self._live = [i for i, r in enumerate(self.rows) if r.game is not None and r.state.startswith("LIVE")]
+        self.set_options(Option(self.prompt(r, self._lit), id=f"s{i}", disabled=r.game is None)
+                         for i, r in enumerate(self.rows))
+        if keep is not None and self.rows:
+            self.highlighted = min(keep, len(self.rows) - 1)
 
     def _blink(self) -> None:
         self._lit = not self._lit
-        col = self.ordered_columns[2].key
-        for key in self._live_keys:
-            self.update_cell(key, col, self._live_cell(self._games[key], self._lit))
+        for i in self._live:
+            if i < self.option_count:
+                self.replace_option_prompt_at_index(i, self.prompt(self.rows[i], self._lit))
 
 
 class EventLog(RichLog):
@@ -401,7 +471,7 @@ class PlaceNowList(OptionList):
         width = _list_width(self)
         profit_word = "locked profit" if r.kind == "arb" else "expected profit"
         segs: list = [price, f"bet {stake}", [(f"{profit_word} ", ""), (profit, PROFIT)],
-                      [(left, PENDING if "min left" in left and "hr" not in left else "")], f"kickoff {kick}"]
+                      [(left, PENDING if "min left" in left and "hr" not in left else "")], f"kickoff {kick} PT"]
         if r.state == "PENDING":
             segs.append([("texted", "dim")])
         append_packed(out, segs, width)
@@ -456,7 +526,7 @@ class OpenBetsList(OptionList):
             t = Text()
             t.append(f"#{v.bet_id} ", style=f"bold {ACCENT}")
             t.append(v.text)
-            append_packed(t, [x for x in (v.pays or f"{v.stake} in", v.game) if x], width)
+            append_packed(t, [x for x in (v.pays or f"{v.stake} in", v.game) if x and x != "-"], width)
             color = "" if v.pnl_cents is None else PROFIT if v.pnl_cents >= 0 else LOSS
             picks = v.pnl_cents is None and any(w in v.worth for w in ("hit", "missed", "pushed", "pending"))
             worth = [(x, color) for x in v.worth.split(SEP)] if v.pnl_cents is not None else \

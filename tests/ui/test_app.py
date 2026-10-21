@@ -140,7 +140,7 @@ async def test_missing_keys_app_still_starts(services_mocked):
         await app.workers.wait_for_complete()
         await pilot.pause()
         text = "\n".join(log_lines(app))
-        assert "Not set up (no key in .env)" in text
+        assert "Not set up yet (add a key to use it)" in text
         assert all(name in text for name in ("The Odds API", "TheRundown", "College Football Data"))
         assert "Kalshi: working" in text
         await submit(app, pilot, "deposit 5")

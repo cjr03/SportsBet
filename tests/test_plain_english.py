@@ -1,6 +1,8 @@
 """Every text message and the main dashboard strings, rendered over representative fixtures, read as
 plain English: ASCII and short (texts), one action line, and none of the internal jargon."""
+import json
 import re
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -290,3 +292,60 @@ async def test_startup_and_job_log_lines_are_plain(services_mocked):
     assert " 1 games" not in text and "+28.0" not in text
     for line in svc.report(NOW)["summary"]:
         sentence(line)
+
+
+def test_scores_tab_is_plain():
+    from dataclasses import replace
+
+    from gridiron_edge.types import Quote
+    from gridiron_edge.ui import scores as sv
+    live = replace(GAME, status="live", home_pts=10, away_pts=14, period="2", clock="4:12",
+                   kickoff=NOW - timedelta(hours=1))
+    quotes = [Quote("odds_api", "dk", CFB, "spreads", "home", -6.5, 1.9, NOW, NOW),
+              Quote("odds_api", "dk", CFB, "totals", "over", 51.5, 1.9, NOW, NOW)]
+    m = _market()
+    rows = sv.score_rows([live, CFB_GAME, replace(GAME, game_id="nfl:x", status="final", home_pts=3, away_pts=7)],
+                         NOW, quotes=quotes, markets=[replace(m, market_type="ml", team="PHI")],
+                         chances={CFB: ("AUB", 0.3)}, bet_counts={CFB: 1}, bet_status={GID: "losing"},
+                         names=NAMES)
+    text = []
+    for r in rows:
+        sentence(r.head)
+        text += [r.head, r.state, *r.details]
+        for x in (r.state, *r.details):
+            clean(x)
+    joined = " ".join(text)
+    assert "2nd quarter, 4:12 left" in joined and "qtr" not in joined
+    assert "Alabama by 6.5" in joined and "total 51.5 points" in joined and "our win chance: Alabama 70%" in joined
+    assert "ALA" not in joined and "your bets: 1" in joined
+    assert sv.state_text(GAME, NOW) == "kickoff Sun 1:00 PM PT"
+
+
+def test_performance_tables_are_plain():
+    from gridiron_edge.ui import performance as pv
+    rows = [{"id": 3, "kind": "kalshi_game", "legs_json": json.dumps([asdict(_k())]), "structure": None,
+             "result": "won", "stake_cents": 1880, "fee_cents": 30, "payout_cents": 4000,
+             "settled_at": NOW.isoformat(), "p_win": 0.55},
+            {"id": 4, "kind": "pp_entry", "legs_json": json.dumps([asdict(_pp(i)) for i in range(3)]),
+             "structure": "3-power", "result": "lost", "stake_cents": 1000, "fee_cents": 0, "payout_cents": 0,
+             "settled_at": NOW.isoformat(), "p_win": 0.2}]
+    for line in pv.type_table_lines(report.by_type(rows)):
+        clean(line)
+    for line in pv.money_lines(report.profit_windows(rows, NOW, PT), 10_000, 0):
+        sentence(line)
+    for line in pv.recent_lines(report.recent_settled(rows), NOW, 100, NAMES):
+        clean(line)
+        assert " PT " in line
+    sentence(pv.type_table_lines([])[0])
+
+
+def test_prizepicks_best_picks_are_plain():
+    ne_chi = Game("nfl:20261025:NE@CHI", "nfl", 2026, 8, NOW + timedelta(hours=5), "CHI", "NE")
+    lines = [PPLine(ne_chi.game_id, "Caleb Williams", "CHI", "pass_yds", 249.5, "over", 0.60, True, NOW, True),
+             PPLine(ne_chi.game_id, "Drake Maye", "NE", "pass_tds", 1.5, "under", 0.52, True, NOW, True)]
+    view = ppv.PPView(lines, {ne_chi.game_id: ne_chi}, None, 0, Settings(), {"nfl": True})
+    out = ppv.board_lines(view, NOW, NAMES)
+    assert "Best picks now:" in out and "1 of 2 lines clear the needed chance." in out
+    for line in out:
+        if line:
+            sentence(line.strip())

@@ -381,7 +381,7 @@ class Services:
         missing = [api for api, c in (("odds_api", self.odds), ("therundown", self.rundown),
                                       ("cfbd", self.cfbd)) if c is None]
         if missing:
-            out.append(("info", f"Not set up (no key in .env): {', '.join(API_NAMES[a] for a in missing)}."))
+            out.append(("info", f"Not set up yet (add a key to use it): {', '.join(API_NAMES[a] for a in missing)}."))
         if not (self.settings.notify_phone or self.settings.ntfy_topic):
             out.append(("info", "Texts: no NOTIFY_PHONE or NTFY_TOPIC in .env, so bet ideas show up in this log only."))
         out += await self._guarded("teams", self._seed_teams(now))
@@ -1497,6 +1497,32 @@ class Services:
         k["calibration"] = report_mod.calibration_lines(r["calibration"]["reliability"])
         k["warnings"] = [ln for ln in r["summary"] if ln.startswith(("Warning", "Paused"))]
         return k
+
+    def money_view(self, now: datetime) -> dict:
+        """Performance tab tables: results by bet type, profit today / this week / all time, money
+        deposited and withdrawn, and the last 10 settled bets (newest first). Reads only the database."""
+        rows = report_mod.settled_rows(self.conn)
+        deposited, withdrawn = report_mod.money_moves(self.conn)
+        return {"by_type": report_mod.by_type(rows), "windows": report_mod.profit_windows(rows, now, PT),
+                "deposited": deposited, "withdrawn": withdrawn, "recent": report_mod.recent_settled(rows, 10)}
+
+    def win_chances(self, now: datetime) -> dict[str, tuple[str, float]]:
+        """Game id -> (team, our chance that team wins, ties left out) for upcoming games with a Kalshi
+        win market, from prices already loaded (no new requests)."""
+        snap = self.snapshot(now)
+        out: dict[str, tuple[str, float]] = {}
+        for m in snap.kalshi:
+            g = snap.games.get(m.game_id or "")
+            if (m.market_type != "ml" or g is None or g.game_id in out or g.status != "scheduled"
+                    or m.team not in (g.home, g.away)):
+                continue
+            try:
+                gf = pipeline._game_fair(m, g, snap, self.settings)
+            except Exception:  # noqa: BLE001 - a missing input just means no chance shown
+                continue
+            if gf is not None and gf.tie_prob < 1:
+                out[g.game_id] = (m.team, gf.p_yes / (1 - gf.tie_prob))
+        return out
 
     def report(self, now: datetime) -> dict:
         """The full performance report (bets/report.py) as a plain dict, with plain-English summary lines."""

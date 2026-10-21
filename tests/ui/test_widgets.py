@@ -138,19 +138,46 @@ async def test_confirm_modal_rejects_bad_price():
         assert app.result is None
 
 
-async def test_scores_delay_title():
+async def test_scores_panel_rows_headings_and_blink():
+    from gridiron_edge.ui.scores import score_rows
     g = Game("g1", "nfl", 2026, 7, T0, "KC", "BUF", status="live", home_pts=14, away_pts=10,
              period="Q2", clock="3:00")
+    later = Game("g2", "nfl", 2026, 7, T0 + timedelta(hours=3), "PHI", "DAL")
+    rows = score_rows([g, later], T0, bet_counts={"g2": 1}, bet_status={"g1": "winning"})
     app = Harness(ScoresPanel())
-    async with app.run_test() as pilot:
+    async with app.run_test(size=(100, 30)) as pilot:
         p = app.query_one(ScoresPanel)
-        p.set_games([g], {"g1": "winning"}, 300)
+        p.set_rows(rows, 300)
         await pilot.pause()
         assert p.border_title == "Scores (about 5 min behind)"
-        assert str(p.get_row_at(0)[0]) == "Bills at Chiefs"
-        assert p.row_count == 1
-        p.set_games([g], {}, None)
+        assert p.option_count == 3 and p.get_option_at_index(0).disabled
+        live = str(p.get_option_at_index(1).prompt)
+        assert live.startswith("Bills at Chiefs  LIVE Bills 10, Chiefs 14") and "2nd quarter, 3:00 left" in live
+        assert "your bet is winning right now" in live
+        assert "your bets: 1" in str(p.get_option_at_index(2).prompt)
+        await pilot.pause(0.7)  # blinked: the LIVE word dims, the text stays
+        assert str(p.get_option_at_index(1).prompt) == live
+        p.set_rows(rows, None)
         assert p.border_title == "Scores"
+
+
+async def test_perf_money_and_tables():
+    from gridiron_edge.ui.widgets import PerfMoney, PerfTables
+
+    class Two(App):
+        def compose(self):
+            yield PerfMoney()
+            yield PerfTables()
+
+    app = Two()
+    async with app.run_test(size=(100, 40)) as pilot:
+        m = app.query_one(PerfMoney)
+        m.update_money({"today": 420, "week": -310, "all": 0}, 50_000, 1_000)
+        assert m.text.splitlines()[0] == "Profit today: +$4.20" and "Money withdrawn: $10.00" in m.text
+        t = app.query_one(PerfTables)
+        t.update_tables([], [], T0)
+        await pilot.pause()
+        assert "No settled bets yet" in t.text and "Last settled bets" in t.text
 
 
 async def test_chart_empty_history_ok():
@@ -190,6 +217,7 @@ async def test_quota_low_class_and_header():
         assert not q.has_class("low")
         shown = str(q.render())
         assert "150,000 data points left this month" in shown and "400 credits left this month" in shown
+        assert "Kalshi: working" in shown
         q.update_quota(20, 900, None, False)
         assert q.has_class("low")
         await pilot.pause(0.5)

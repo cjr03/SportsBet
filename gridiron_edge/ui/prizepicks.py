@@ -138,6 +138,59 @@ def _lower_first(text: str) -> str:
     return text if text.startswith("PrizePicks") else text[:1].lower() + text[1:]
 
 
+def needed_chance(ln: PPLine, s: Settings, best: tuple[Structure, float] | None = None) -> float | None:
+    """The chance a pick needs before we use it: break-even plus the margin for its source."""
+    best = best if best is not None else best_structure(s)
+    if best is None:
+        return None
+    return best[1] + (s.pp_margin_market if ln.anchored else s.pp_margin_model)
+
+
+def _clears(ln: PPLine, s: Settings, best) -> bool:
+    need = needed_chance(ln, s, best)
+    return ln.p is not None and ln.fresh and need is not None and ln.p >= need
+
+
+def clear_text(n_clear: int, n: int) -> str:
+    """'4 of 18 lines clear the needed chance'."""
+    return f"{n_clear} of {n} line{'s' * (n != 1)} clear{'s' * (n == 1)} the needed chance"
+
+
+def best_picks(view: PPView, n: int = 3) -> list[PPLine]:
+    """The n picks with the highest chance above what they need (usable lines only)."""
+    best = best_structure(view.settings)
+    usable = [ln for ln in view.lines if ln.game_id in view.games and ln.p is not None and ln.fresh]
+
+    def room(ln: PPLine) -> float:
+        need = needed_chance(ln, view.settings, best)
+        return (ln.p or 0.0) - (need or 0.0)
+
+    return sorted(usable, key=lambda ln: (-room(ln), ln.player))[:n]
+
+
+def _best_lines(view: PPView, names: d.Names) -> list[str]:
+    picks = best_picks(view)
+    if not picks:
+        return []
+    best = best_structure(view.settings)
+    out = ["Best picks now:"]
+    for i, ln in enumerate(picks, 1):
+        out.append(f"  {i}. {best_pick_text(ln, view, names, best)}")
+    return out
+
+
+def best_pick_text(ln: PPLine, view: PPView, names: d.Names = d.DEFAULT_NAMES, best=None) -> str:
+    """'Patrick Mahomes MORE than 1.5 passing touchdowns: our chance 59.1%, needs 56.2% (Dolphins at Chiefs)'."""
+    g = view.games[ln.game_id]
+    need = needed_chance(ln, view.settings, best if best is not None else best_structure(view.settings))
+    more = "MORE" if ln.side == "over" else "LESS"
+    vs = "" if need is None else f", needs {need:.1%}"
+    src = "" if ln.anchored else (" - our model only, not texted" if view.model_gated.get(g.league, True)
+                                  else " - our model only")
+    return (f"{ln.player} {more} than {ln.line:g} {d.stat_words(ln.stat)}: our chance {ln.p:.1%}{vs} "
+            f"({_matchup(g, names)}){src}")
+
+
 def board_lines(view: PPView, now: datetime, names: d.Names = d.DEFAULT_NAMES) -> list[str]:
     """The PrizePicks tab, line by line."""
     if "prizepicks" not in view.settings.venues:
@@ -152,9 +205,16 @@ def board_lines(view: PPView, now: datetime, names: d.Names = d.DEFAULT_NAMES) -
     out = [f"Lines as of {d.when(max(stamps), now)} PT - {n} line{'s' * (n != 1)} for "
            f"{len(groups)} game{'s' * (len(groups) != 1)}. " + _next_text(view, now),
            needed_text(view.settings),
-           _entry_text(view), ""]
+           _entry_text(view)]
+    best = best_structure(view.settings)
+    n_clear = sum(_clears(ln, view.settings, best) for _, lines in groups for ln in lines)
+    out.append(clear_text(n_clear, n).capitalize() + ".")
+    top = _best_lines(view, names)
+    out += ["", *top] if top else []
+    out.append("")
     for g, lines in groups:
-        out.append(f"{_matchup(g, names)} - kickoff {d.when(g.kickoff, now)} PT")
+        k = sum(_clears(ln, view.settings, best) for ln in lines)
+        out.append(f"{_matchup(g, names)} - kickoff {d.when(g.kickoff, now)} PT - {clear_text(k, len(lines))}")
         gated = view.model_gated.get(g.league, True)
         out += [f"  {line_text(ln, gated)}" for ln in lines]
         out.append("")

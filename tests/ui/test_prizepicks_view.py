@@ -42,7 +42,9 @@ def test_board_groups_by_game_sorted_by_kickoff_and_chance():
     assert out[1].startswith("A 6-pick Flex Play needs about 54.2% per pick")
     assert out[2] == ("No entry yet: all the good picks are on one team; PrizePicks needs picks from at least "
                       "2 teams.")
-    i, j = out.index("Cowboys at Eagles - kickoff 10:02 AM PT"), out.index("Patriots at Bears - kickoff 1:02 PM PT")
+    assert out[3] == "2 of 4 lines clear the needed chance."
+    i = out.index("Cowboys at Eagles - kickoff 10:02 AM PT - 1 of 1 line clears the needed chance")
+    j = out.index("Patriots at Bears - kickoff 1:02 PM PT - 1 of 3 lines clear the needed chance")
     assert i < j
     assert [ln.split()[0] for ln in out[j + 1:j + 4]] == ["B", "A", "C"]
     assert not any(w in " ".join(out) for w in JARGON)
@@ -92,3 +94,23 @@ def test_needed_text_follows_payouts():
     assert ppv.needed_text(Settings()).startswith("A 6-pick Flex Play needs about 54.2% per pick")
     only5 = replace(Settings(), pp_structures=("5-flex",))
     assert ppv.needed_text(only5).startswith("A 5-pick Flex Play needs about 54.3% per pick")
+
+
+def test_best_picks_and_needed_chance():
+    lines = [line("A", 0.52), line("B", 0.61), line("E", 0.59, anchored=False), line("C", None),
+             line("D", 0.57, game=DAL_PHI, team="PHI"), line("F", 0.70, fresh=False)]
+    v = view(lines)
+    s = v.settings
+    be = ppv.best_structure(s)[1]
+    assert ppv.needed_chance(line("x", 0.5), s) == pytest.approx(be + s.pp_margin_market)
+    assert ppv.needed_chance(line("x", 0.5, anchored=False), s) == pytest.approx(be + s.pp_margin_model)
+    assert [ln.player for ln in ppv.best_picks(v)] == ["B", "E", "D"]  # most room above the needed chance
+    out = ppv.board_lines(v, NOW)
+    k = out.index("Best picks now:")
+    assert out[k + 1] == "  1. B MORE than 249.5 passing yards: our chance 61.0%, needs 56.2% (Patriots at Bears)"
+    assert out[k + 2].endswith("needs 57.7% (Patriots at Bears) - our model only, not texted")
+    assert len([x for x in out[k + 1:k + 4] if x.startswith("  ")]) == 3
+    assert "3 of 6 lines clear the needed chance." in out  # stale F and unpriced C never count
+    assert ppv.clear_text(1, 1) == "1 of 1 line clears the needed chance"
+    assert ppv.best_picks(view([line("C", None)])) == []
+    assert "Best picks now:" not in ppv.board_lines(view([line("C", None)]), NOW)

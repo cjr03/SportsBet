@@ -166,3 +166,31 @@ def test_drift_calibration_vs_backtest(conn):
     r = report.build_report(conn, T0 + timedelta(days=1), backtest={"nfl": {"brier": 0.24}})
     cal = r["drift"]["calibration"]
     assert cal["rolling_brier"] == pytest.approx(0.81) and cal["backtest_brier"] == 0.24 and cal["worse"]
+
+
+def test_by_type_table_and_profit_windows():
+    from zoneinfo import ZoneInfo
+    pt = ZoneInfo("America/Los_Angeles")
+    now = datetime(2026, 10, 28, 19, 0, tzinfo=timezone.utc)  # Wed 12:00 PM PT
+    rows = [row(stake=100, fee=2, payout=200, settled_at="2026-10-28T18:00:00+00:00"),  # today: +98
+            row(result="lost", stake=100, payout=0, settled_at="2026-10-26T18:00:00+00:00"),  # Mon: -100
+            row(kind="pp_entry", result="refund", stake=500, payout=500, settled_at="2026-10-24T18:00:00+00:00"),
+            row(kind="arb", stake=950, payout=1000, settled_at="2026-10-20T18:00:00+00:00"),  # +50
+            {**row(result=None, payout=None), "settled_at": None}]  # still open: ignored
+    t = report.by_type(rows)
+    assert [x["label"] for x in t] == ["Kalshi game bets", "PrizePicks", "Locked profit"]
+    game = t[0]
+    assert (game["bets"], game["won"], game["lost"], game["refunded"]) == (2, 1, 1, 0)
+    assert game["cost_cents"] == 202 and game["profit_cents"] == -2 and game["roi"] == pytest.approx(-2 / 202)
+    assert t[1]["refunded"] == 1 and t[1]["profit_cents"] == 0
+    assert report.profit_windows(rows, now, pt) == {"today": 98, "week": -2, "all": 48}
+    assert [r["settled_at"][:10] for r in report.recent_settled(rows, 2)] == ["2026-10-28", "2026-10-26"]
+
+
+def test_money_moves(conn):
+    from gridiron_edge.db import Ledger
+    ledger = Ledger(conn)
+    ledger.deposit(50_000)
+    ledger.deposit(10_000)
+    ledger.withdraw(2_500)
+    assert report.money_moves(conn) == (60_000, 2_500)

@@ -27,9 +27,10 @@ from gridiron_edge.ui import prizepicks as pp_ui
 from gridiron_edge.ui.commands import COMMAND_WORDS, HELP, Command, CommandError, parse_command
 from gridiron_edge.ui.screens import ConfirmScreen, WhyScreen
 from gridiron_edge.ui.widgets import (
-    BalanceChart, BankrollHeader, EventLog, InfoLine, KpiTiles, OpenBetsList, PlaceNowList, QuotaBar,
-    ScoresPanel, Section, WatchList,
+    BalanceChart, BankrollHeader, EventLog, InfoLine, KpiTiles, OpenBetsList, PerfMoney, PerfTables, PlaceNowList,
+    QuotaBar, ScoresPanel, Section, WatchList,
 )
+from gridiron_edge.ui import scores as scores_ui
 from gridiron_edge.strategy.prizepicks import payout_table
 
 _LEAGUE = {"nfl": "NFL", "cfb": "college football"}
@@ -133,9 +134,13 @@ class GridironApp(App):
                               "watch-summary", id="watch-box")
                 yield Static("", id="pp-status")
             with TabPane("2 Performance", id="performance"):
-                yield BalanceChart()
-                yield KpiTiles()
-                yield QuotaBar()
+                with Horizontal(id="perf-top"):
+                    yield BalanceChart()
+                    yield PerfMoney()
+                with VerticalScroll(id="perf-scroll"):
+                    yield PerfTables()
+                    yield KpiTiles()
+                    yield QuotaBar()
             with TabPane("3 Scores", id="scores"):
                 yield ScoresPanel()
             with TabPane("4 Log", id="log"):
@@ -335,15 +340,33 @@ class GridironApp(App):
         self.query_one(BalanceChart).update_series(s.ledger.history(), s.balance_markers())
         self.query_one(KpiTiles).update_kpis(s.performance(now))
         try:
+            mv = s.money_view(now)
+            self.query_one(PerfMoney).update_money(mv["windows"], mv["deposited"], mv["withdrawn"])
+            self.query_one(PerfTables).update_tables(mv["by_type"], mv["recent"], now, self.names)
+        except Exception as e:  # never let the tables take the dashboard down
+            self.query_one(PerfTables).update(Text(f"Could not show the bet tables ({e})."))
+        try:
             self._pp_view = s.pp_view(now)
         except Exception as e:  # never let the PrizePicks summary take the dashboard down
             self._pp_view = None
             self.query_one("#pp-status", Static).update(Text(f"PrizePicks: could not show the lines ({e})."))
         self.refresh_home()
+        self._show_scores(now)
+
+    def _show_scores(self, now: datetime) -> None:
+        """Scores tab from data already loaded: games, sportsbook lines, Kalshi prices, our chances."""
+        s = self.services
         games = [g for g in s.registry.all_since(now - timedelta(hours=12))
                  if g.kickoff <= now + timedelta(days=7)]
-        self.query_one(ScoresPanel).set_games(games[:60], self._bet_status(),
-                                              s.rundown.delay_seconds if s.rundown else None, self.names)
+        try:
+            chances = s.win_chances(now)
+        except Exception:  # noqa: BLE001 - the tab still shows scores and prices
+            chances = {}
+        counts = scores_ui.bet_counts(s.lifecycle.open_bets(), lambda b: json.loads(b["legs_json"]))
+        rows = scores_ui.score_rows(games, now, quotes=s.latest.get("quotes", []),
+                                    markets=s.latest.get("kalshi", []), chances=chances, bet_counts=counts,
+                                    bet_status=self._bet_status(), names=self.names)
+        self.query_one(ScoresPanel).set_rows(rows, s.rundown.delay_seconds if s.rundown else None)
 
     # -- commands -----------------------------------------------------------
     def on_input_submitted(self, event: Input.Submitted) -> None:

@@ -8,7 +8,7 @@ import json
 import math
 from collections import defaultdict
 from collections.abc import Iterable
-from datetime import datetime
+from datetime import datetime, timedelta
 
 Z = 1.96
 
@@ -376,3 +376,71 @@ def summary_lines(r: dict) -> list[str]:
     if r["drift"]["calibration"]["worse"]:
         out.append(CALIBRATION_WARNING)
     return out
+
+
+# -- Performance tab tables ------------------------------------------------------
+BET_TYPES = (("kalshi_game", "Kalshi game bets"), ("kalshi_prop", "Kalshi player bets"),
+             ("pp_entry", "PrizePicks"), ("arb", "Locked profit"), ("middle", "Not risk-free"))
+_DONE = ("won", "lost", "refund")
+
+
+def _settled(rows) -> list:
+    return [r for r in rows if _get(r, "result") in _DONE]
+
+
+def by_type(rows: Iterable) -> list[dict]:
+    """One row per bet type with settled bets: label, bets, won, lost, refunded, cost, profit, roi.
+    Profit and money bet include Kalshi fees; return = profit / money bet."""
+    out = []
+    rows = _settled(rows)
+    for kind, label in BET_TYPES:
+        rs = [r for r in rows if _get(r, "kind") == kind]
+        if not rs:
+            continue
+        cost, profit = sum(_cost(r) for r in rs), sum(_profit(r) for r in rs)
+        out.append({"kind": kind, "label": label, "bets": len(rs),
+                    "won": sum(_get(r, "result") == "won" for r in rs),
+                    "lost": sum(_get(r, "result") == "lost" for r in rs),
+                    "refunded": sum(_get(r, "result") == "refund" for r in rs),
+                    "cost_cents": cost, "profit_cents": profit, "roi": profit / cost if cost else None})
+    return out
+
+
+def _when(row) -> datetime | None:
+    try:
+        return datetime.fromisoformat(_get(row, "settled_at", ""))
+    except (TypeError, ValueError):
+        return None
+
+
+def profit_windows(rows: Iterable, now: datetime, tz) -> dict[str, int]:
+    """Settled profit after fees: 'today' (since midnight), 'week' (since Monday midnight), 'all'."""
+    rows = _settled(rows)
+    day = now.astimezone(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    week = day - timedelta(days=day.weekday())
+    out = {"today": 0, "week": 0, "all": 0}
+    for r in rows:
+        p, t = _profit(r), _when(r)
+        out["all"] += p
+        if t is not None and t >= week:
+            out["week"] += p
+            if t >= day:
+                out["today"] += p
+    return out
+
+
+def money_moves(conn) -> tuple[int, int]:
+    """(deposited, withdrawn), both as positive cents."""
+    rows = {r[0]: r[1] for r in conn.execute(
+        "SELECT kind, COALESCE(SUM(amount_cents), 0) FROM ledger WHERE kind IN ('deposit','withdraw') GROUP BY kind")}
+    return rows.get("deposit", 0), abs(rows.get("withdraw", 0))
+
+
+def recent_settled(rows: Iterable, n: int = 10) -> list:
+    """The last n settled bets, newest first."""
+    return sorted(_settled(rows), key=lambda r: (_get(r, "settled_at", ""), _get(r, "id", 0)), reverse=True)[:n]
+
+
+def settled_rows(conn) -> list:
+    """Every settled bet joined with its idea's chances (as the report reads them)."""
+    return _settled_rows(conn)
