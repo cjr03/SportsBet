@@ -573,7 +573,7 @@ class Services:
 
     async def _job_expire(self, job: Job, now: datetime):
         ids = self.lifecycle.expire_due(now)
-        return [("info", f"expired {len(ids)} recommendation(s)")] if ids else []
+        return [("info", f"{len(ids)} bet idea(s) went stale")] if ids else []
 
     async def _job_rundown_scores(self, job: Job, now: datetime):
         if self.rundown is None:
@@ -766,7 +766,7 @@ class Services:
             else:
                 out.append(("error", f"text for #{saved.id} failed: {res.error}"))
         if not out:
-            out.append(("info", f"scan {what}: {len(recs)} opportunities, nothing new"))
+            out.append(("info", f"checked for bets: {len(recs)} found, nothing new"))
         return out
 
     # -- commands ---------------------------------------------------------
@@ -788,8 +788,8 @@ class Services:
         out = []
         for api, guard in self.budgets.items():
             rem = guard.remaining()
-            out.append(f"{api}: {'unknown' if rem is None else rem} of {guard.monthly_cap} left")
-        out.append(f"kalshi: {'ok' if self.kalshi_ok else 'not reached yet'}")
+            out.append(f"{api}: {'unknown' if rem is None else rem} of {guard.monthly_cap} free calls left this month")
+        out.append(f"kalshi: {'working' if self.kalshi_ok else 'not reached yet'}")
         return out
 
     async def _first_run(self, now: datetime) -> list[tuple[str, str]]:

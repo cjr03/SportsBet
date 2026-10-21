@@ -7,7 +7,7 @@ from rich.text import Text
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal
 from textual.suggester import SuggestFromList
 from textual.widgets import Footer, Input, Static, TabbedContent, TabPane
 
@@ -365,10 +365,10 @@ class GridironApp(App):
         except Exception as e:
             self.log_event("error", f"backtest: {e}")
             return
-        self.log_event("info", f"backtest {league} {start}-{end}: n={m['n']} ATS {m['ats_pct']:.1%} "
-                               f"Brier {m['brier']:.3f} logloss {m['logloss']:.3f} "
-                               f"b_model {fit.b_model:.2f}±{fit.b_model_se:.2f} "
-                               f"-> {'observe-only' if fit.gated else 'live'}")
+        verdict = "kept tracking-only (not proven yet)" if fit.gated else "allowed to suggest bets"
+        self.log_event("info", f"backtest {league.upper()} {start}-{end}: {m['n']} games, picked the "
+                               f"spread winner {m['ats_pct']:.1%} of the time, accuracy score "
+                               f"{m['brier']:.3f} - our model is {verdict}")
 
     async def _fit_blend(self) -> None:
         try:
