@@ -195,10 +195,10 @@ def _game_fair(m: KalshiMarket, g: Game, snap: Snapshot, s: Settings,
     p_no, tie = 1.0 - p, 0.0
     if g.league == "nfl" and mtype == "ml":
         # sportsbook moneylines and the model are P(win | no tie); a tie loses YES for both teams.
-        # Unless the rules confirm a tie settles NO, NO gets no credit for it (worst case per side).
+        # Unless the rules confirm a tie settles NO, a tie loses NO too (worst case per side).
         tie = s.nfl_tie_prob
         p_yes = p * (1.0 - tie)
-        p_no = 1.0 - p_yes if kalshi_tie_rule(m) == "no" else 1.0 - p
+        p_no = 1.0 - p_yes if kalshi_tie_rule(m) == "no" else (1.0 - p) * (1.0 - tie)
         p = p_yes
     return GameFair(p, p_no, p_mkt, p_model, w, fp, method, tie)
 

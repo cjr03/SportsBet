@@ -355,7 +355,11 @@ def test_tie_rule_gives_no_side_the_tie_only_when_confirmed(mk, settings):
     m = mk("E1-H1", "E1", "ml", "H1", yes_ask=0.48, game_id="g1")
     snap = _ml_snap(mk, 0.48)
     unknown = _game_fair(m, game(1), snap, settings)
-    assert unknown.p_no == pytest.approx(1 - unknown.p_yes / (1 - settings.nfl_tie_prob))
+    t = settings.nfl_tie_prob
+    p = unknown.p_yes / (1 - t)  # P(win | no tie)
+    # unknown rule: a tie loses both sides, so the two sides plus the tie sum to 1
+    assert unknown.p_no == pytest.approx((1 - p) * (1 - t))
+    assert unknown.p_yes + unknown.p_no + t == pytest.approx(1.0)
     ruled = replace(m, rules_secondary="If the game ends in a tie, the market resolves to No.")
     confirmed = _game_fair(ruled, game(1), snap, settings)
     assert confirmed.p_no == pytest.approx(1 - confirmed.p_yes)
