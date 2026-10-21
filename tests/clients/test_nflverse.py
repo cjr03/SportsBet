@@ -45,3 +45,11 @@ def test_nflverse_fallback_two_seasons_no_dupes(monkeypatch, tmp_path):
     df = NflverseSource(tmp_path).schedules([2023, 2024])
     assert len(urls) == 1
     assert sorted(df["game_id"].to_list()) == ["a", "b"] and set(df["season"].to_list()) == {2023, 2024}
+
+
+def test_snap_counts_and_injuries_loaders(monkeypatch, tmp_path):
+    monkeypatch.setattr(nflreadpy, "load_snap_counts", lambda s: pl.DataFrame({"player": ["A"], "offense_pct": [0.9]}))
+    monkeypatch.setattr(nflreadpy, "load_injuries", lambda s: pl.DataFrame({"full_name": ["A"], "report_status": ["Out"]}))
+    src = NflverseSource(tmp_path)
+    assert src.snap_counts([2025])["offense_pct"][0] == 0.9
+    assert src.injuries([2025])["report_status"][0] == "Out"

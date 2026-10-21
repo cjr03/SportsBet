@@ -25,7 +25,7 @@ from gridiron_edge.clients.odds_api import OddsApiClient
 from gridiron_edge.clients.therundown import TheRundownClient
 from gridiron_edge.config import Settings, apply_override
 from gridiron_edge.db import Ledger, connect, register_schema
-from gridiron_edge.matching import GameRegistry, TeamResolver, kalshi_resolver
+from gridiron_edge.matching import GameRegistry, TeamResolver, kalshi_resolver, normalize_name
 from gridiron_edge.models import Prediction
 from gridiron_edge.models import cfb as cfb_models
 from gridiron_edge.models import nfl as nfl_models
@@ -276,6 +276,8 @@ class Services:
     blend_fits: dict[tuple[str, str], tuple[float, float]] = field(default_factory=dict)
     disagree_caps: dict[str, float] = field(default_factory=dict)
     qb_changes: set[str] = field(default_factory=set)  # NFL teams with a new depth-chart QB1
+    _reported_unmatched: set[str] = field(default_factory=set)
+    projector_live: bool = False  # projector-only props stake only after its calibration check passes
     margin_models: dict = field(default_factory=_default_margin_models)
     latest: dict = field(default_factory=lambda: {"quotes": [], "props": [], "kalshi": [], "stats": None})
     player_teams: dict[str, str] = field(default_factory=dict)
@@ -401,15 +403,54 @@ class Services:
         return (sched.filter(pl.col("season").is_in(seasons)), self.nflverse.weekly_player_stats(seasons),
                 self.nflverse.team_epa(seasons))
 
+    def _read_player_status(self, seasons: list[int]) -> tuple[pl.DataFrame | None, pl.DataFrame | None, list[str]]:
+        """nflverse snap counts and injury reports for the projector; either may be unavailable."""
+        out: list[pl.DataFrame | None] = []
+        missing = []
+        for name in ("snap_counts", "injuries"):
+            loader = getattr(self.nflverse, name, None)
+            try:
+                out.append(loader(seasons) if loader else None)
+            except Exception:  # noqa: BLE001 - optional input: the projector runs without it
+                out.append(None)
+            if out[-1] is None:
+                missing.append(name.replace("_", " "))
+        return out[0], out[1], missing
+
+    def _build_projector(self, weekly: pl.DataFrame, snaps, injuries, cur: int) -> tuple[PropProjector, dict]:
+        proj = PropProjector(weekly, snaps, injuries, usage_model=self.settings.props_usage_model)
+        return proj, proj.calibration_backtest(cur - 1, self.settings.pp_margin_model)
+
     async def _load_nflverse(self, now: datetime) -> list[tuple[str, str]]:
         cur = _season(now)
-        sched, weekly, epa = await asyncio.to_thread(self._read_nflverse, list(range(cur - NFL_SEASONS + 1, cur + 1)))
+        seasons = list(range(cur - NFL_SEASONS + 1, cur + 1))
+        sched, weekly, epa = await asyncio.to_thread(self._read_nflverse, seasons)
         self.history["nfl"], self.history["nfl_epa"] = sched, epa
         self.latest["stats"] = weekly
-        self.projector = PropProjector(weekly) if "player_display_name" in weekly.columns else _NoProjector()
+        out = []
+        self.projector_live = False
+        if "player_display_name" in weekly.columns:
+            snaps = injuries = None
+            if self.settings.props_use_snaps_injuries:
+                snaps, injuries, missing = await asyncio.to_thread(self._read_player_status, seasons)
+                if missing:
+                    out.append(("info", f"player-prop model: no {' or '.join(missing)} from nflverse - "
+                                        "injury and snap-share filters are off"))
+            self.projector, gate = await asyncio.to_thread(self._build_projector, weekly, snaps, injuries, cur)
+            self.projector_live = bool(gate["live"])
+            if gate["n"]:
+                out.append(("info", f"player-prop model check ({cur - 1} season): {gate['n']} picks, said "
+                                    f"{gate['claimed']:.0%}, hit {gate['hit']:.0%} - "
+                                    + ("model-only prop picks are live" if self.projector_live
+                                       else "model-only prop picks are watch-only")))
+            else:
+                out.append(("info", "player-prop model: not enough history to check it - model-only prop "
+                                    "picks are watch-only"))
+        else:
+            self.projector = _NoProjector()
         self.player_teams = self._latest_teams(weekly)
         weeks = self._assign_nfl_weeks(sched, now)
-        return ([("info", f"nflverse: {sched.height} games, {weekly.height} player-weeks, {weeks} weeks set")]
+        return ([("info", f"nflverse: {sched.height} games, {weekly.height} player-weeks, {weeks} weeks set"), *out]
                 + await self._check_qbs(sched, cur, now))
 
     async def _check_qbs(self, sched: pl.DataFrame, season: int, now: datetime) -> list[tuple[str, str]]:
@@ -793,6 +834,8 @@ class Services:
     def _merge(self, key: str, source: str, items: list, now: datetime) -> None:
         """Replace one source's items for the games it just returned; drop anything stale; persist."""
         ids = {i.game_id for i in items}
+        if key == "props":  # prop ages run from when we pulled them, not the book's own stamp
+            items = [i if i.fetched_at else replace(i, fetched_at=now) for i in items]
         keep = [q for q in self.latest[key] if not (q.source == source and q.game_id in ids)
                 and now - _seen_at(q) < QUOTE_TTL]
         self.latest[key] = keep + items
@@ -932,7 +975,8 @@ class Services:
             week = week.filter(pl.col(team_col).is_in([g.home, g.away]))
         if week.is_empty():  # this game's stats are not published yet
             return "pending"
-        row = week.filter(pl.col("player_display_name").str.to_lowercase() == player.lower())
+        key = normalize_name(player)
+        row = week.filter(pl.col("player_display_name").map_elements(normalize_name, return_dtype=pl.Utf8) == key)
         if row.is_empty() or row[col][0] is None:
             return None
         return float(row[col][0])
@@ -989,8 +1033,9 @@ class Services:
             pp_staked_today_cents=self.lifecycle.pp_staked_today_cents(now, PT),
             margin_models=self.margin_models, player_teams={**self.player_teams, **self.manual_teams},
             open_game_ids={leg["game_id"] for leg in game_legs if leg.get("game_id")},
-            open_players={leg["player"].lower() for leg in prop_legs if leg.get("player")},
-            open_leg_keys=open_keys, blend_fits=dict(self.blend_fits), disagree_caps=dict(self.disagree_caps))
+            open_players={normalize_name(leg["player"]) for leg in prop_legs if leg.get("player")},
+            open_leg_keys=open_keys, blend_fits=dict(self.blend_fits), disagree_caps=dict(self.disagree_caps),
+            projector_live=self.projector_live)
 
     def _wanted(self, rec: Recommendation, what: str) -> bool:
         venue = "prizepicks" if rec.kind == "pp_entry" else "kalshi"
@@ -1019,6 +1064,11 @@ class Services:
                 out.append(("text", sent))
             else:
                 out.append(("error", f"text for #{saved.id} failed: {res.error}"))
+        new_names = sorted(set(getattr(self.projector, "unmatched", ())) - self._reported_unmatched)
+        if new_names:
+            self._reported_unmatched |= set(new_names)
+            out.append(("info", "player-prop model: no stats found for " + ", ".join(new_names[:10])
+                        + (f" and {len(new_names) - 10} more" if len(new_names) > 10 else "")))
         if not out:
             out.append(("info", f"scan {what}: {len(recs)} opportunities, nothing new"))
         return out

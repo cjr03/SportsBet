@@ -5,7 +5,7 @@ from typing import Literal, Protocol
 
 import numpy as np
 from scipy.optimize import brentq
-from scipy.stats import norm, poisson
+from scipy.stats import gamma, nbinom, norm, poisson
 
 NFL_ML_SIGMA = 11.16
 NFL_SPREAD_SIGMA = 13.0
@@ -143,16 +143,30 @@ def implied_mean(model: MarginModel, x: float, p: float, width: float = 80.0) ->
         return None
 
 
+# Dispersion (sd / mean) of yardage around a sharp book line; yardage is right-skewed, so a gamma with
+# its median set by the line replaces the old Normal(sd = 0.6*mean + 5). Priors: tune by backtest.
+PROP_CV = {"reception_yds": 0.55, "rush_yds": 0.50, "pass_yds": 0.30}
+DEFAULT_YARDS_CV = 0.50
+
+
 def prop_p_over(
     line: float,
     mean: float,
     kind: Literal["yards", "count"],
     sd: float | None = None,
+    stat: str | None = None,
 ) -> float:
+    """P(value > line). Yards: gamma (sd given, else the stat's CV). Counts: Poisson, or negative
+    binomial when sd shows overdispersion; an integer line's push is not an over."""
     if kind == "yards":
-        sd = 0.6 * mean + 5 if sd is None else sd
-        return float(norm.sf(line, loc=mean, scale=sd))
-    return float(poisson.sf(math.ceil(line) - 1, mean))
+        sd = PROP_CV.get(stat or "", DEFAULT_YARDS_CV) * mean if sd is None else sd
+        k = (mean / sd) ** 2
+        return float(gamma.sf(line, k, scale=mean / k))
+    x = math.floor(line)
+    if sd is not None and sd * sd > mean > 0:
+        r = mean * mean / (sd * sd - mean)
+        return float(nbinom.sf(x, r, r / (r + mean)))
+    return float(poisson.sf(x, mean))
 
 
 def implied_mean_from_line(
@@ -160,6 +174,7 @@ def implied_mean_from_line(
     p_over: float,
     kind: Literal["yards", "count"],
     sd: float | None = None,
+    stat: str | None = None,
 ) -> float:
     """Mean whose model P(over line) equals p_over."""
-    return float(brentq(lambda m: prop_p_over(line, m, kind, sd) - p_over, 1e-6, 5000.0))
+    return float(brentq(lambda m: prop_p_over(line, m, kind, sd, stat) - p_over, 1e-6, 5000.0))

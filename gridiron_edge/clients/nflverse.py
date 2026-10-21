@@ -52,6 +52,12 @@ class NflverseSource:
     def weekly_player_stats(self, seasons: list[int]) -> pl.DataFrame:
         return self._load("load_player_stats", "player_stats", "player_stats_{season}", seasons)
 
+    def snap_counts(self, seasons: list[int]) -> pl.DataFrame:
+        return self._load("load_snap_counts", "snap_counts", "snap_counts_{season}", seasons)
+
+    def injuries(self, seasons: list[int]) -> pl.DataFrame:
+        return self._load("load_injuries", "injuries", "injuries_{season}", seasons)
+
     def team_epa(self, seasons: list[int]) -> pl.DataFrame:
         pbp = self._load("load_pbp", "pbp", "play_by_play_{season}", seasons)
         plays = pbp.filter(pl.col("epa").is_not_null() & pl.col("play_type").is_in(_RUSH_PASS))

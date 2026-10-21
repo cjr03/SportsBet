@@ -59,6 +59,11 @@ class PropQuote:
     decimal: float | None
     last_update: datetime
     multiplier: float | None = None
+    fetched_at: datetime | None = None  # when we pulled it; prop ages run from here, not the book stamp
+
+    @property
+    def seen_at(self) -> datetime:
+        return self.fetched_at or self.last_update
 
 
 @dataclass(frozen=True)

@@ -136,3 +136,12 @@ def test_walkforward_early_late_split():
               "margin": 10 if k % 2 else -10} for k in range(10)]
     _, m = walkforward_ats("nfl", games, lambda d: (lambda g: 4.0))
     assert m["early"]["n"] == 4 and m["late"]["n"] == 6
+
+
+def test_projector_matches_normalised_names(weekly_df):
+    df = weekly_df.with_columns(pl.col("player_display_name").replace("Vet Back", "Vet Back Jr."))
+    p = PropProjector(df)
+    assert p.project("Vet Back", "rush_yds", 2026, 9) is not None
+    assert p.team_of("VET BACK") == "KC"
+    assert p.project("Nobody Here", "rush_yds", 2026, 9) is None
+    assert "Nobody Here" in p.unmatched
