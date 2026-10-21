@@ -74,8 +74,9 @@ def _p_yes(mtype: str, model: MarginModel, mean: float, line: float | None, home
     return model.p_greater(mean if home_side else -mean, x)
 
 
-def _game_p_yes(m: KalshiMarket, g: Game, snap: Snapshot, s: Settings) -> float | None:
-    """Blended P(YES) for a Kalshi game market, or None when inputs are missing or CFB agrees."""
+def _market_parts(m: KalshiMarket, g: Game, snap: Snapshot, s: Settings
+                  ) -> tuple[float, float | None] | None:
+    """(market P(YES), market implied mean or None) from sportsbook quotes alone."""
     mtype = m.market_type
     if mtype != "total" and m.team not in (g.home, g.away):
         return None
@@ -89,12 +90,25 @@ def _game_p_yes(m: KalshiMarket, g: Game, snap: Snapshot, s: Settings) -> float 
         fair = fair_two_way(quotes, "h2h", None, now=snap.now, stale_seconds=s.stale_seconds)
         if fair is None:
             return None
-        p_mkt = fair[0] if home_side else 1.0 - fair[0]
-    else:
-        if mkt_mean is None:
-            return None
-        p_mkt = _p_yes(mtype, model, mkt_mean, m.line, home_side)
+        return (fair[0] if home_side else 1.0 - fair[0]), mkt_mean
+    if mkt_mean is None:
+        return None
+    return _p_yes(mtype, model, mkt_mean, m.line, home_side), mkt_mean
 
+
+def market_p_yes(m: KalshiMarket, g: Game, snap: Snapshot, s: Settings) -> float | None:
+    """Market-only P(YES) for a Kalshi game market (the CLV close; no model, no CFB filter)."""
+    parts = _market_parts(m, g, snap, s)
+    return None if parts is None else parts[0]
+
+
+def _game_p_yes(m: KalshiMarket, g: Game, snap: Snapshot, s: Settings) -> float | None:
+    """Blended P(YES) for a Kalshi game market, or None when inputs are missing or CFB agrees."""
+    parts = _market_parts(m, g, snap, s)
+    if parts is None:
+        return None
+    p_mkt, mkt_mean = parts
+    mtype = m.market_type
     pred = snap.predictions.get(g.game_id)
     model_mean = None if pred is None else (pred.mean_total if mtype == "total" else pred.mean_margin)
     if g.league == "cfb":
@@ -103,7 +117,8 @@ def _game_p_yes(m: KalshiMarket, g: Game, snap: Snapshot, s: Settings) -> float 
             return None
     if model_mean is None:
         return p_mkt
-    p_model = _p_yes(mtype, model, model_mean, m.line, home_side)
+    model = snap.margin_models[_MODEL_KEY[g.league][mtype]]
+    p_model = _p_yes(mtype, model, model_mean, m.line, m.team == g.home)
     hours = (g.kickoff - snap.now).total_seconds() / 3600
     return blend(p_model, p_mkt, default_weight(g.league, hours))
 

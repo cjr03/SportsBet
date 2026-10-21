@@ -333,3 +333,23 @@ def test_zero_ask_markets_make_no_arb_and_no_crash(mk, settings):
     snap = snap_with(kalshi=pair + ladder, quotes=h2h("g1", 1.80, 2.10))
     assert arb_candidates(snap, settings, lambda m: "nfl") == []
     assert not [r for r in scan(snap, settings, StubProjector(), lambda m: "nfl") if r.kind == "arb"]
+
+
+def test_market_p_yes_ignores_cfb_disagreement_filter(mk, settings):
+    from gridiron_edge.pipeline import _game_p_yes, market_p_yes
+    g = game(1, league="cfb")
+    m = mk("E1-H1", "E1", "spread", "H1", line=3.5, game_id="g1")
+    snap = snap_with(games={"g1": g}, quotes=spreads("g1", -7.0))
+    assert _game_p_yes(m, g, snap, settings) is None  # no model: CFB is never bet
+    p = market_p_yes(m, g, snap, settings)
+    assert p is not None and 0.5 < p < 0.9  # but the close is still measurable
+
+
+def test_market_p_yes_ml_matches_devig(mk, settings):
+    from gridiron_edge.pipeline import market_p_yes
+    m = mk("E1-H1", "E1", "ml", "H1", game_id="g1")
+    snap = snap_with(quotes=h2h("g1", 1.80, 2.10))
+    p = market_p_yes(m, game(1), snap, settings)
+    assert 0.5 < p < 0.56
+    m_away = mk("E1-A1", "E1", "ml", "A1", game_id="g1")
+    assert market_p_yes(m_away, game(1), snap, settings) == pytest.approx(1 - p)

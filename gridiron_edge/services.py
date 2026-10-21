@@ -691,7 +691,7 @@ class Services:
             g, m = self.registry.get(leg.game_id or ""), markets.get(leg.ticker or "")
             if g is None or m is None or not now <= g.kickoff <= now + timedelta(minutes=30):
                 continue
-            p_yes = pipeline._game_p_yes(m, g, snap, self.settings)
+            p_yes = pipeline.market_p_yes(m, g, snap, self.settings)  # market-only close (CFB too)
             if p_yes is None:
                 continue
             value = self.settler.record_clv(bet["id"], p_yes if leg.side == "yes" else 1 - p_yes)

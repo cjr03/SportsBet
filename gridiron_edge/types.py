@@ -92,6 +92,7 @@ class Leg:
     stat: str | None = None
     line: float | None = None
     team: str | None = None
+    p_mkt: float | None = None  # market-only P(this side) at rec time (None when not market-anchored)
 
     def identity(self) -> str:
         if self.ticker:
@@ -114,6 +115,7 @@ class Recommendation:
     state: str = "RECOMMENDED"
     observe_only: bool = False
     tie_risk: bool = False
+    p_mkt: float | None = None  # market-only P(win event) at rec time, for calibration baselines
 
     @property
     def leg_key(self) -> str:
