@@ -1,6 +1,6 @@
 """The Odds API client: game odds, player props, events and scores, with quota tracking."""
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime
 
 from gridiron_edge.budget import BudgetGuard
 from gridiron_edge.clients.http import AuthError, RateLimitedClient
@@ -8,7 +8,9 @@ from gridiron_edge.types import League, PropQuote, Quote
 
 BASE_URL = "https://api.the-odds-api.com/v4"
 SPORT = {"nfl": "americanfootball_nfl", "cfb": "americanfootball_ncaaf"}
-REF_BOOKS = "pinnacle,novig,prophetx,draftkings,fanduel,betmgm,betrivers,espnbet,hardrockbet,kalshi"
+# ten books = one region of credits; lowvig/betonlineag (mid-tier sharp) replaced espnbet/hardrockbet.
+# kalshi stays for comparison only: fair.py never prices Kalshi off itself.
+REF_BOOKS = "pinnacle,novig,prophetx,lowvig,betonlineag,draftkings,fanduel,betmgm,betrivers,kalshi"
 PROP_BOOKS = "prizepicks,draftkings,fanduel,betmgm,betrivers,espnbet"
 PROP_MARKETS = ("player_pass_yds", "player_rush_yds", "player_reception_yds")
 MONTHLY_CAP = 500
@@ -67,7 +69,9 @@ class OddsApiClient:
         return await self._get(f"/sports/{SPORT[league]}/events", {"dateFormat": "iso"})
 
     async def game_odds(self, league: League, commence_from: str | None = None,
-                        commence_to: str | None = None, essential: bool = False) -> list[Quote]:
+                        commence_to: str | None = None, essential: bool = False,
+                        fetched_at: datetime | None = None) -> list[Quote]:
+        """fetched_at: the caller's clock for the pull (defaults to now); staleness is measured from it."""
         if self._blocked(GAME_ODDS_COST, essential):
             return []
         params = {"markets": "h2h,spreads,totals", "oddsFormat": "decimal",
@@ -77,7 +81,9 @@ class OddsApiClient:
         if commence_to:
             params["commenceTimeTo"] = commence_to
         out: list[Quote] = []
-        for ev in await self._get(f"/sports/{SPORT[league]}/odds", params):
+        body = await self._get(f"/sports/{SPORT[league]}/odds", params)
+        fetched = fetched_at or datetime.now(UTC)
+        for ev in body:
             home, away = ev["home_team"], ev["away_team"]
             game_id = self.resolve(league, home, away, datetime.fromisoformat(ev["commence_time"]))
             if game_id is None:
@@ -94,7 +100,7 @@ class OddsApiClient:
                         if side is None:
                             continue
                         out.append(Quote("odds_api", bk["key"], game_id, mk["key"], side,
-                                         o.get("point"), float(o["price"]), stamp))
+                                         o.get("point"), float(o["price"]), stamp, fetched))
         return out
 
     async def event_props(self, league: League, event_id: str, essential: bool = False) -> list[PropQuote]:

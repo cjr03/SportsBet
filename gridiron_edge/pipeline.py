@@ -1,5 +1,6 @@
 """Recommendation pipeline: turn a market snapshot into Kalshi, PrizePicks and arb recommendations."""
 import math
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -10,8 +11,8 @@ from gridiron_edge.models import Prediction
 from gridiron_edge.models.blend import blend, default_weight
 from gridiron_edge.strategy.arb import filter_arbs, kalshi_ladders, kalshi_ml_pairs
 from gridiron_edge.strategy.devig import devig_worst
-from gridiron_edge.strategy.distributions import MarginModel, implied_mean_from_line, prop_p_over
-from gridiron_edge.strategy.fair import fair_spread_mean, fair_total_mean, fair_two_way
+from gridiron_edge.strategy.distributions import MarginModel, implied_mean, implied_mean_from_line, prop_p_over
+from gridiron_edge.strategy.fair import TIER_RANK, FairPrice, fair_price, implied_market_mean
 from gridiron_edge.strategy.kalshi_pricing import effective_price, kalshi_ev, passes_filters
 from gridiron_edge.strategy.kelly import Bet, optimize_slate, to_cents
 from gridiron_edge.strategy.prizepicks import PAYOUTS, Pick, build_best_entry, hit_distribution, kelly_entry
@@ -21,8 +22,10 @@ _GAME_TYPES = ("ml", "spread", "total")
 # league -> market type -> margin_models key
 _MODEL_KEY = {
     "nfl": {"ml": "nfl_ml", "spread": "nfl_spread", "total": "nfl_total"},
-    "cfb": {"ml": "cfb", "spread": "cfb", "total": "cfb"},
+    "cfb": {"ml": "cfb", "spread": "cfb_spread", "total": "cfb"},
 }
+_MODEL_FALLBACK = {"cfb_spread": "cfb"}  # no CFB lines history cached: the normal model
+_TIE_NO = re.compile(r"tie[^.]*\b(resolves?|settles?)\b[^.]*\bno\b")
 
 
 @dataclass
@@ -74,7 +77,64 @@ def _p_yes(mtype: str, model: MarginModel, mean: float, line: float | None, home
     return model.p_greater(mean if home_side else -mean, x)
 
 
-def _game_p_yes(m: KalshiMarket, g: Game, snap: Snapshot, s: Settings) -> float | None:
+def _margin_model(snap: Snapshot, league: str, mtype: str) -> MarginModel:
+    key = _MODEL_KEY[league][mtype]
+    return snap.margin_models.get(key) or snap.margin_models[_MODEL_FALLBACK.get(key, key)]
+
+
+@dataclass(frozen=True)
+class GameFair:
+    """P(YES)/P(NO) for a Kalshi game market and where it came from."""
+    p_yes: float
+    p_no: float
+    p_market: float
+    p_model: float | None
+    model_weight: float
+    fair: FairPrice
+    method: str  # h2h | exact line | adjacent line | implied mean
+    tie_prob: float = 0.0
+
+    def why(self) -> dict:
+        return {"fair_source": self.fair.source, "books": list(self.fair.books),
+                "p_market": round(self.p_market, 4),
+                "p_model": None if self.p_model is None else round(self.p_model, 4),
+                "model_weight": round(self.model_weight, 4), "method": self.method,
+                "tie_prob": self.tie_prob}
+
+
+def _sharp_at(quotes: list[Quote], market: str, threshold: float, model: MarginModel,
+              kw: dict) -> tuple[float, FairPrice, str] | None:
+    """P(home margin / total > threshold) straight from a sharp quote at the line or a half point away.
+
+    A quote exactly at a half-point threshold is the answer. A quote at an adjacent integer line is
+    P(cover | no push) there, so it goes through the push-aware inversion before pricing.
+    """
+    def at(x: float) -> FairPrice | None:
+        fp = fair_price(quotes, market, -x if market == "spreads" else x, **kw)
+        return fp if fp is not None and fp.tier < TIER_RANK["median"] else None
+
+    if threshold != math.floor(threshold) and (fp := at(threshold)) is not None:
+        return fp.p, fp, "exact line"
+    best: tuple[int, float, float, FairPrice] | None = None
+    for x in (threshold - 0.5, threshold + 0.5):
+        if (fp := at(x)) is not None and (best is None or (fp.tier, abs(fp.p - 0.5)) < best[:2]):
+            best = (fp.tier, abs(fp.p - 0.5), x, fp)
+    if best is None:
+        return None
+    _, _, x, fp = best
+    mean = implied_mean(model, x, fp.p)
+    return None if mean is None else (model.p_greater(mean, threshold), fp, "adjacent line")
+
+
+def kalshi_tie_rule(m: KalshiMarket) -> str | None:
+    """"no" when the market's rules say a tie settles every team's market NO; None when unknown."""
+    text = (getattr(m, "rules_secondary", "") or "").lower()
+    if "tie" in text and _TIE_NO.search(text):
+        return "no"
+    return None
+
+
+def _game_fair(m: KalshiMarket, g: Game, snap: Snapshot, s: Settings) -> GameFair | None:
     """Blended P(YES) for a Kalshi game market, or None when inputs are missing or CFB agrees."""
     mtype = m.market_type
     if mtype != "total" and m.team not in (g.home, g.away):
@@ -83,17 +143,29 @@ def _game_p_yes(m: KalshiMarket, g: Game, snap: Snapshot, s: Settings) -> float 
         return None
     home_side = m.team == g.home
     quotes = [q for q in snap.quotes if q.game_id == g.game_id]
-    model = snap.margin_models[_MODEL_KEY[g.league][mtype]]
-    mkt_mean = (fair_total_mean if mtype == "total" else fair_spread_mean)(quotes, now=snap.now)
+    model = _margin_model(snap, g.league, mtype)
+    kw = {"now": snap.now, "stale_seconds": s.stale_seconds}
     if mtype == "ml":
-        fair = fair_two_way(quotes, "h2h", None, now=snap.now, stale_seconds=s.stale_seconds)
-        if fair is None:
+        fp = fair_price(quotes, "h2h", None, **kw)
+        if fp is None:
             return None
-        p_mkt = fair[0] if home_side else 1.0 - fair[0]
+        p_mkt, method = (fp.p if home_side else 1.0 - fp.p), "h2h"
+        im = implied_market_mean(quotes, "spreads", _margin_model(snap, g.league, "spread"), **kw)
+        mkt_mean = None if im is None else im.mean
     else:
-        if mkt_mean is None:
+        market = "totals" if mtype == "total" else "spreads"
+        im = implied_market_mean(quotes, market, model, **kw)
+        mkt_mean = None if im is None else im.mean
+        threshold = m.line if (mtype == "total" or home_side) else -m.line
+        direct = _sharp_at(quotes, market, threshold, model, kw)
+        if direct is not None:
+            p_a, fp, method = direct
+            p_mkt = p_a if (mtype == "total" or home_side) else 1.0 - p_a
+        elif im is not None:
+            fp, method = im.fair, "implied mean"
+            p_mkt = _p_yes(mtype, model, im.mean, m.line, home_side)
+        else:
             return None
-        p_mkt = _p_yes(mtype, model, mkt_mean, m.line, home_side)
 
     pred = snap.predictions.get(g.game_id)
     model_mean = None if pred is None else (pred.mean_total if mtype == "total" else pred.mean_margin)
@@ -101,11 +173,28 @@ def _game_p_yes(m: KalshiMarket, g: Game, snap: Snapshot, s: Settings) -> float 
         # CFB bets need the model to disagree with the line; without both means we can't tell.
         if model_mean is None or mkt_mean is None or abs(model_mean - mkt_mean) < s.cfb_min_disagree:
             return None
-    if model_mean is None:
-        return p_mkt
-    p_model = _p_yes(mtype, model, model_mean, m.line, home_side)
-    hours = (g.kickoff - snap.now).total_seconds() / 3600
-    return blend(p_model, p_mkt, default_weight(g.league, hours))
+    p_model, w = None, 0.0
+    p = p_mkt
+    if model_mean is not None:
+        p_model = _p_yes(mtype, model, model_mean, m.line, home_side)
+        hours = (g.kickoff - snap.now).total_seconds() / 3600
+        w = default_weight(g.league, hours)
+        p = blend(p_model, p_mkt, w)
+    p_no, tie = 1.0 - p, 0.0
+    if g.league == "nfl" and mtype == "ml":
+        # sportsbook moneylines and the model are P(win | no tie); a tie loses YES for both teams.
+        # Unless the rules confirm a tie settles NO, NO gets no credit for it (worst case per side).
+        tie = s.nfl_tie_prob
+        p_yes = p * (1.0 - tie)
+        p_no = 1.0 - p_yes if kalshi_tie_rule(m) == "no" else 1.0 - p
+        p = p_yes
+    return GameFair(p, p_no, p_mkt, p_model, w, fp, method, tie)
+
+
+def _game_p_yes(m: KalshiMarket, g: Game, snap: Snapshot, s: Settings) -> float | None:
+    """Blended P(YES) for a Kalshi game market, or None when inputs are missing or CFB agrees."""
+    gf = _game_fair(m, g, snap, s)
+    return None if gf is None else gf.p_yes
 
 
 def _best_side(m: KalshiMarket, p_yes: float, snap: Snapshot, s: Settings, extra_ev: float = 0.0,
@@ -133,35 +222,41 @@ def _best_side(m: KalshiMarket, p_yes: float, snap: Snapshot, s: Settings, extra
 
 
 def _kalshi_rec(kind: Literal["kalshi_game", "kalshi_prop"], m: KalshiMarket, g: Game, sd: _Side,
-                description: str, snap: Snapshot, gate: str, tie_risk: bool) -> Recommendation:
+                description: str, snap: Snapshot, gate: str, tie_risk: bool, why: dict | None = None,
+                observe: bool = False) -> Recommendation:
     leg = Leg("kalshi", description, sd.side, sd.price, sd.p, g.game_id, ticker=m.ticker,
               player=m.player, stat=m.stat, line=m.line, team=m.team)
     return Recommendation(None, kind, [leg], 0, sd.qty, sd.ev, sd.p, None, snap.now, g.kickoff,
-                          observe_only=snap.gates.get((g.league, gate), False), tie_risk=tie_risk)
+                          observe_only=observe or snap.gates.get((g.league, gate), False), tie_risk=tie_risk,
+                          why=why)
 
 
 def kalshi_game_candidates(snap: Snapshot, s: Settings) -> list[Recommendation]:
     """Best Kalshi ml/spread/total recommendation per game (unsized: stake 0, provisional qty)."""
-    best: dict[str, tuple[KalshiMarket, Game, _Side]] = {}
+    best: dict[str, tuple[KalshiMarket, Game, _Side, GameFair]] = {}
     for m in snap.kalshi:
         if m.market_type not in _GAME_TYPES:
             continue
         g = _upcoming(snap, m.game_id)
         if g is None or g.game_id in snap.open_game_ids:  # one market per game, already held
             continue
-        p_yes = _game_p_yes(m, g, snap, s)
-        if p_yes is None:
+        gf = _game_fair(m, g, snap, s)
+        if gf is None:
             continue
-        sd = _best_side(m, p_yes, snap, s)
+        if gf.fair.source == "median" and s.median_fair_policy == "block":
+            continue
+        sd = _best_side(m, gf.p_yes, snap, s, p_no=gf.p_no)
         if sd is not None and (g.game_id not in best or sd.ev > best[g.game_id][2].ev):
-            best[g.game_id] = (m, g, sd)
+            best[g.game_id] = (m, g, sd, gf)
 
     out = []
-    for m, g, sd in best.values():
+    for m, g, sd, gf in best.values():
         desc = {"ml": f"{m.team} ML", "spread": f"{m.team} wins by >{m.line}",
                 "total": f"Total over {m.line}"}[m.market_type]
         tie = g.league == "nfl" and m.market_type == "ml"
-        out.append(_kalshi_rec("kalshi_game", m, g, sd, desc, snap, m.market_type, tie))
+        # soft-book median only: no sharp price behind it, so log it rather than stake it
+        observe = gf.fair.source == "median" and s.median_fair_policy == "observe"
+        out.append(_kalshi_rec("kalshi_game", m, g, sd, desc, snap, m.market_type, tie, gf.why(), observe))
     return out
 
 

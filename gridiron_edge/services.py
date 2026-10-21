@@ -39,7 +39,8 @@ from gridiron_edge.notify.imessage import IMessageNotifier
 from gridiron_edge.notify.ntfy import NtfyNotifier
 from gridiron_edge.scheduler import LEAGUES, Job, Scheduler
 from gridiron_edge.strategy.distributions import (
-    CFB_SIGMA, NFL_ML_SIGMA, NFL_SPREAD_SIGMA, NFL_TOTAL_SIGMA, EmpiricalMarginModel, NormalModel,
+    CFB_SIGMA, MIN_EMPIRICAL_RESIDUALS, NFL_ML_SIGMA, NFL_SPREAD_SIGMA, NFL_TOTAL_SIGMA,
+    ConditionalMarginModel, MarginModel, NormalModel,
 )
 from gridiron_edge.types import Game, KalshiMarket, Leg, PropQuote, Quote, Recommendation, make_game_id
 from gridiron_edge.ui.widgets import compute_kpis
@@ -54,6 +55,8 @@ LINES_HORIZON = timedelta(hours=48)
 # sportsbook quotes and prop lines, written through to api_cache so a restart keeps them
 _PERSISTED = {"quotes": Quote, "props": PropQuote}
 NFL_SEASONS = 3
+MARGIN_FIRST_SEASON = 2015  # spread-conditional margin models fit on closing lines from here on
+CFB_MARGIN_KEY = "cfb_spread"
 # Settings the `set` command may not touch: secrets and paths live in .env / --db.
 LOCKED_SETTINGS = {"odds_api_key", "cfbd_api_key", "therundown_api_key", "notify_phone", "ntfy_topic",
                    "kalshi_base_url", "db_path"}
@@ -116,15 +119,24 @@ def _league_of(m: KalshiMarket) -> str:
     return "cfb" if m.series.startswith("KXNCAAF") else "nfl"
 
 
+_STAMPS = ("last_update", "fetched_at")
+
+
 def _dump_items(items: list) -> str:
-    return json.dumps([{**asdict(i), "last_update": i.last_update.isoformat()} for i in items])
+    return json.dumps([{k: v.isoformat() if hasattr(v, "isoformat") else v for k, v in asdict(i).items()}
+                       for i in items])
+
+
+def _seen_at(item) -> datetime:
+    """When we last pulled an item (falls back to the book's own stamp)."""
+    return getattr(item, "fetched_at", None) or item.last_update
 
 
 def _load_items(cls, body: str) -> list:
     out = []
     for d in json.loads(body):
         try:
-            out.append(cls(**{**d, "last_update": datetime.fromisoformat(d["last_update"])}))
+            out.append(cls(**{**d, **{k: datetime.fromisoformat(d[k]) for k in _STAMPS if d.get(k)}}))
         except (KeyError, TypeError, ValueError):
             continue  # an older row shape: drop it rather than fail startup
     return out
@@ -132,6 +144,15 @@ def _load_items(cls, body: str) -> list:
 
 def _bet_legs(bets) -> list[dict]:
     return [leg for b in bets for leg in json.loads(b["legs_json"])]
+
+
+def nfl_margin_model(sched: pl.DataFrame) -> MarginModel:
+    """P(margin | closing spread) from nflverse; spread_line is the expected home margin."""
+    done = sched.filter(pl.col("season") >= MARGIN_FIRST_SEASON).drop_nulls(["result", "spread_line"])
+    if done.height < MIN_EMPIRICAL_RESIDUALS:
+        return NormalModel(NFL_SPREAD_SIGMA)
+    return ConditionalMarginModel(done["spread_line"].cast(pl.Float64).to_numpy(),
+                                  done["result"].cast(pl.Float64).to_numpy(), NFL_SPREAD_SIGMA)
 
 
 def _default_margin_models() -> dict:
@@ -323,7 +344,11 @@ class Services:
         return [("info", f"games: {from_odds} from odds events, {from_rundown} from therundown")]
 
     def _read_nflverse(self, seasons: list[int]) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
-        return (_dated(self.nflverse.schedules(seasons)), self.nflverse.weekly_player_stats(seasons),
+        # schedules ship as one file for every season, so the margin model's 2015+ history is free
+        first = min(MARGIN_FIRST_SEASON, seasons[0])
+        sched = _dated(self.nflverse.schedules(list(range(first, seasons[-1] + 1))))
+        self.history["nfl_margin"] = sched
+        return (sched.filter(pl.col("season").is_in(seasons)), self.nflverse.weekly_player_stats(seasons),
                 self.nflverse.team_epa(seasons))
 
     async def _load_nflverse(self, now: datetime) -> list[tuple[str, str]]:
@@ -371,11 +396,12 @@ class Services:
         if sched is None or sched.is_empty():
             return []
         self.nfl_model = await asyncio.to_thread(NflRatings.fit, sched, self.history.get("nfl_epa"), now.date())
-        done = sched.drop_nulls(["result", "spread_line"])
-        residuals = (done["result"].cast(pl.Float64) - done["spread_line"].cast(pl.Float64)).to_numpy()
-        self.margin_models["nfl_spread"] = EmpiricalMarginModel(residuals, NFL_SPREAD_SIGMA)
-        return [("info", f"nfl model: {len(self.nfl_model.ratings)} teams, hfa {self.nfl_model.hfa:+.1f}, "
-                         f"{len(residuals)} spread residuals")]
+        margin = nfl_margin_model(self.history.get("nfl_margin", sched))
+        self.margin_models["nfl_spread"] = margin
+        games = (f"winning margins learned from {margin.n:,} past games with betting lines"
+                 if isinstance(margin, ConditionalMarginModel)
+                 else "not enough past games with betting lines yet, so winning margins use a simple bell curve")
+        return [("info", f"nfl model: {len(self.nfl_model.ratings)} teams, hfa {self.nfl_model.hfa:+.1f}, {games}")]
 
     def _cfb_games(self, rows: list[dict]) -> list[dict]:
         def canon(name):
@@ -404,9 +430,37 @@ class Services:
         except np.linalg.LinAlgError:  # no completed games yet: ratings are the priors alone
             model = CfbRatings(priors, hfa) if priors else None
         self.cfb_model = model
+        out = self._fit_cfb_margin(now)
         if model is None:
-            return [("info", "cfb model: no games yet")]
-        return [("info", f"cfb model: {len(model.ratings)} teams, hfa {model.hfa:+.1f}")]
+            return [("info", "cfb model: no games yet"), *out]
+        return [("info", f"cfb model: {len(model.ratings)} teams, hfa {model.hfa:+.1f}"), *out]
+
+    def _fit_cfb_margin(self, now: datetime) -> list[tuple[str, str]]:
+        """CFB P(margin | spread) from CFBD lines already in the cache (backtests store them).
+
+        Never calls the API: with too little cached history the normal model stays in place.
+        """
+        spreads, margins = [], []
+        if self.cfbd is not None:
+            for year in range(MARGIN_FIRST_SEASON, CfbdClient.current_season(now)):
+                for r in self.cfbd.cached("/lines", year=year) or []:
+                    if r.get("homeScore") is None or r.get("awayScore") is None:
+                        continue
+                    lines = []
+                    for line in r.get("lines") or []:
+                        try:
+                            lines.append(float(line["spread"]))
+                        except (KeyError, TypeError, ValueError):
+                            continue
+                    if lines:  # CFBD spreads are the home line: negative means home favoured
+                        spreads.append(-float(np.median(lines)))
+                        margins.append(float(r["homeScore"] - r["awayScore"]))
+        if len(spreads) < MIN_EMPIRICAL_RESIDUALS:
+            self.margin_models.pop(CFB_MARGIN_KEY, None)
+            return [("info", f"college winning margins: only {len(spreads)} saved past games with betting lines, "
+                             "so a simple bell curve is used (a college backtest saves more)")]
+        self.margin_models[CFB_MARGIN_KEY] = ConditionalMarginModel(spreads, margins, CFB_SIGMA)
+        return [("info", f"college winning margins learned from {len(spreads):,} past games with betting lines")]
 
     # -- gates and backtests ---------------------------------------------
     async def _nfl_inputs(self, years: list[int], before: date):
@@ -537,7 +591,7 @@ class Services:
         """Replace one source's items for the games it just returned; drop anything stale; persist."""
         ids = {i.game_id for i in items}
         keep = [q for q in self.latest[key] if not (q.source == source and q.game_id in ids)
-                and now - q.last_update < QUOTE_TTL]
+                and now - _seen_at(q) < QUOTE_TTL]
         self.latest[key] = keep + items
         self.conn.execute(
             "INSERT OR REPLACE INTO api_cache (key, fetched_at, immutable, body) VALUES (?,?,0,?)",
@@ -553,7 +607,7 @@ class Services:
                 items = _load_items(cls, row["body"])
             except (TypeError, ValueError):
                 continue
-            self.latest[key] = [i for i in items if now - i.last_update < QUOTE_TTL]
+            self.latest[key] = [i for i in items if now - _seen_at(i) < QUOTE_TTL]
 
     # -- open positions ----------------------------------------------------
     def open_bet_games(self) -> set[str]:
@@ -588,7 +642,7 @@ class Services:
                        for g in self.registry.upcoming(LINES_HORIZON, now) if g.league == job.league})
         quotes = []
         for day in days:
-            quotes += await self.rundown.lines(job.league, day)
+            quotes += await self.rundown.lines(job.league, day, fetched_at=now)
         if self.rundown.last_status == "skipped_budget":
             return [("info", f"therundown lines {job.league}: skipped to protect the daily/monthly points")]
         self._merge("quotes", "therundown", quotes, now)
@@ -599,7 +653,8 @@ class Services:
             return []
         await self._register_events(job.league)  # free, so new games resolve before the paid pull
         quotes = await self.odds.game_odds(job.league, job.args.get("commence_from"),
-                                           job.args.get("commence_to"), essential=job.essential)
+                                           job.args.get("commence_to"), essential=job.essential,
+                                           fetched_at=now)
         if self.odds.last_status == "skipped_budget":
             return [("info", f"odds_api games {job.league}: skipped to protect the credit reserve")]
         self._merge("quotes", "odds_api", quotes, now)
@@ -790,7 +845,7 @@ class Services:
         out = []
         if self.odds is not None and not self.odds.disabled:
             if not self.odds.seen_books:  # one game-odds pull and one props probe reveal the key's books
-                self._merge("quotes", "odds_api", await self.odds.game_odds("nfl"), now)
+                self._merge("quotes", "odds_api", await self.odds.game_odds("nfl", fetched_at=now), now)
                 row = self.conn.execute(
                     "SELECT game_id, odds_event_id FROM games WHERE league='nfl' AND odds_event_id IS NOT NULL"
                     " AND kickoff_utc > ? ORDER BY kickoff_utc LIMIT 1", (now.astimezone(UTC).isoformat(),)

@@ -45,12 +45,21 @@ class CfbdClient:
             self.budget.record(int(remaining), int(data.get("usedCalls") or 0), 0)
         return data
 
+    def _key(self, path: str, params: dict) -> str:
+        return f"cfbd:{path}?{urlencode(sorted(params.items()))}"
+
+    def cached(self, path: str, **params):
+        """A cached response body, or None. Never calls the API."""
+        params = {k: v for k, v in params.items() if v is not None}
+        row = self._conn.execute("SELECT body FROM api_cache WHERE key=?", (self._key(path, params),)).fetchone()
+        return json.loads(row["body"]) if row else None
+
     async def _get(self, path: str, **params):
         params = {k: v for k, v in params.items() if v is not None}
         if self.disabled:
             self.last_status = "disabled"
             return []
-        key = f"cfbd:{path}?{urlencode(sorted(params.items()))}"
+        key = self._key(path, params)
         now = datetime.now(timezone.utc)
         async with self._lock:
             row = self._conn.execute(

@@ -333,3 +333,80 @@ def test_zero_ask_markets_make_no_arb_and_no_crash(mk, settings):
     snap = snap_with(kalshi=pair + ladder, quotes=h2h("g1", 1.80, 2.10))
     assert arb_candidates(snap, settings, lambda m: "nfl") == []
     assert not [r for r in scan(snap, settings, StubProjector(), lambda m: "nfl") if r.kind == "arb"]
+
+
+# -- fair-pricing audit: tie, median gate, direct sharp lines, why ---------------------------------
+
+def test_nfl_ml_tie_adjustment(mk, settings):
+    from gridiron_edge.strategy.devig import devig
+    p = devig([1.80, 2.10], "power")[0]
+    r = kalshi_game_candidates(_ml_snap(mk, 0.48), settings)[0]
+    assert r.legs[0].p_fair == pytest.approx(p * (1 - settings.nfl_tie_prob))
+    assert r.why["tie_prob"] == settings.nfl_tie_prob
+    m = mk("E1-H1", "E1", "ml", "H1", yes_ask=0.40, game_id="g1")
+    cfb = kalshi_game_candidates(snap_with(
+        games={"g1": game(1, league="cfb")}, quotes=h2h("g1", 1.80, 2.10) + spreads("g1", -3.0), kalshi=[m],
+        predictions={"g1": Prediction("g1", 12.0, None, "t")}), settings)
+    assert cfb and cfb[0].why["tie_prob"] == 0.0
+
+
+def test_tie_rule_gives_no_side_the_tie_only_when_confirmed(mk, settings):
+    from gridiron_edge.pipeline import _game_fair
+    m = mk("E1-H1", "E1", "ml", "H1", yes_ask=0.48, game_id="g1")
+    snap = _ml_snap(mk, 0.48)
+    unknown = _game_fair(m, game(1), snap, settings)
+    assert unknown.p_no == pytest.approx(1 - unknown.p_yes / (1 - settings.nfl_tie_prob))
+    ruled = replace(m, rules_secondary="If the game ends in a tie, the market resolves to No.")
+    confirmed = _game_fair(ruled, game(1), snap, settings)
+    assert confirmed.p_no == pytest.approx(1 - confirmed.p_yes)
+
+
+def test_median_only_fair_is_observe_only_by_default(mk, settings):
+    m = mk("E1-H1", "E1", "ml", "H1", yes_ask=0.48, game_id="g1")
+    quotes = h2h("g1", 1.80, 2.10, book="draftkings") + h2h("g1", 1.78, 2.12, book="fanduel")
+    snap = snap_with(quotes=quotes, kalshi=[m])
+    recs = scan(snap, settings, StubProjector(), lambda m: "nfl")
+    assert len(recs) == 1 and recs[0].observe_only and recs[0].stake_cents == 0
+    assert recs[0].why["fair_source"] == "median"
+    assert kalshi_game_candidates(snap, replace(settings, median_fair_policy="block")) == []
+    allowed = scan(snap, replace(settings, median_fair_policy="allow"), StubProjector(), lambda m: "nfl")
+    assert allowed and not allowed[0].observe_only and allowed[0].stake_cents > 0
+
+
+def test_kalshi_quote_never_prices_itself(mk, settings):
+    m = mk("E1-H1", "E1", "ml", "H1", yes_ask=0.48, game_id="g1")
+    snap = snap_with(quotes=h2h("g1", 1.50, 2.90, book="kalshi"), kalshi=[m])
+    assert kalshi_game_candidates(snap, settings) == []
+
+
+def test_spread_uses_exact_sharp_line_when_quoted(mk, settings):
+    from gridiron_edge.strategy.devig import devig
+    m = mk("E1-H1", "E1", "spread", "H1", line=2.5, yes_ask=0.40, no_ask=0.61, game_id="g1")
+    quotes = spreads("g1", -2.5, dec=1.95) + spreads("g1", -7.0, dec=1.95)
+    quotes[0] = replace(quotes[0], decimal=1.80)
+    quotes[1] = replace(quotes[1], decimal=2.05)
+    r = kalshi_game_candidates(snap_with(quotes=quotes, kalshi=[m]), settings)[0]
+    assert r.legs[0].p_fair == pytest.approx(devig([1.80, 2.05], "additive")[0])
+    assert r.why["method"] == "exact line" and r.why["fair_source"] == "pinnacle"
+    assert r.why["books"] == ["pinnacle"] and r.why["p_model"] is None and r.why["model_weight"] == 0
+
+
+def test_away_spread_exact_line(mk, settings):
+    from gridiron_edge.strategy.devig import devig
+    # away team +3.5 means home -3.5; "A1 wins by > 3.5" is home margin < -3.5 = home +3.5 losing side
+    m = mk("E1-A1", "E1", "spread", "A1", line=3.5, yes_ask=0.10, no_ask=0.91, game_id="g1")
+    quotes = [Quote("odds_api", "pinnacle", "g1", "spreads", "home", 3.5, 1.70, NOW),
+              Quote("odds_api", "pinnacle", "g1", "spreads", "away", -3.5, 2.20, NOW)]
+    from gridiron_edge.pipeline import _game_fair
+    gf = _game_fair(m, game(1), snap_with(quotes=quotes, kalshi=[m]), settings)
+    assert gf.method == "exact line"
+    assert gf.p_yes == pytest.approx(1 - devig([1.70, 2.20], "additive")[0])
+
+
+def test_cfb_spread_model_falls_back_to_cfb(mk, settings):
+    from gridiron_edge.pipeline import _margin_model
+    snap = snap_with()
+    assert _margin_model(snap, "cfb", "spread") is snap.margin_models["cfb"]
+    special = NormalModel(14.0)
+    snap = snap_with(margin_models={**snap.margin_models, "cfb_spread": special})
+    assert _margin_model(snap, "cfb", "spread") is special

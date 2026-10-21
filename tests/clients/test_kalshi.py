@@ -58,3 +58,12 @@ async def test_prop_market_parsed_and_unknown_series_skipped(respx_mock, kalshi)
     (m,) = await kalshi.markets("KXNFLRECYDS")
     assert (m.market_type, m.player, m.stat, m.line, m.result) == ("prop", "TreVeyon Henderson", "reception_yds", 24.5, "yes")
     assert await kalshi.markets("KXNFLFOO") == []
+
+
+def test_parse_keeps_rules_secondary(kalshi):
+    from datetime import UTC, datetime
+    raw = {"ticker": "T", "event_ticker": "E", "yes_sub_title": "SEA",
+           "rules_secondary": "If the game ends in a tie, both markets resolve to No."}
+    m = kalshi._parse(raw, "KXNFLGAME", datetime.now(UTC))
+    assert m.rules_secondary.startswith("If the game ends in a tie")
+    assert kalshi._parse({**raw, "rules_secondary": None}, "KXNFLGAME", datetime.now(UTC)).rules_secondary == ""

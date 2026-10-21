@@ -61,3 +61,15 @@ async def test_events_and_scores(respx_mock, odds_client, load):
     respx_mock.get(url__regex=r".*/scores.*").mock(return_value=httpx.Response(200, json=[{"id": "evt1"}]))
     assert (await odds_client.events("nfl"))[0]["id"] == "evt1"
     assert await odds_client.scores("nfl") == [{"id": "evt1"}]
+
+
+async def test_game_odds_stamp_fetch_time_and_sharp_books(respx_mock, odds_client, load):
+    from gridiron_edge.clients.odds_api import REF_BOOKS
+    route = respx_mock.get(url__regex=r".*/sports/americanfootball_nfl/odds.*").mock(
+        return_value=httpx.Response(200, json=load("odds_api_odds.json"),
+                                    headers={"x-requests-remaining": "497", "x-requests-used": "3"}))
+    qs = await odds_client.game_odds("nfl")
+    assert qs and all(q.fetched_at is not None and q.fetched_at.tzinfo is not None for q in qs)
+    books = route.calls[0].request.url.params["bookmakers"].split(",")
+    assert {"pinnacle", "lowvig", "betonlineag"} <= set(books) and len(books) <= 10  # one region of credits
+    assert books == REF_BOOKS.split(",")
