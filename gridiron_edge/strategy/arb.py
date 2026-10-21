@@ -1,17 +1,26 @@
-"""Arbitrage detection: Kalshi ML pairs, spread/total ladders, cross-venue."""
+"""Arbitrage detection: Kalshi ML pairs, spread/total ladders, cross-team spreads, cross-venue;
+plus ladder middles (pairs costing a little over $1 that pay $2 when the score lands between)."""
 
+import re
 from collections import defaultdict
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime
 from typing import Literal
 
 from gridiron_edge.strategy.kalshi_pricing import effective_price
 from gridiron_edge.types import KalshiMarket, Leg
 
+ArbKind = Literal["kalshi_ml_pair", "kalshi_ml_no_pair", "kalshi_ladder", "kalshi_cross_spread",
+                  "cross_venue", "ladder_middle", "cross_middle"]
+# Kalshi NFL rules settle a tie at $0.50 per side; then YES+YES and NO+NO always pay $1
+_TIE_SPLIT = re.compile(r"\btie[ds]?\b.{0,120}?(50\s*/\s*50|\$?0?\.50\b|50\s*(?:cents|%|percent)|half)",
+                        re.IGNORECASE | re.DOTALL)
+
 
 @dataclass
 class Arb:
-    kind: Literal["kalshi_ml_pair", "kalshi_ladder", "cross_venue"]
+    kind: ArbKind
     game_id: str | None
     legs: list[Leg]
     qty: int
@@ -19,58 +28,134 @@ class Arb:
     payout: float
     roi: float
     tie_risk: bool
+    fetched_at: datetime | None = None  # oldest quote among the legs
+
+
+def has_tie_split(rules: str) -> bool:
+    return bool(rules) and _TIE_SPLIT.search(rules) is not None
+
+
+def ml_tie_risk(m: KalshiMarket, league: str) -> bool:
+    """An NFL moneyline can lose on a tie unless its rules split ties 50/50."""
+    return league == "nfl" and not has_tie_split(m.rules_primary)
 
 
 def _leg(m: KalshiMarket, side: str, price: float) -> Leg:
     return Leg("kalshi", f"{m.ticker} {side.upper()}", side, price,
-               price, m.game_id, ticker=m.ticker, line=m.line, team=m.team)
+               price, m.game_id, ticker=m.ticker, line=m.line, team=m.team, fee_multiplier=m.fee_multiplier)
+
+
+def _ask(m: KalshiMarket, side: str) -> tuple[float, float]:
+    return (m.yes_ask, m.yes_ask_size) if side == "yes" else (m.no_ask, m.no_ask_size)
+
+
+def _pair(kind: ArbKind, a: KalshiMarket, sa: str, b: KalshiMarket, sb: str, tie_risk: bool = False
+          ) -> Arb | None:
+    """Two legs that together always pay at least $1: cost at the shared depth, fees per order."""
+    (pa, da), (pb, db) = _ask(a, sa), _ask(b, sb)
+    if pa <= 0 or pb <= 0:  # a zero ask is a missing quote, not a free contract
+        return None
+    qty = int(min(da, db))
+    if qty < 1:
+        return None
+    cost = (effective_price(pa, qty, a.fee_multiplier) + effective_price(pb, qty, b.fee_multiplier)) * qty
+    if cost <= 0:
+        return None
+    return Arb(kind, a.game_id, [_leg(a, sa, pa), _leg(b, sb, pb)], qty, cost, float(qty), qty / cost - 1,
+               tie_risk, min(a.fetched_at, b.fetched_at))
+
+
+def _ml_groups(markets: list[KalshiMarket]) -> list[list[KalshiMarket]]:
+    groups: dict[str, list[KalshiMarket]] = defaultdict(list)
+    for m in markets:
+        if m.market_type == "ml" and m.status == "active":
+            groups[m.event_ticker].append(m)
+    return [ms for ms in groups.values() if len(ms) == 2]
 
 
 def kalshi_ml_pairs(markets: list[KalshiMarket], league_of: Callable[[KalshiMarket], str]) -> list[Arb]:
-    groups: dict[str, list[KalshiMarket]] = defaultdict(list)
-    for m in markets:
-        if m.market_type == "ml" and m.status == "active" and m.yes_ask > 0:
-            groups[m.event_ticker].append(m)
-    out: list[Arb] = []
-    for ms in groups.values():
-        if len(ms) != 2:
-            continue
-        qty = int(min(m.yes_ask_size for m in ms))
-        if qty < 1:
-            continue
-        cost = sum(effective_price(m.yes_ask, qty, m.fee_multiplier) * qty for m in ms)
-        if cost <= 0:
-            continue
-        roi = qty / cost - 1
-        if roi > 0:
-            out.append(Arb("kalshi_ml_pair", ms[0].game_id, [_leg(m, "yes", m.yes_ask) for m in ms],
-                           qty, cost, float(qty), roi, league_of(ms[0]) == "nfl"))
+    """YES on both teams: pays $1 unless a tie settles both NO (no 50/50 clause in the rules)."""
+    out = []
+    for a, b in _ml_groups(markets):
+        tie = ml_tie_risk(a, league_of(a)) or ml_tie_risk(b, league_of(b))
+        arb = _pair("kalshi_ml_pair", a, "yes", b, "yes", tie)
+        if arb is not None and arb.roi > 0:
+            out.append(arb)
     return out
 
 
-def kalshi_ladders(markets: list[KalshiMarket]) -> list[Arb]:
+def kalshi_ml_no_pairs(markets: list[KalshiMarket]) -> list[Arb]:
+    """NO on both teams: one team wins (one NO pays), a split tie pays 50c each, a NO-NO tie pays $2."""
+    out = []
+    for a, b in _ml_groups(markets):
+        arb = _pair("kalshi_ml_no_pair", a, "no", b, "no")
+        if arb is not None and arb.roi > 0:
+            out.append(arb)
+    return out
+
+
+def _ladders(markets: list[KalshiMarket]) -> list[list[KalshiMarket]]:
     groups: dict[tuple, list[KalshiMarket]] = defaultdict(list)
     for m in markets:
         if m.market_type in ("spread", "total") and m.line is not None and m.status == "active":
             groups[(m.event_ticker, m.market_type, m.team)].append(m)
+    return [sorted(ms, key=lambda m: m.line) for ms in groups.values()]
+
+
+def kalshi_ladders(markets: list[KalshiMarket]) -> list[Arb]:
+    """YES at a lower strike + NO at a higher strike always pays >= $1 (both pay in between).
+    Every pair i < j is checked: for each higher strike, the cheapest YES ask below it."""
     out: list[Arb] = []
-    for ms in groups.values():
-        ms.sort(key=lambda m: m.line)
-        for lo, hi in zip(ms, ms[1:]):
-            if lo.yes_ask <= 0 or hi.no_ask <= 0 or not hi.yes_bid > lo.yes_ask:
-                continue  # a zero ask is a missing quote, not a free contract
-            qty = int(min(lo.yes_ask_size, hi.no_ask_size))
-            if qty < 1:
-                continue
-            cost = (effective_price(lo.yes_ask, qty, lo.fee_multiplier)
-                    + effective_price(hi.no_ask, qty, hi.fee_multiplier)) * qty
-            if cost <= 0:
-                continue
-            roi = qty / cost - 1
-            if roi > 0:
-                out.append(Arb("kalshi_ladder", lo.game_id,
-                               [_leg(lo, "yes", lo.yes_ask), _leg(hi, "no", hi.no_ask)],
-                               qty, cost, float(qty), roi, False))
+    for ms in _ladders(markets):
+        cheapest: KalshiMarket | None = None
+        for hi in ms:
+            if cheapest is not None and cheapest.line < hi.line:
+                arb = _pair("kalshi_ladder", cheapest, "yes", hi, "no")
+                if arb is not None and arb.roi > 0:
+                    out.append(arb)
+            if hi.yes_ask > 0 and (cheapest is None or hi.yes_ask < cheapest.yes_ask):
+                cheapest = hi
+    return out
+
+
+def _cross_groups(markets: list[KalshiMarket]) -> list[tuple[list[KalshiMarket], list[KalshiMarket]]]:
+    """Per game, the spread markets of each of the two teams."""
+    games: dict[str, dict[str, list[KalshiMarket]]] = defaultdict(lambda: defaultdict(list))
+    for m in markets:
+        if m.market_type == "spread" and m.line is not None and m.team and m.game_id and m.status == "active":
+            games[m.game_id][m.team].append(m)
+    return [tuple(by_team.values()) for by_team in games.values() if len(by_team) == 2]
+
+
+def kalshi_cross_spreads(markets: list[KalshiMarket]) -> list[Arb]:
+    """NO "A wins by > x" + NO "B wins by > y" always pays >= $1 when x >= -y; the cheapest pair per game."""
+    out = []
+    for team_a, team_b in _cross_groups(markets):
+        best: Arb | None = None
+        for a in team_a:
+            for b in team_b:
+                if a.line < -b.line:
+                    continue
+                arb = _pair("kalshi_cross_spread", a, "no", b, "no")
+                if arb is not None and arb.roi > 0 and (best is None or arb.roi > best.roi):
+                    best = arb
+        if best is not None:
+            out.append(best)
+    return out
+
+
+def kalshi_middles(markets: list[KalshiMarket], max_over: float) -> list[Arb]:
+    """Pairs that pay $1 always and $2 when the margin lands between the strikes, costing between
+    $1 and $1 + max_over per pair (not risk-free: the edge rests on the margin model)."""
+    out = []
+    pairs = [("ladder_middle", lo, "yes", hi, "no") for ms in _ladders(markets)
+             for i, lo in enumerate(ms) for hi in ms[i + 1:] if lo.line < hi.line]
+    pairs += [("cross_middle", a, "no", b, "no") for ta, tb in _cross_groups(markets)
+              for a in ta for b in tb if a.line >= -b.line]
+    for kind, a, sa, b, sb in pairs:
+        arb = _pair(kind, a, sa, b, sb)
+        if arb is not None and arb.qty <= arb.cost <= arb.qty * (1 + max_over):
+            out.append(replace(arb, roi=arb.qty / arb.cost - 1))
     return out
 
 
@@ -86,5 +171,5 @@ def cross_venue(best: dict[str, tuple[float, float]]) -> tuple[float, dict[str, 
     return 1 / s - 1, {a[0]: (1 / a[1]) / s, b[0]: (1 / b[1]) / s}
 
 
-def filter_arbs(arbs: list[Arb], max_roi: float) -> list[Arb]:
-    return [a for a in arbs if a.roi <= max_roi and a.qty >= 1]
+def filter_arbs(arbs: list[Arb], max_roi: float, min_roi: float = 0.0) -> list[Arb]:
+    return [a for a in arbs if min_roi <= a.roi <= max_roi and a.qty >= 1]

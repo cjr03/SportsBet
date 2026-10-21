@@ -58,3 +58,11 @@ async def test_prop_market_parsed_and_unknown_series_skipped(respx_mock, kalshi)
     (m,) = await kalshi.markets("KXNFLRECYDS")
     assert (m.market_type, m.player, m.stat, m.line, m.result) == ("prop", "TreVeyon Henderson", "reception_yds", 24.5, "yes")
     assert await kalshi.markets("KXNFLFOO") == []
+
+
+async def test_rules_primary_kept_for_tie_handling(respx_mock, kalshi):
+    raw = {"ticker": "KXNFLGAME-X-SEA", "event_ticker": "KXNFLGAME-X", "status": "active",
+           "rules_primary": "If the game ends in a tie, the market resolves to a 50/50 split."}
+    respx_mock.get(url__regex=r".*/markets\?.*").mock(return_value=httpx.Response(200, json={"markets": [raw], "cursor": None}))
+    (m,) = await kalshi.markets("KXNFLGAME")
+    assert "tie" in m.rules_primary

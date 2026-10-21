@@ -41,6 +41,8 @@ from gridiron_edge.scheduler import LEAGUES, Job, Scheduler
 from gridiron_edge.strategy.distributions import (
     CFB_SIGMA, NFL_ML_SIGMA, NFL_SPREAD_SIGMA, NFL_TOTAL_SIGMA, EmpiricalMarginModel, NormalModel,
 )
+from gridiron_edge.strategy.kelly import clv_throttle
+from gridiron_edge.strategy.prizepicks import payout_table
 from gridiron_edge.types import Game, KalshiMarket, Leg, PropQuote, Quote, Recommendation, make_game_id
 from gridiron_edge.ui.widgets import compute_kpis
 
@@ -57,7 +59,7 @@ NFL_SEASONS = 3
 # Settings the `set` command may not touch: secrets and paths live in .env / --db.
 LOCKED_SETTINGS = {"odds_api_key", "cfbd_api_key", "therundown_api_key", "notify_phone", "ntfy_topic",
                    "kalshi_base_url", "db_path"}
-SCAN_KINDS = {"games": {"kalshi_game"}, "props": {"kalshi_prop"}, "pp": {"pp_entry"}, "arb": {"arb"}}
+SCAN_KINDS = {"games": {"kalshi_game"}, "props": {"kalshi_prop"}, "pp": {"pp_entry"}, "arb": {"arb", "middle"}}
 NOTIFY_TEST_TEXT = "GE test - if your phone did not alert, enable ntfy (NTFY_TOPIC in .env)"
 
 
@@ -232,6 +234,7 @@ class Services:
         self._put(f"set.{name}", str(raw))
         self.notifier.enabled = self.settings.notify_enabled
         self.notifier.quiet_hours = self.settings.quiet_hours
+        self.settler.payouts = payout_table(self.settings)  # pp_mode / pp_payouts_json changes
         return self.settings
 
     # -- error handling --------------------------------------------------
@@ -711,26 +714,57 @@ class Services:
                                             None, cfb_models.MODEL_VERSION)
         return out
 
+    def _clv_mult(self) -> dict[str, float]:
+        """Kelly multiplier per league from the CLV of its latest game bets (recorded at kickoff)."""
+        per: dict[str, list[float]] = {}
+        window = self.settings.clv_throttle_window
+        for r in self.conn.execute("SELECT legs_json, clv FROM bets WHERE kind='kalshi_game' AND clv IS NOT NULL "
+                                   "ORDER BY placed_at DESC, id DESC"):
+            gid = (json.loads(r["legs_json"])[0].get("game_id") or "")
+            g = self.registry.get(gid)
+            league = g.league if g is not None else gid.split(":")[0]
+            vals = per.setdefault(league, [])
+            if len(vals) < window:
+                vals.append(r["clv"])
+        return {lg: clv_throttle(v, self.settings.clv_throttle_min) for lg, v in per.items()}
+
     def snapshot(self, now: datetime) -> pipeline.Snapshot:
         games = {g.game_id: g for g in self.registry.all_since(now - timedelta(days=1))}
         exposure = self.lifecycle.open_exposure_cents()
         bets = self.lifecycle.open_bets()
         game_legs = _bet_legs([b for b in bets if b["kind"] == "kalshi_game"])
         prop_legs = _bet_legs([b for b in bets if b["kind"] == "kalshi_prop"])
+        pp_legs = _bet_legs([b for b in bets if b["kind"] == "pp_entry"])
+        pp_players = {leg["player"].lower() for leg in pp_legs if leg.get("player")}
+        positions = self.lifecycle.open_positions()
+        exp = pipeline.open_exposure(positions, {**games, **{
+            gid: g for _, _, legs in positions for leg in legs
+            if (gid := leg.game_id) and gid not in games and (g := self.registry.get(gid)) is not None}})
+        clv_mult = self._clv_mult()
+        gates = dict(self.gates)
+        for league, mult in clv_mult.items():
+            if mult <= 0:  # closing-line value significantly negative: observe only until it recovers
+                gates.update({(league, m): True for m in ("ml", "spread", "total")})
         open_keys = {r["leg_key"] for r in self.conn.execute(
             "SELECT r.leg_key FROM recommendations r JOIN bets b ON b.rec_id = r.id "
             "WHERE b.state='PLACED' AND r.state='PLACED'")}
         return pipeline.Snapshot(
             now=now, games=games, quotes=list(self.latest["quotes"]),
             props=self.latest["props"] + self.manual_props, kalshi=list(self.latest["kalshi"]),
-            predictions=self._predictions(games), gates=dict(self.gates),
+            predictions=self._predictions(games), gates=gates,
             # the ledger already holds open stakes out, so the Kelly bankroll adds them back
             bankroll_cents=self.ledger.balance() + exposure, open_exposure_cents=exposure,
             pp_staked_today_cents=self.lifecycle.pp_staked_today_cents(now, PT),
             margin_models=self.margin_models, player_teams={**self.player_teams, **self.manual_teams},
             open_game_ids={leg["game_id"] for leg in game_legs if leg.get("game_id")},
-            open_players={leg["player"].lower() for leg in prop_legs if leg.get("player")},
-            open_leg_keys=open_keys)
+            # no Kalshi prop on a player already held on Kalshi or in an open PrizePicks entry
+            open_players={leg["player"].lower() for leg in prop_legs if leg.get("player")} | pp_players,
+            open_leg_keys=open_keys,
+            open_game_exposure=exp.game, open_window_exposure=exp.window, open_dir_exposure=exp.direction,
+            placed_today_cents=self.lifecycle.placed_today_cents(now, PT),
+            pp_open_players=pp_players,
+            pp_open_games={leg["game_id"] for leg in pp_legs if leg.get("game_id")},
+            clv_mult=clv_mult)
 
     def _wanted(self, rec: Recommendation, what: str) -> bool:
         venue = "prizepicks" if rec.kind == "pp_entry" else "kalshi"
@@ -814,6 +848,11 @@ class Services:
             self.kalshi_ok = False
         out.append(("info", f"kalshi reachable={self.kalshi_ok}"))
         out.append(("info", 'notify: run "notify test" to confirm your phone alerts'))
+        if "prizepicks" in self.settings.venues and not self.settings.pp_payouts_verified:
+            out.append(("info", "PrizePicks payouts not confirmed: check your app pays 6x for a 3-pick Power "
+                                "and 10x / 2x / 0.4x for a 5-pick Flex, then type: set pp_payouts_verified true "
+                                "(PrizePicks stakes are halved until then). If only a perfect card pays (Arena), "
+                                "type: set pp_mode arena"))
         return out
 
     # -- views -------------------------------------------------------------
@@ -898,7 +937,7 @@ def build_services(settings: Settings, transports: dict[str, httpx.AsyncBaseTran
                           close_games=lambda: services.close_games())
     services = Services(
         settings=settings, conn=conn, ledger=ledger, lifecycle=lifecycle,
-        settler=Settler(conn, lifecycle, registry), teams=teams, registry=registry, budgets=budgets,
+        settler=Settler(conn, lifecycle, registry, payout_table(settings)), teams=teams, registry=registry, budgets=budgets,
         scheduler=scheduler, notifier=notifier, odds=odds, kalshi=kalshi, rundown=rundown, cfbd=cfbd,
         nflverse=NflverseSource(settings.db_path.parent / "nflverse"), console_sink=sink)
     view.clock = lambda: services.clock()

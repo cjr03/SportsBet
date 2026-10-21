@@ -56,8 +56,8 @@ def midnight():
 def test_format_kalshi_ascii_and_fields(rec_kalshi):
     t = format_message(rec_kalshi)
     assert t.isascii() and t.startswith("GE KALSHI BUY YES") and t.endswith(" PT | id 42")
-    # 20 x $0.55 = $11.00 plus the $0.35 taker fee confirm will debit
-    assert "@ $0.55 x20 = $11.35 w/fee | fair 60.0% EV +5.0% | verify availability before placing | 10:05 PT" in t
+    # 20 x $0.55 = $11.00 plus the $0.35 taker fee confirm will debit, shown apart
+    assert "@ $0.55 x20 = $11.00 + $0.35 fee | fair 60.0% EV +5.0% | verify availability before placing | 10:05 PT" in t
 
 
 def test_format_pp_has_confirm(rec_pp):
@@ -178,3 +178,22 @@ def test_cooldown_does_not_hold_back_arbs(conn, rec_arb, noon):
     legs = [replace(leg, price=leg.price - 0.01) for leg in rec_arb.legs]
     b, _ = lc.upsert_recommendation(_rec("arb", legs, qty=10, ev=0.05), noon)
     assert ch.notify(a, noon).ok and ch.notify(b, noon + timedelta(minutes=5)).ok and len(sink) == 2
+
+
+def test_format_kalshi_fee_uses_market_multiplier(rec_kalshi):
+    from dataclasses import replace
+    rec = replace(rec_kalshi, legs=[replace(rec_kalshi.legs[0], fee_multiplier=0.5)])
+    assert "= $11.00 + $0.18 fee" in format_message(rec)
+
+
+def test_format_arb_legging_guidance(rec_arb):
+    from dataclasses import replace
+    legs = [replace(rec_arb.legs[0], worst_price=0.45), replace(rec_arb.legs[1], worst_price=0.52)]
+    t = format_message(replace(rec_arb, legs=legs))
+    assert "Buy KC ML YES first at $0.45 or less, then DEN ML YES at $0.52 or less" in t
+
+
+def test_format_middle_says_not_risk_free(rec_arb):
+    from dataclasses import replace
+    t = format_message(replace(rec_arb, kind="middle", p_win=0.12, stake_cents=1040, tie_risk=False))
+    assert t.isascii() and "Not risk-free" in t and "12%" in t and t.endswith("id 42")

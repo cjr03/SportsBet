@@ -192,7 +192,7 @@ class OpportunityTable(DataTable):
 
 class OpportunityBoard(TabbedContent):
     TABS = {"kalshi_game": "Kalshi Games", "kalshi_prop": "Kalshi Props",
-            "pp_entry": "PrizePicks", "arb": "Arbitrage"}
+            "pp_entry": "PrizePicks", "arb": "Arbitrage", "middle": "Middles (not risk-free)"}
     FLASH_S = 1.5
 
     class ConfirmRequested(Message):

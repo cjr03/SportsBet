@@ -9,7 +9,8 @@ from dotenv import dotenv_values
 _FRACTIONS = (
     "kelly_fraction", "cap_bet", "cap_game", "cap_slate", "cap_pp_daily",
     "kalshi_price_lo", "kalshi_price_hi", "arb_fraction", "arb_max_roi",
-    "odds_reserve_frac",
+    "odds_reserve_frac", "cap_day", "cap_same_dir", "copula_rho", "shrink_game",
+    "shrink_prop_anchored", "shrink_prop_model", "pp_unverified_mult", "arb_min_roi", "middle_max_over",
 )
 
 # env var name -> Settings field (secrets and the optional URL)
@@ -42,6 +43,33 @@ class Settings:
     arb_fraction: float = 0.10
     arb_max_roi: float = 0.08
     odds_reserve_frac: float = 0.10
+    # cumulative caps (fractions of bankroll incl. open stakes): stakes placed per PT day, and
+    # same-direction Kalshi legs on one game (stopgap for same-game correlation)
+    cap_day: float = 0.20
+    cap_same_dir: float = 0.02
+    copula_rho: float = 0.3  # Gaussian-copula correlation of same-direction legs in a game; 0 = off
+    # Kelly multipliers per probability source (parameter-uncertainty shrinkage)
+    shrink_game: float = 1.0
+    shrink_prop_anchored: float = 0.75
+    shrink_prop_model: float = 0.5
+    # rolling closing-line-value throttle for game bets, per league
+    clv_throttle_window: int = 50
+    clv_throttle_min: int = 10
+    # PrizePicks payouts: "fixed" tables or "arena" (only a perfect card pays); structures as
+    # "n-kind"; optional JSON table override {"5-flex": {"5": 10, "4": 2, "3": 0.4}}
+    pp_mode: str = "fixed"
+    pp_payouts_verified: bool = False
+    pp_unverified_mult: float = 0.5
+    pp_structures: tuple[str, ...] = ("3-power", "4-flex", "5-flex", "6-flex", "5-power", "6-power")
+    pp_payouts_json: str = ""
+    pp_max_entries: int = 3
+    pp_brute_force: bool = False
+    # arbs: quotes older than this are not texted; smallest ROI worth legging into
+    arb_stale_seconds: int = 90
+    arb_min_roi: float = 0.01
+    # ladder middles (not risk-free): max cost over $1 per pair; live = sized and texted
+    middle_max_over: float = 0.10
+    middles_live: bool = False
     # behaviour
     venues: tuple[str, ...] = ("kalshi", "prizepicks")
     quiet_hours: tuple[int, int] = (23, 8)
@@ -91,6 +119,10 @@ def _validate(s: Settings) -> None:
         raise ValueError(f"kelly_fraction must be in (0, 1], got {s.kelly_fraction}")
     if s.min_stake_cents < 0 or s.stale_seconds < 0:
         raise ValueError("min_stake_cents and stale_seconds must be >= 0")
+    if s.pp_mode not in ("fixed", "arena"):
+        raise ValueError(f"pp_mode must be fixed or arena, got {s.pp_mode!r}")
+    if s.arb_stale_seconds < 0 or s.pp_max_entries < 0 or s.clv_throttle_window < 1:
+        raise ValueError("arb_stale_seconds and pp_max_entries must be >= 0, clv_throttle_window >= 1")
     if len(s.quiet_hours) != 2 or not all(0 <= h <= 23 for h in s.quiet_hours):
         raise ValueError(f"quiet_hours must be two hours 0-23, got {s.quiet_hours}")
 
