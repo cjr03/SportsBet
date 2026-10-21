@@ -103,7 +103,7 @@ async def test_kpi_inconclusive():
     rows = [{"state": "SETTLED", "result": "won", "stake_cents": 100, "payout_cents": 200,
              "clv": 0.02, "p_win": 0.6}]
     k = compute_kpis(rows, [(T0, 10000), (T0 + timedelta(days=1), 9000)])
-    assert k["n"] == 1 and k["record"] == "1-0-0" and k["max_dd"] == 1000
+    assert k["n"] == 1 and k["record"] == "1-0-0" and k["max_dd"] == 0  # a deposit swing is not a drawdown
     assert k["roi"] == 1.0 and k["clv_pos"] == 1.0
     assert abs(k["brier"] - 0.16) < 1e-9
     app = Harness(KpiTiles())
