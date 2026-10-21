@@ -340,3 +340,31 @@ async def test_skip_key_removes_idea(services_mocked, load):
         await pilot.pause()
         assert svc.lifecycle.get_rec(1).state == "SKIPPED"
         assert app.query_one("#place-empty", Static).display
+
+
+def _bet(svc, placed: str, cost: int, settled: str | None = None, payout: int | None = None) -> None:
+    """A bet row plus its ledger moves, times given in PT on the app clock."""
+    from gridiron_edge.notify.format import PT
+    p = datetime.fromisoformat(placed).replace(tzinfo=PT)
+    s = datetime.fromisoformat(settled).replace(tzinfo=PT) if settled else None
+    cur = svc.conn.execute(
+        "INSERT INTO bets (rec_id, kind, legs_json, stake_cents, fee_cents, placed_at, state, result, "
+        "payout_cents, settled_at) VALUES (0, 'kalshi', '[]', ?, 0, ?, ?, ?, ?, ?)",
+        (cost, p.isoformat(), "SETTLED" if s else "PLACED", None if s is None else
+         "won" if payout else "lost", payout, s.isoformat() if s else None))
+    rows = [(p, "stake", -cost)] + ([(s, "payout", payout)] if s and payout else [])
+    for ts, kind, cents in rows:
+        svc.conn.execute("INSERT INTO ledger (ts, kind, amount_cents, bet_id) VALUES (?,?,?,?)",
+                         (ts.astimezone(UTC).isoformat(), kind, cents, cur.lastrowid))
+
+
+def test_today_profit_counts_bets_settled_today_that_were_placed_yesterday(services_mocked):
+    svc = services_mocked()
+    svc.ledger.deposit(100_000)
+    _bet(svc, "2026-10-30T20:00", 1000, "2026-10-31T09:00")          # lost today: -$10
+    _bet(svc, "2026-10-30T20:00", 1000, "2026-10-31T10:00", 1900)    # won today: +$9
+    _bet(svc, "2026-10-30T19:00", 1000, "2026-10-30T23:00", 1900)    # won yesterday: not today
+    _bet(svc, "2026-10-31T08:00", 500)                               # placed today, still open
+    _bet(svc, "2026-10-30T18:00", 700)                               # placed yesterday, still open
+    app = GridironApp(svc, clock=lambda: NOW)  # 11:05 PT on Oct 31
+    assert app._today_profit(NOW) == -100

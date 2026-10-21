@@ -205,17 +205,17 @@ class GridironApp(App):
         bets.show_empty(None if views else "No open bets. Bets you confirm show up here.")
 
     def _today_profit(self, now: datetime) -> int:
-        """Today's win/loss: ledger moves since PT midnight, ignoring deposits and withdrawals, with
-        money moved into still-open bets counted as not lost yet."""
-        # ledger rows carry wall-clock times (as Ledger.today_change assumes); bets the app clock
-        start = datetime.now(PT).replace(hour=0, minute=0, second=0, microsecond=0)
-        moved = self.services.conn.execute(
-            "SELECT COALESCE(SUM(amount_cents), 0) FROM ledger WHERE ts >= ? "
-            "AND kind NOT IN ('deposit','withdraw')", (start.astimezone(UTC).isoformat(),)).fetchone()[0]
+        """Today's win/loss: net result of every bet settled since PT midnight, whenever it was placed.
+        Same as ledger moves since midnight (minus deposits/withdrawals) + cost of bets open now - cost
+        of bets open at midnight, but read from the bets table so one clock (the app's) sets both edges.
+        Money in still-open bets counts as not lost yet."""
         day = now.astimezone(PT).replace(hour=0, minute=0, second=0, microsecond=0)
-        held = sum(b["stake_cents"] + b["fee_cents"] for b in self.services.lifecycle.open_bets()
-                   if datetime.fromisoformat(b["placed_at"]) >= day)
-        return moved + held
+        return sum(
+            (b["payout_cents"] or 0) - b["stake_cents"] - b["fee_cents"]
+            for b in self.services.conn.execute(
+                "SELECT stake_cents, fee_cents, payout_cents, settled_at FROM bets "
+                "WHERE state != 'PLACED' AND settled_at IS NOT NULL")
+            if datetime.fromisoformat(b["settled_at"]) >= day)
 
     def refresh_views(self) -> None:
         s, now = self.services, self.clock()
