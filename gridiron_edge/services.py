@@ -29,7 +29,7 @@ from gridiron_edge.models import Prediction
 from gridiron_edge.models import cfb as cfb_models
 from gridiron_edge.models import nfl as nfl_models
 from gridiron_edge.models.blend import BlendFit, walkforward_ats
-from gridiron_edge.models.cfb import CfbRatings, cfb_prior
+from gridiron_edge.models.cfb import CfbRatings, cfb_prior, games_played
 from gridiron_edge.models.nfl import NflRatings
 from gridiron_edge.models.props import STAT_COLUMNS, PropProjector
 from gridiron_edge.notify.chain import NotifyChain
@@ -399,7 +399,7 @@ class Services:
         try:
             if prev:
                 last = CfbRatings.fit(prev, {}, date(year, 3, 1))
-                priors, hfa = cfb_prior(last.ratings, returning, talent), last.hfa
+                priors, hfa = cfb_prior(last.ratings, returning, talent, games_played(prev)), last.hfa
             model = CfbRatings.fit(cur, priors, now.date())
         except np.linalg.LinAlgError:  # no completed games yet: ratings are the priors alone
             model = CfbRatings(priors, hfa) if priors else None
