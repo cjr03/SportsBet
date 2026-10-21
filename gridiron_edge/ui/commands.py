@@ -35,7 +35,7 @@ HELP: list[tuple[str, str]] = [
     ("refresh [nfl|cfb] [--force]", "pull fresh prices (--force also uses sportsbook credits)"),
     ("bets [open|settled]", "list your open or finished bets"),
     ("settle <id> <won|lost|refund> [payout]", "mark a bet as finished by hand"),
-    ('pp add "<player>" <stat> <line> <team> <game_id>', "type in a PrizePicks line yourself"),
+    ('pp add "<player>" <stat> <line> <team> <game_id>', "type in a PrizePicks line yourself (game id as in the Scores tab, e.g. nfl:20261025:DAL@PHI)"),
     ("pp refresh", "load PrizePicks lines now for games in the next 24 hours (shows the credit cost first; "
                    "pp refresh yes runs it)"),
     ("quota", "how many free API calls are left"),
@@ -43,7 +43,7 @@ HELP: list[tuple[str, str]] = [
     ("set <setting> <value>", "change a setting"),
     ("venues", "which betting sites are in use"),
     ("backtest <nfl|cfb> <yyyy>-<yyyy>", "test the model on past seasons"),
-    ("fit blend", "recheck which markets our model has earned"),
+    ("fit blend", "recheck which kinds of bets our model is trusted to text"),
     ("report", "how the bets have done so far"),
     ("drift reset <nfl|cfb> <ml|spread|total|prop|prizepicks> / drift reset all",
      "turn a paused kind of bet back on after our prices fell behind the market"),
@@ -165,7 +165,7 @@ def parse_command(text: str) -> Command:
                 raise _usage(u)
             start, end = _int(a, u), _int(b, u)
             if start > end:
-                raise _usage(u)
+                raise CommandError(f"The first year must come before the second, e.g. backtest {league} {end}-{start}")
             return Command("backtest", {"league": league, "start": start, "end": end})
         case "backtest", _:
             raise _usage("backtest <nfl|cfb> <yyyy>-<yyyy>")

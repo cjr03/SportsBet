@@ -413,3 +413,23 @@ async def test_pp_refresh_asks_first_then_loads(services_mocked):
         await pilot.pause()
         text = "\n".join(log_lines(app))
         assert "Player lines for Bears at Seahawks:" in text and "PrizePicks" in text
+
+
+async def test_help_lines_keep_commands_lowercase(services_mocked):
+    svc = services_mocked()
+    app = GridironApp(svc, clock=lambda: NOW)
+    async with app.run_test(size=SIZE) as pilot:
+        await app.workers.wait_for_complete()
+        await submit(app, pilot, "help")
+        text = "\n".join(log_lines(app))
+        assert "Type: pp add " in text and "Type: confirm <id> [price] [contracts]  -  You placed" in text
+        assert "Pp add" not in text and "Notify test" not in text and "Keys: 1-5 switch tabs" in text
+
+
+async def test_set_message_uses_plain_words(services_mocked):
+    svc = services_mocked()
+    app = GridironApp(svc, clock=lambda: NOW)
+    async with app.run_test(size=SIZE) as pilot:
+        await app.workers.wait_for_complete()
+        await submit(app, pilot, "set kelly_fraction 0.2")
+        assert log_lines(app)[-1].endswith("Setting changed: bet size (share of the ideal amount) is now 0.2.")

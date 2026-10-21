@@ -125,7 +125,7 @@ def place_now_cells(rec: Recommendation, now: datetime, games: dict[str, Game],
 
 
 PLACE_NOW_COLUMNS = ("#", "Where", "Bet", "Price", "Stake", "Expected profit", "Time left", "Kickoff")
-OPEN_BET_COLUMNS = ("#", "Bet", "Stake", "Game", "Worth now", "Beat close by")
+OPEN_BET_COLUMNS = ("#", "Bet", "Stake", "Game", "Worth now", "Price vs closing")
 
 
 def game_text(g: Game | None, now: datetime, names: d.Names = d.DEFAULT_NAMES) -> str:
@@ -134,11 +134,11 @@ def game_text(g: Game | None, now: datetime, names: d.Names = d.DEFAULT_NAMES) -
     away, home = names.team(g.league, g.away), names.team(g.league, g.home)
     score = f"{away} {g.away_pts}, {home} {g.home_pts}"
     if g.status == "live" and g.home_pts is not None and g.away_pts is not None:
-        when = f" - {g.period} {g.clock or ''}".rstrip() if g.period else " - live"
+        when = f" - {d.period_text(g.period, g.clock)}" if g.period else " - live"
         return score + when
     if g.status == "final" and g.home_pts is not None and g.away_pts is not None:
         return f"Final: {score}"
-    return f"Kickoff {d.when(g.kickoff, now)}"
+    return f"Kickoff {d.when(g.kickoff, now)} PT"
 
 
 @dataclass
@@ -201,7 +201,12 @@ def open_bet_view(bet, games: dict[str, Game], markets: dict[str, KalshiMarket],
             worth = f"{d.money(total)} ({sign}{d.money(abs(pnl))})"
     clv = bet["clv"]
     return OpenBetView(bet["id"], d.bet_row_text(bet, names), d.money(paid), game_text(game, now, names),
-                       worth, "not yet" if clv is None else f"{clv:+.1%}", pnl)
+                       worth, "not yet" if clv is None else close_text(clv), pnl)
+
+
+def close_text(clv: float) -> str:
+    """'price 0.8% better than closing' / '... worse than closing' (never a minus sign after 'beat')."""
+    return f"price {abs(clv):.1%} {'better' if clv >= 0 else 'worse'} than closing"
 
 
 def empty_reason(now: datetime, *, odds_key: bool, games: list[Game], markets: list[KalshiMarket],
@@ -225,6 +230,6 @@ def empty_reason(now: datetime, *, odds_key: bool, games: list[Game], markets: l
         return f"Kalshi lines for the {d.when(upcoming[0].kickoff, now)} games aren't open yet." + tail
     leagues = {g.league for g in upcoming}
     if all(gates.get((lg, m), False) for lg in leagues for m in ("ml", "spread", "total")):
-        return ("Every market is tracking-only until our numbers prove themselves, "
+        return ("Every market is watch-only (shown, not texted) until our numbers prove themselves, "
                 "so nothing is suggested as a bet." + tail)
     return "No good bets right now." + tail

@@ -200,7 +200,7 @@ def _describe(rec: Recommendation, names: Names | None = None) -> str:
     venue = "PrizePicks" if rec.kind == "pp_entry" else "Kalshi"
     what = bet_text(rec, names) if names else bet_text(rec)
     if rec.observe_only:
-        return f"#{rec.id} {venue}: {what} (tracking only, not a bet yet)"
+        return f"#{rec.id} {venue}: {what} (watch-only: shown, not texted)"
     label = "locked profit" if rec.kind == "arb" else "expected profit"
     return (f"#{rec.id} {venue}: {what} - bet {money(rec.stake_cents)}, "
             f"{label} about {money(expected_profit_cents(rec))}")
@@ -272,7 +272,7 @@ STEP_WORDS = {"teams": "loading college teams", "games": "loading the schedule",
 def _plural(n: int, word: str, many: str | None = None) -> str:
     """'1 game', '2 games' (with commas for big numbers)."""
     return f"{n:,} {word if n == 1 else many or word + 's'}"
-_GATE_LABEL = {"nfl": "NFL spreads/moneylines", "cfb": "College football bets"}
+_GATE_LABEL = {"nfl": "NFL point-spread and game-winner bets", "cfb": "College football bets"}
 
 
 def _gate_label(league: str) -> str:
@@ -1452,7 +1452,7 @@ class Services:
         out.append(("info", 'Texts: type "notify test" to check that your phone gets them.'))
         if "prizepicks" in self.settings.venues and not self.settings.pp_payouts_verified:
             table = payout_table(self.settings)
-            out.append(("info", "PrizePicks payouts not confirmed: check your app "
+            out.append(("info", "PrizePicks payouts not confirmed: check that your app "
                                 f"{payouts_text(table.get((3, 'power'), {}))} on a 3-pick Power Play, and "
                                 f"{payouts_text(table.get((5, 'flex'), {})).removeprefix('pays ')} on a 5-pick "
                                 "Flex Play, then type: "
@@ -1462,7 +1462,8 @@ class Services:
         return out
 
     # -- evaluation ----------------------------------------------------------
-    _EXTRA_PREFIXES = ("Locked-profit bets made", "Beat the closing price", "Accuracy score (lower is better): ours")
+    _EXTRA_PREFIXES = ("Locked-profit bets made", "Bets you placed got prices", "All bet ideas, placed or not",
+                       "Accuracy score (lower is better): ours")
 
     def performance(self, now: datetime) -> dict:
         """What the Performance tab shows: the KPI tiles plus, from the evaluation report, the extra

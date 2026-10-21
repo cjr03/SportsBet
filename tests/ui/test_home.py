@@ -61,7 +61,7 @@ def test_place_now_cells_plain():
     cells = home.place_now_cells(rec(41), NOW, {GID: GAME})
     assert cells[0] == "41" and cells[1] == "Kalshi"
     assert cells[2] == "Eagles win by 4 or more points vs Cowboys"
-    assert cells[3] == "47c" and cells[4] == "$18.80"
+    assert cells[3] == "47 cents" and cells[4] == "$18.80"
     assert cells[5] == "$2.50" and cells[6] == "50 min left" and cells[7] == "1:20 PM"
     arb = rec(42, kind="arb", legs=[leg(line=None), leg(team="DAL", line=None, price=0.48)], qty=20)
     assert home.place_now_cells(arb, NOW, {GID: GAME})[1] == "Kalshi - Locked profit"
@@ -79,10 +79,11 @@ def test_open_bet_kalshi_live_with_value():
     g = replace(GAME, status="live", home_pts=14, away_pts=10, period="Q2", clock="3:00")
     v = home.open_bet_view(bet_row(clv=0.021), {GID: g}, {"KXNFLSPREAD-T": market(yes_bid=0.60)}, NOW)
     assert v.text == "Eagles win by 4 or more points vs Cowboys" and v.stake == "$19.50"
-    assert v.game == "Cowboys 10, Eagles 14 - Q2 3:00"
+    assert v.game == "Cowboys 10, Eagles 14 - 2nd quarter, 3:00 left"
     # 40 x 60c = $24.00 less a $0.68 fee to sell, against $19.50 paid
     assert v.pnl_cents == 2400 - 68 - 1950 and v.worth == "$23.32 (+$3.82)"
-    assert v.close == "+2.1%"
+    assert v.close == "price 2.1% better than closing"
+    assert home.close_text(-0.008) == "price 0.8% worse than closing"
 
 
 def test_open_bet_pp_legs_and_scheduled():
@@ -92,7 +93,7 @@ def test_open_bet_pp_legs_and_scheduled():
                   stake_cents=1000)
     stats = {"P0": 60.0, "P1": 20.0}
     v = home.open_bet_view(row, {GID: GAME}, {}, NOW, stat_lookup=lambda g, p, s: stats.get(p, "pending"))
-    assert v.worth == "1 hit, 1 missed, 1 pending" and v.game == "Kickoff 1:20 PM" and v.close == "not yet"
+    assert v.worth == "1 hit, 1 missed, 1 pending" and v.game == "Kickoff 1:20 PM PT" and v.close == "not yet"
 
 
 def test_open_bet_pp_exact_line_is_a_push():
@@ -118,9 +119,9 @@ def test_empty_reasons():
     assert "isn't set" in home.empty_reason(NOW, **{**base, "odds_key": False})
     assert home.empty_reason(NOW, **{**base, "markets": []}) == \
         "Kalshi lines for the 1:20 PM games aren't open yet. Next check in 3 min."
-    assert "tracking-only" not in home.empty_reason(NOW, **{**base, "gates": {("nfl", "ml"): True}})
+    assert "watch-only" not in home.empty_reason(NOW, **{**base, "gates": {("nfl", "ml"): True}})
     gated = {("nfl", m): True for m in ("ml", "spread", "total")} | {("cfb", "ml"): False}
-    assert "tracking-only" in home.empty_reason(NOW, **{**base, "gates": gated})
+    assert "watch-only" in home.empty_reason(NOW, **{**base, "gates": gated})
     assert home.empty_reason(NOW, **{**base, "games": []}).startswith("No games on the schedule")
 
 

@@ -11,8 +11,8 @@ from gridiron_edge.types import Recommendation
 PT = ZoneInfo("America/Los_Angeles")
 MAX_LEN = 480
 SHORT_STATS = {"passing": "pass", "rushing": "rush", "receiving": "rec", "touchdowns": "TDs"}
-TEST_TEXT = ("Gridiron Edge test text. If your phone did not buzz, turn on ntfy phone alerts "
-             "(set NTFY_TOPIC in .env).")
+TEST_TEXT = ("Gridiron Edge test text. If your phone did not buzz, set up the backup phone alerts "
+             "(NTFY_TOPIC in .env).")
 
 
 def _ascii(text: str) -> str:
@@ -28,9 +28,10 @@ def _kalshi(rec: Recommendation, tz: ZoneInfo, names: d.Names) -> str:
     contract = d.leg_text(replace(leg, side="yes"), names)
     side = "Yes" if leg.side == "yes" else "No"
     happens = "" if leg.side == "yes" else " (you win if it does NOT happen)"
+    ours = "We put this at" if leg.side == "yes" else "We put your chance of winning at"
     return (f'Bet idea #{rec.id} (Kalshi): Buy {rec.qty} "{side}" contracts on "{contract}"{happens} '
             f"at {round(leg.price * 100)} cents. Cost {d.money(d.cost_cents(rec))} + "
-            f"{d.money(d.fee_cents(rec))} fee. We put this at {d.pct(leg.p_fair)}; "
+            f"{d.money(d.fee_cents(rec))} fee. {ours} {d.pct(leg.p_fair)}; "
             f"the price implies {d.pct(leg.price)}. Expected profit about "
             f"{d.money(d.expected_profit_cents(rec))}. Place before {d.clock(rec.expires_at, tz)} PT. "
             + _tail(rec))
@@ -60,7 +61,7 @@ def _pp(rec: Recommendation, tz: ZoneInfo, names: d.Names, short: int = 0,
     n, _, kind = (rec.structure or "").partition("-")
     table = (payouts or PAYOUTS).get((int(n), kind), {}) if n.isdigit() else {}
     pays = payouts_text(table)
-    check = f"Check the app {pays}. " if pays and short < 3 else "Check the payouts in the app. "
+    check = f"Check the app says it {pays}. " if pays and short < 3 else "Check the payouts in the app. "
     picks = " ".join(pick(i, leg) for i, leg in enumerate(rec.legs, 1))
     return (f"Bet idea #{rec.id} (PrizePicks {d.structure_text(rec.structure)}, "
             f"{d.money(rec.stake_cents)}): {picks}. Expected profit about "

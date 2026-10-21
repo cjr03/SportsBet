@@ -151,7 +151,7 @@ async def test_nflverse_refresh_refits_gates_when_model_appears(services_mocked)
     out = await svc.run_job(Job("nflverse_refresh"), NOW)
     assert not [ln for ln in out if ln[0] == "error"], out
     assert svc.gates[("nfl", "ml")] is True
-    assert any("NFL spreads/moneylines" in m for _, m in out)
+    assert any("NFL point-spread and game-winner bets" in m for _, m in out)
 
 
 async def test_fits_and_caps_reach_the_snapshot(services_mocked):
@@ -182,7 +182,7 @@ async def test_gate_log_lines_are_plain_english(services_mocked):
     svc.backtest_totals = totals
     out = await svc.fit_gates(NOW)
     msgs = [m for _, m in out]
-    nfl = next(m for m in msgs if m.startswith("NFL spreads/moneylines"))
+    nfl = next(m for m in msgs if m.startswith("NFL point-spread and game-winner bets"))
     assert "checked on 600 past games" in nfl
     assert "not yet trusted, bets are shown but not texted" in nfl
     tot = next(m for m in msgs if m.startswith("NFL total-points bets"))
@@ -202,7 +202,7 @@ async def test_live_gate_line_is_plain_english(services_mocked):
     svc.backtest = backtest
     await svc.fit_gates(NOW - timedelta(days=7))
     out = await svc.fit_gates(NOW)
-    nfl = next(m for _, m in out if m.startswith("NFL spreads/moneylines"))
+    nfl = next(m for _, m in out if m.startswith("NFL point-spread and game-winner bets"))
     assert "trusted, bets are texted" in nfl
     assert not any(j in nfl for j in JARGON), nfl
 

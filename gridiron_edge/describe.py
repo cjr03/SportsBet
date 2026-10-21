@@ -81,6 +81,28 @@ def when(t: datetime, now: datetime, tz: ZoneInfo = PT) -> str:
     return clock(t, tz) if same_day else f"{t.astimezone(tz):%a} {clock(t, tz)}"
 
 
+_ORDINALS = {1: "1st", 2: "2nd", 3: "3rd", 4: "4th"}
+
+
+def period_text(period: str | None, game_clock: str | None, short: bool = False) -> str:
+    """A live game's period in words: '3rd quarter, 12:34 left' ('3rd qtr 12:34' when short),
+    'overtime' for period 5 and up, 'halftime'. period is TheRundown's number (or e.g. 'Q2')."""
+    raw = (period or "").strip()
+    if "half" in raw.lower():
+        return "halftime"
+    digits = "".join(c for c in raw if c.isdigit())
+    if not digits:
+        return raw
+    n, left = int(digits), (game_clock or "").strip()
+    name = _ORDINALS.get(n, "overtime") if n >= 1 else raw
+    if short:
+        name = name if n >= 5 else f"{name} qtr"
+        return f"{name} {left}".strip()
+    if n < 5:
+        name += " quarter"
+    return f"{name}, {left} left" if left else name
+
+
 def countdown(deadline: datetime, now: datetime) -> str:
     secs = (deadline - now).total_seconds()
     if secs <= 0:
@@ -106,7 +128,10 @@ def _at_least(line: float) -> int:
 
 
 _STAT_PARTS = {"yds": "yards", "tds": "touchdowns", "td": "touchdown", "rec": "receiving", "reception": "receiving",
-               "pass": "passing", "rush": "rushing", "int": "interceptions", "ints": "interceptions"}
+               "pass": "passing", "rush": "rushing", "int": "interceptions", "ints": "interceptions", "pts": "points"}
+
+
+_KINDS = {"passing", "rushing", "receiving"}
 
 
 def stat_words(stat: str | None) -> str:
@@ -114,7 +139,14 @@ def stat_words(stat: str | None) -> str:
     key = (stat or "").removeprefix("player_")
     if key in STAT_WORDS:
         return STAT_WORDS[key]
-    return " ".join(_STAT_PARTS.get(w, w) for w in key.split("_") if w)
+    words: list[str] = []
+    for w in (w for w in key.split("_") if w):
+        part = _STAT_PARTS.get(w, w)
+        if part in _KINDS and words and words[-1].rsplit(" + ", 1)[-1] in _KINDS:
+            words[-1] += f" + {part}"  # a combined stat: 'passing + rushing + receiving yards'
+        else:
+            words.append(part)
+    return " ".join(words)
 
 
 def margin_text(team: str, line: float, yes: bool = True) -> str:
@@ -228,8 +260,8 @@ def expected_profit_cents(rec: Recommendation) -> int:
 
 def price_text(rec: Recommendation) -> str:
     if rec.kind == "pp_entry":
-        return "entry"
-    return " + ".join(f"{round(g.price * 100)}c" for g in rec.legs)
+        return "PrizePicks entry"
+    return " + ".join(f"{round(g.price * 100)} cents" for g in rec.legs)
 
 
 # -- the "Why this bet?" panel ----------------------------------------------------

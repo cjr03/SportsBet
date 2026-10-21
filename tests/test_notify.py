@@ -81,6 +81,7 @@ def test_format_kalshi_no_side_explains(rec_kalshi):
     _plain(t)
     assert '"No" contracts on "Eagles win by 4 or more points vs Cowboys"' in t
     assert "you win if it does NOT happen" in t and t.endswith("When placed, type: confirm 41")
+    assert "We put your chance of winning at 58%; the price implies 53%." in t
 
 
 def test_format_pp_plain_english(rec_pp):
@@ -89,7 +90,7 @@ def test_format_pp_plain_english(rec_pp):
     assert t.startswith("Bet idea #42 (PrizePicks 3-pick Flex Play, $10.00): "
                         "1) Jalen Hurts MORE than 1.5 passing touchdowns (61%) "
                         "2) Player 1 MORE than 51.5 receiving yards (60%) ")
-    assert "Expected profit about $0.94." in t and "Check the app pays 3 times your entry for 3 right, your entry back for 2." in t
+    assert "Expected profit about $0.94." in t and "Check the app says it pays 3 times your entry for 3 right, your entry back for 2." in t
     assert "Lines as of 10:05 AM PT." in t and t.endswith("When placed, type: confirm 42")
 
 

@@ -152,7 +152,7 @@ class TheRundownClient:
                 self.malformed += 1
                 continue
             away_code, home_code = codes
-            period = sc.get("game_period")
+            period = "halftime" if sc.get("event_status") == "STATUS_HALFTIME" else sc.get("game_period")
             out.append(Game(
                 game_id, league, kickoff.year if kickoff.month >= 7 else kickoff.year - 1,
                 None, kickoff, home_code, away_code,

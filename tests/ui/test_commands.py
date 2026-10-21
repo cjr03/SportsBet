@@ -66,3 +66,8 @@ def test_help_covers_every_command_in_plain_english():
         assert word in usages, word
     for _, what in HELP:
         assert not any(j in what for j in ("EV", "CLV", "Brier", "fair"))
+
+
+def test_backtest_years_backwards_says_what_is_wrong():
+    with pytest.raises(CommandError, match=r"^The first year must come before the second, e\.g\. backtest nfl 2018-2025$"):
+        parse_command("backtest nfl 2025-2018")

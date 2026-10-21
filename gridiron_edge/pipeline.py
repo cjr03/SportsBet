@@ -730,7 +730,7 @@ def pp_blocker(snap: Snapshot, s: Settings, projector: Projector) -> tuple[str, 
     if not lines:
         return ("no_lines", {})
     if not any(ln.fresh for ln in lines):
-        return ("stale", {})
+        return ("stale", {"seconds": s.props_stale_seconds})
     table, allowed = payout_table(s), allowed_structures(s)
     sts = [st for st in allowed if st in table and table[st].get(st[0], 0) > 1]
     if not sts:

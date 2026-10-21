@@ -44,8 +44,8 @@ def needed_text(s: Settings) -> str:
         return "None of the allowed entry types can pay off with these payouts."
     (n, kind), be = best
     return (f"A {d.structure_text(f'{n}-{kind}')} needs about {be:.1%} per pick to break even "
-            f"(we ask {be + s.pp_margin_market:.1%} with sportsbook prices, "
-            f"{be + s.pp_margin_model:.1%} from our model alone).")
+            f"(we only pick it at {be + s.pp_margin_market:.1%} or more using sportsbook prices, "
+            f"{be + s.pp_margin_model:.1%} using our model alone).")
 
 
 def reason_text(code: str, info: dict) -> str:
@@ -54,14 +54,16 @@ def reason_text(code: str, info: dict) -> str:
         case "no_lines":
             return "No PrizePicks lines are loaded yet."
         case "stale":
-            return "The loaded lines are over 3 hours old, too old to use."
+            mins = round(info.get("seconds", 3 * 3600) / 60)
+            age = (f"{mins // 60} hour{'s' * (mins != 60)}" if mins % 60 == 0 else f"{mins} minutes")
+            return f"The loaded lines are over {age} old, too old to use."
         case "no_structures":
             return "None of the allowed entry types can pay off with these payouts."
         case "few_lines":
             n, unknown = info["priced"], info.get("no_team", 0)
             why = (f" ({unknown} skipped: players whose team we don't know yet)" if unknown else "")
-            return (f"Not enough lines - we can use only {n} pick{'s' * (n != 1)}{why} and the smallest "
-                    f"entry needs {info['need']}.")
+            usable = "we can't use any picks yet" if n == 0 else f"we can use only {n} pick{'s' * (n != 1)}"
+            return f"Not enough lines - {usable}{why} and the smallest entry needs {info['need']}."
         case "few_good":
             good = info["good"]
             return (f"Not enough good picks - {'none' if good == 0 else f'only {good}'} clear the needed "
@@ -120,7 +122,7 @@ def _by_game(view: PPView) -> list[tuple[Game, list[PPLine]]]:
 
 def _next_text(view: PPView, now: datetime) -> str:
     if view.next_load is not None and view.next_load > now:
-        return f"More lines load about {d.when(view.next_load, now)}, 3 hours before kickoff."
+        return f"More lines load about {d.when(view.next_load, now)} PT, 3 hours before kickoff."
     return "More lines load about 3 hours before each kickoff."
 
 
@@ -147,12 +149,12 @@ def board_lines(view: PPView, now: datetime, names: d.Names = d.DEFAULT_NAMES) -
                 'If they never show up, your odds plan may not include PrizePicks; type lines in with "pp add".']
     stamps = [ln.fetched_at for ln in view.lines if ln.game_id in view.games]
     n = sum(len(lines) for _, lines in groups)
-    out = [f"Lines as of {d.when(max(stamps), now)} - {n} line{'s' * (n != 1)} for "
+    out = [f"Lines as of {d.when(max(stamps), now)} PT - {n} line{'s' * (n != 1)} for "
            f"{len(groups)} game{'s' * (len(groups) != 1)}. " + _next_text(view, now),
            needed_text(view.settings),
            _entry_text(view), ""]
     for g, lines in groups:
-        out.append(f"{_matchup(g, names)} - kickoff {d.when(g.kickoff, now)}")
+        out.append(f"{_matchup(g, names)} - kickoff {d.when(g.kickoff, now)} PT")
         gated = view.model_gated.get(g.league, True)
         out += [f"  {line_text(ln, gated)}" for ln in lines]
         out.append("")

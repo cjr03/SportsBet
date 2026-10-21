@@ -217,7 +217,7 @@ def test_performance_adds_report_calibration_warnings_and_pauses(services_mocked
     assert any("type: drift reset nfl spread" in w for w in perf["warnings"])
     assert sum("drift reset nfl spread" in w for w in perf["warnings"]) == 1  # one pause line, not two
     assert sum("paused" in w.lower() for w in perf["warnings"]) == 1
-    assert any(x.startswith("Beat the closing price") for x in perf["extra"])
+    assert any("than the closing price on average" in x for x in perf["extra"])
     for line in perf["warnings"] + perf["extra"]:
         assert line.isascii() and not any(j in line for j in ("CLV", "Brier", "ROI", "EV "))
 
@@ -228,13 +228,13 @@ def test_kpi_tiles_show_calibration_and_report_lines():
     tiles = KpiTiles()
     tiles.update = lambda *_: None  # render text only
     tiles.update_kpis({"roi": 0.05, "roi_ci": (-0.1, 0.2), "n": 3, "record": "2-1-0", "max_dd": 0,
-                       "extra": ["Beat the closing price (higher is better): +1.0%."],
+                       "extra": ["Bets you placed got prices 1.0% better than the closing price on average (3 bets)."],
                        "calibration": ["When we said 60-80%, it happened 67% of the time (3 bets)"],
                        "warnings": ["Warning: something"]})
     lines = tiles.text.split("\n")
     i = lines.index("How often our chances came true:")
     assert lines[i + 1].strip().startswith("When we said 60-80%") and lines[-1] == "Warning: something"
-    assert "Beat the closing price (higher is better): +1.0%." in lines
+    assert "Bets you placed got prices 1.0% better than the closing price on average (3 bets)." in lines
 
 
 def test_calibration_lines_plain_english():

@@ -68,10 +68,20 @@ def middle_window(legs: list[Leg], names: d.Names = d.DEFAULT_NAMES) -> str:
             return f"the total lands on exactly {points(a)}" if a == b else f"the total lands between {a} and {b} points"
         if a >= 1:
             return f"{name(lo.team)} win by {points(a)}" if a == b else f"{name(lo.team)} win by {a} to {b} points"
-        return f"{name(lo.team)} margin ends between {a} and {b} points (minus means they lose)"
+        if b < 0:
+            return f"{name(lo.team)} lose by {-b} to {points(-a)}" if a != b else f"{name(lo.team)} lose by {points(-a)}"
+        top = "a tie" if b == 0 else f"winning by {points(b)}"
+        if a < 0:
+            return f"{name(lo.team)} finish anywhere from losing by {-a} to {top}"
+        return "the game ends in a tie" if b == 0 else f"{name(lo.team)} tie or win by up to {points(b)}"
     x, y = legs  # cross: NO on each team's spread; margin between -floor(y) and floor(x)
-    return (f"the final margin is between {name(y.team)} by {points(math.floor(y.line or 0))} "
-            f"and {name(x.team)} by {points(math.floor(x.line or 0))} (a tie counts)")
+
+    def win(code: str | None, n: int) -> str:
+        t = team_label(code, league, names)
+        return f"{'an' if t[:1].upper() in 'AEIOU' else 'a'} {t} win by {n}"
+
+    fy, fx = math.floor(y.line or 0), math.floor(x.line or 0)
+    return f"the game ends anywhere from {win(y.team, fy)} to {win(x.team, fx)}, ties included"
 
 
 def has_tie_split(rules: str) -> bool:

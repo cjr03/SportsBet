@@ -2,7 +2,7 @@ from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 from textual.app import App
-from textual.widgets import DataTable, Input
+from textual.widgets import DataTable, Input, Label
 
 from gridiron_edge.types import Game, Leg, Recommendation
 from gridiron_edge.ui.screens import ConfirmScreen
@@ -104,6 +104,23 @@ async def test_confirm_modal_returns_values():
         assert app.result == (0.47, 30)
 
 
+async def test_confirm_modal_prizepicks_has_no_price_or_contracts():
+    leg = Leg(venue="prizepicks", description="x", side="over", price=0.0, p_fair=0.6, game_id="g",
+              player="Jalen Hurts", stat="pass_tds", line=1.5, team="PHI")
+    pp = Recommendation(id=42, kind="pp_entry", legs=[leg] * 5, stake_cents=1000, qty=None, ev=0.09,
+                        p_win=0.3, structure="5-flex", snapshot_ts=T0, expires_at=T0 + timedelta(hours=1))
+    app = Harness()
+    async with app.run_test() as pilot:
+        app.push_screen(ConfirmScreen(pp), lambda r: setattr(app, "result", r))
+        await pilot.pause(0.3)
+        assert not app.screen.query("#price") and not app.screen.query("#qty")
+        title = str(app.screen.query(Label).first().render())
+        assert title == "Did you place PrizePicks entry #42 ($10.00, 5-pick Flex Play)?"
+        await pilot.click("#ok")
+        await pilot.pause(0.3)
+        assert app.result == (None, None)
+
+
 async def test_confirm_modal_rejects_bad_price():
     app = Harness()
     async with app.run_test() as pilot:
@@ -156,12 +173,13 @@ async def test_event_log_records_kind():
     app = Harness(EventLog())
     async with app.run_test() as pilot:
         log = app.query_one(EventLog)
-        log.event("deposit", "added $100.00")
+        log.event("deposit", "added $100.00", T0)  # 17:00 UTC = 10:00 AM PT
+        log.event("info", "later", T0 + timedelta(hours=3, minutes=28))
         await pilot.pause()
-        assert len(log.lines_text) == 1
+        assert len(log.lines_text) == 2
         line = log.lines_text[0]
         assert "deposit" in line and "added $100.00" in line
-        assert line[2] == ":" and line[5] == ":"
+        assert line.startswith("10:00 AM ") and log.lines_text[1].startswith(" 1:28 PM ")
 
 
 async def test_quota_low_class_and_header():

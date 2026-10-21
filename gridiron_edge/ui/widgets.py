@@ -106,7 +106,10 @@ class KpiTiles(Static):
             return "not enough data" if v is None else f"{v * 100:{sign}.1f}%"
 
         roi, (lo, hi) = k.get("roi"), k.get("roi_ci") or (None, None)
-        profit = f"Profit per $1 staked: {pct(roi)}"
+        profit = f"Return on money bet: {pct(roi)}"
+        if roi is not None:
+            c = round(abs(roi) * 100)
+            profit += f" (about {c} cent{'s' * (c != 1)} {'made' if roi >= 0 else 'lost'} per $1)"
         if lo is not None and hi is not None:
             profit += f" (likely range {pct(lo)} to {pct(hi)})"
         clv = k.get("clv_mean")
@@ -214,7 +217,7 @@ class ScoresPanel(DataTable):
                 state = self._live_cell(g, True)
                 self._live_keys.append(g.game_id)
             elif g.status == "scheduled":
-                state = Text(f"{g.kickoff.astimezone(d.PT):%a} {d.clock(g.kickoff)}")
+                state = Text(f"{g.kickoff.astimezone(d.PT):%a} {d.clock(g.kickoff)} PT")
             else:
                 state = Text(g.status.replace("_", " ").capitalize())
             matchup = f"{names.team(g.league, g.away)} at {names.team(g.league, g.home)}"
@@ -226,7 +229,7 @@ class ScoresPanel(DataTable):
     def _live_cell(g: Game, lit: bool) -> Text:
         cell = Text("LIVE", style=f"bold {LOSS}" if lit else "dim")
         if g.period:
-            cell.append(f" {g.period} {g.clock or ''}".rstrip())
+            cell.append(f" {d.period_text(g.period, g.clock, short=True)}")
         return cell
 
     def _blink(self) -> None:
@@ -248,8 +251,9 @@ class EventLog(RichLog):
 
     LABELS = {"rec": "idea", "confirm": "placed", "settle": "settled", "api": "usage", "info": "note", "warn": "warning"}
 
-    def event(self, kind: str, msg: str) -> None:
-        line = Text(datetime.now().strftime("%H:%M:%S") + " ")
+    def event(self, kind: str, msg: str, at: datetime | None = None) -> None:
+        """at: the app clock's time (wall clock if not given), shown as 12-hour PT."""
+        line = Text(f"{d.clock(at or datetime.now(d.PT)):>8} ")
         line.append(f"{self.LABELS.get(kind, kind):<8}", style=self.KIND_COLORS.get(kind, "#e2e8f0"))
         line.append(f" {msg}")
         self.lines_text.append(line.plain)
@@ -406,7 +410,7 @@ class OpenBetsList(OptionList):
             t.append("picks: " if picks else "worth now ")
             t.append(v.worth, style=color)
             if v.close != "not yet":
-                t.append(f" \u00b7 beat closing price by {v.close}")
+                t.append(f" \u00b7 {v.close}")
             opts.append(Option(t, id=str(v.bet_id)))
         self.set_options(opts)
 

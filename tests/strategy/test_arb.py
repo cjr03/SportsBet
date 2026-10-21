@@ -144,7 +144,12 @@ def test_middle_window_text():
     assert middle_window([th, tl]) == "the total lands between 42 and 44 points"
     a = Leg("kalshi", "x", "no", 0.5, 0.5, "g", ticker="E", line=3.5, team="PHI")
     b = Leg("kalshi", "x", "no", 0.5, 0.5, "g", ticker="F", line=6.5, team="DAL")
-    assert middle_window([a, b]) == "the final margin is between the Cowboys by 6 points and the Eagles by 3 points (a tie counts)"
+    assert middle_window([a, b]) == "the game ends anywhere from a Cowboys win by 6 to an Eagles win by 3, ties included"
+    neg = lambda lo_line, hi_line: middle_window([replace(lo, line=lo_line), replace(hi, line=hi_line)])
+    assert neg(-2.5, 2.5) == "the Eagles finish anywhere from losing by 2 to winning by 2 points"
+    assert neg(-2.5, 0.5) == "the Eagles finish anywhere from losing by 2 to a tie"
+    assert neg(-5.5, -2.5) == "the Eagles lose by 3 to 5 points"
+    assert neg(-0.5, 3.5) == "the Eagles tie or win by up to 3 points"
 
 
 def test_contract_text_handles_zero_and_negative_spreads():
@@ -165,4 +170,4 @@ def test_middle_and_contract_text_use_cfb_school_names():
     assert middle_window([lo, hi], names) == "Alabama win by 3 to 6 points"
     a = Leg("kalshi", "x", "no", 0.5, 0.5, gid, ticker="E", line=3.5, team="ALA")
     b = Leg("kalshi", "x", "no", 0.5, 0.5, gid, ticker="F", line=1.5, team="AUB")
-    assert "ALA" not in middle_window([a, b], names) and "between Auburn by 1 point " in middle_window([a, b], names)
+    assert "ALA" not in middle_window([a, b], names) and "from an Auburn win by 1 to an Alabama win by 3" in middle_window([a, b], names)

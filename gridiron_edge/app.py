@@ -33,6 +33,18 @@ from gridiron_edge.ui.widgets import (
 _LEAGUE = {"nfl": "NFL", "cfb": "college football"}
 ODDS_GAMES_COST = 3  # credits per league for h2h+spreads+totals
 _USER_ERRORS = (CommandError, LifecycleError, InvalidAmount, ValueError)
+# Plain words for the settings people change most; the rest read as their name with spaces
+_SETTING_WORDS = {
+    "kelly_fraction": "bet size (share of the ideal amount)",
+    "cap_bet": "most of the bankroll on one bet",
+    "cap_game": "most of the bankroll on one game",
+    "cap_day": "most of the bankroll in one day",
+    "cap_pp_daily": "most of the bankroll on PrizePicks in one day",
+    "min_stake_cents": "smallest bet, in cents",
+    "pp_max_per_game": "most PrizePicks picks from one game",
+    "copula_rho": "how linked same-game picks are assumed to be",
+    "props_stale_seconds": "how old player lines can be, in seconds",
+}
 
 
 TABS = ("home", "performance", "scores", "log", "prizepicks")
@@ -159,7 +171,7 @@ class GridironApp(App):
     # -- event log --------------------------------------------------------
     def log_event(self, kind: str, msg: str) -> None:
         msg = msg[:1].upper() + msg[1:]  # every log line reads as a sentence
-        self.query_one(EventLog).event(kind, msg)
+        self.query_one(EventLog).event(kind, msg, self.clock())
         self.query_one("#status", Static).update(Text(f"{EventLog.LABELS.get(kind, kind).capitalize()}: {msg}"))
 
     def log_lines(self, lines: list[tuple[str, str]]) -> None:
@@ -332,7 +344,8 @@ class GridironApp(App):
                 self._notify(a["mode"], now)
             case "set":
                 s.set_setting(a["field"], a["value"])
-                self.log_event("info", f"Setting changed: {a['field'].replace('_', ' ')} is now "
+                label = _SETTING_WORDS.get(a["field"], a["field"].replace("_", " "))
+                self.log_event("info", f"Setting changed: {label} is now "
                                        f"{getattr(s.settings, a['field'])}.")
             case "venues":
                 sites = ", ".join(d.book_name(v) for v in s.settings.venues)
@@ -353,8 +366,9 @@ class GridironApp(App):
                     label = segment_label(name)
                     self.log_event("info", f"{label[:1].upper() + label[1:]} are back on (texted again).")
             case "help":
-                for usage, what in HELP:
-                    self.log_event("info", f"{usage}  -  {what[:1].upper() + what[1:]}")
+                for usage, what in HELP:  # "Type: ..." so the auto-capital never lands on a command
+                    self.log_event("info", f"Keys: {what}" if usage == "keys"
+                                   else f"Type: {usage}  -  {what[:1].upper() + what[1:]}")
                 self.action_show_tab("log")
 
     def _confirm(self, rec_id: int, price: float | None, qty: int | None) -> None:
@@ -430,7 +444,7 @@ class GridironApp(App):
         except Exception as e:
             self.log_event("error", f"Could not test the model on past games: {e}")
             return
-        verdict = "kept tracking-only (not proven yet)" if fit.gated else "allowed to suggest bets"
+        verdict = "kept watch-only (shown, not texted; not proven yet)" if fit.gated else "allowed to suggest bets"
         self.log_event("info", f"{_LEAGUE[league]} model test, {start}-{end}: {m['n']:,} games; it picked the "
                                f"point-spread winner {m['ats_pct']:.1%} of the time (accuracy score "
                                f"{m['brier']:.3f}, lower is better; 0.250 is a coin flip). Our model is {verdict}.")

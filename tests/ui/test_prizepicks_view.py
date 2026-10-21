@@ -38,11 +38,11 @@ def test_line_text_plain_english():
 def test_board_groups_by_game_sorted_by_kickoff_and_chance():
     lines = [line("A", 0.52), line("B", 0.61), line("C", None), line("D", 0.57, game=DAL_PHI, team="PHI")]
     out = ppv.board_lines(view(lines, ("one_team", {})), NOW)
-    assert out[0].startswith("Lines as of 8:02 AM - 4 lines for 2 games.")
+    assert out[0].startswith("Lines as of 8:02 AM PT - 4 lines for 2 games.")
     assert out[1].startswith("A 6-pick Flex Play needs about 54.2% per pick")
     assert out[2] == ("No entry yet: all the good picks are on one team; PrizePicks needs picks from at least "
                       "2 teams.")
-    i, j = out.index("Cowboys at Eagles - kickoff 10:02 AM"), out.index("Patriots at Bears - kickoff 1:02 PM")
+    i, j = out.index("Cowboys at Eagles - kickoff 10:02 AM PT"), out.index("Patriots at Bears - kickoff 1:02 PM PT")
     assert i < j
     assert [ln.split()[0] for ln in out[j + 1:j + 4]] == ["B", "A", "C"]
     assert not any(w in " ".join(out) for w in JARGON)
@@ -53,7 +53,7 @@ def test_home_status_line():
     v = view(lines, ("one_team", {}), next_load=NOW + timedelta(hours=1, minutes=23))
     assert ppv.status_line(v, NOW) == (
         "PrizePicks: 43 lines loaded for 1 game (Patriots at Bears). No entry yet: all the good picks are on "
-        "one team; PrizePicks needs picks from at least 2 teams. More lines load about 9:25 AM, 3 hours before "
+        "one team; PrizePicks needs picks from at least 2 teams. More lines load about 9:25 AM PT, 3 hours before "
         "kickoff. See tab 5.")
     ready = ppv.status_line(view(lines, None, active=1), NOW)
     assert "1 entry ready in PLACE NOW." in ready and "No entry" not in ready
@@ -79,8 +79,12 @@ def test_reason_examples():
         "Not enough good picks - only 2 clear the needed chance and an entry needs at least 3."
     assert "watch-only" in ppv.reason_text("model_only", {})
     assert ppv.reason_text("few_lines", {"priced": 0, "need": 3, "no_team": 22}) == (
-        "Not enough lines - we can use only 0 picks (22 skipped: players whose team we don't know yet) "
+        "Not enough lines - we can't use any picks yet (22 skipped: players whose team we don't know yet) "
         "and the smallest entry needs 3.")
+    assert "we can use only 1 pick " in ppv.reason_text("few_lines", {"priced": 1, "need": 3})
+    assert ppv.reason_text("stale", {"seconds": 5400}) == "The loaded lines are over 90 minutes old, too old to use."
+    assert ppv.reason_text("stale", {"seconds": 7200}) == "The loaded lines are over 2 hours old, too old to use."
+    assert ppv.reason_text("stale", {"seconds": 3600}) == "The loaded lines are over 1 hour old, too old to use."
     assert "drift reset" in ppv.reason_text("paused", {})
 
 

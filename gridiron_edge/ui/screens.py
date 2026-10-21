@@ -21,14 +21,18 @@ class ConfirmScreen(ModalScreen[tuple[float | None, int | None] | None]):
 
     def compose(self) -> ComposeResult:
         r = self.rec
-        price = "" if r.kind == "pp_entry" else f" at {d.price_text(r)}"
         with Vertical(id="confirm-box"):
-            yield Label(f"Did you place bet idea #{r.id}?  Bet {d.money(r.stake_cents)}{price}")
-            yield Static(Text(d.bet_text(r, self.names)), id="legs")
-            yield Label("Price you got, in dollars (e.g. 0.47)")
-            yield Input(value=f"{r.legs[0].price:.2f}", id="price")
-            yield Label("How many contracts")
-            yield Input(value="" if r.qty is None else str(r.qty), id="qty")
+            if r.kind == "pp_entry":  # no price or contracts on PrizePicks: just yes or no
+                yield Label(f"Did you place PrizePicks entry #{r.id} ({d.money(r.stake_cents)}, "
+                            f"{d.structure_text(r.structure)})?")
+                yield Static(Text(d.bet_text(r, self.names)), id="legs")
+            else:
+                yield Label(f"Did you place bet idea #{r.id}?  Bet {d.money(r.stake_cents)} at {d.price_text(r)}")
+                yield Static(Text(d.bet_text(r, self.names)), id="legs")
+                yield Label("Price you got, in dollars (e.g. 0.47)")
+                yield Input(value=f"{r.legs[0].price:.2f}", id="price")
+                yield Label("How many contracts")
+                yield Input(value="" if r.qty is None else str(r.qty), id="qty")
             yield Static("", id="error")
             with Horizontal(id="buttons"):
                 yield Button("Yes, placed", id="ok", variant="success")
@@ -43,6 +47,8 @@ class ConfirmScreen(ModalScreen[tuple[float | None, int | None] | None]):
         err.display = True
 
     def _parse(self) -> tuple[float | None, int | None]:
+        if self.rec.kind == "pp_entry":
+            return None, None
         raw_p = self.query_one("#price", Input).value.strip()
         raw_q = self.query_one("#qty", Input).value.strip()
         price = None

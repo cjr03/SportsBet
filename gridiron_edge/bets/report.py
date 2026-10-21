@@ -336,7 +336,7 @@ def summary_lines(r: dict) -> list[str]:
         out.append(f"Profit after fees: {_money(roi['profit_cents'])} on {_money(roi['cost_cents'])} spent "
                    f"({_pct(roi['roi'])} return). {w} won, {lo} lost, {rf} refunded.")
         if roi["ci_lo"] is not None:
-            verdict = ("the edge looks real" if roi["ci_lo"] > 0 else "we are losing money for real"
+            verdict = ("the profit looks like skill, not luck" if roi["ci_lo"] > 0 else "we are losing money for real"
                        if roi["ci_hi"] < 0 else "too few bets to tell luck from skill yet")
             out.append(f"Likely long-run return: {_pct(roi['ci_lo'])} to {_pct(roi['ci_hi'])} ({verdict}).")
     else:
@@ -346,14 +346,19 @@ def summary_lines(r: dict) -> list[str]:
                    f"over {r['placed']['arb_count']} bets.")
     c = r["clv"]
     if c["placed"]["n"] or c["all_signals"]["n"]:
+        def vs_close(x: float) -> str:
+            return f"{_pct(abs(x), False)} {'better' if x >= 0 else 'worse'}"
+
         parts = []
         if c["placed"]["n"]:
-            parts.append(f"bets you placed got prices {_pct(c['placed']['mean'])} vs the closing price "
-                         f"({c['placed']['n']} bets)")
+            parts.append(f"Bets you placed got prices {vs_close(c['placed']['mean'])} than the closing price "
+                         f"on average ({c['placed']['n']} bets)")
         if c["all_signals"]["n"]:
-            parts.append(f"all bet ideas, placed or not: {_pct(c['all_signals']['mean'])} "
-                         f"({c['all_signals']['n']} ideas)")
-        out.append("Beat the closing price (higher is better): " + "; ".join(parts) + ".")
+            idea = (f"{vs_close(c['all_signals']['mean'])} ({c['all_signals']['n']} ideas)" if parts else
+                    f"got prices {vs_close(c['all_signals']['mean'])} than the closing price on average "
+                    f"({c['all_signals']['n']} ideas)")
+            parts.append(("all" if parts else "All") + f" bet ideas, placed or not, {idea}")
+        out.append("; ".join(parts) + ".")
     cal = r["calibration"]
     if cal["brier_market"] is not None:
         out.append(f"Accuracy score (lower is better): ours {cal['brier_model_same_bets']:.3f} vs "

@@ -171,3 +171,19 @@ def test_stat_words_spells_out_unknown_keys():
     assert stat_words("player_pass_yds") == "passing yards"
     assert stat_words("rush_yds") == "rushing yards"
     assert "_" not in stat_words("player_kicking_points")
+
+
+def test_period_text_in_words():
+    from gridiron_edge.describe import period_text
+    assert period_text("3", "12:34") == "3rd quarter, 12:34 left"
+    assert period_text("3", "12:34", short=True) == "3rd qtr 12:34"
+    assert period_text("Q1", None) == "1st quarter"
+    assert period_text("5", "3:00") == "overtime, 3:00 left"
+    assert period_text("6", "1:00", short=True) == "overtime 1:00"
+    assert period_text("halftime", "0:00") == period_text("halftime", None, short=True) == "halftime"
+
+
+def test_unknown_combined_stat_keeps_the_plus():
+    from gridiron_edge.describe import stat_words
+    assert stat_words("player_pass_rush_rec_yds") == "passing + rushing + receiving yards"
+    assert stat_words("player_kicking_pts") == "kicking points"
