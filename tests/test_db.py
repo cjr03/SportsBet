@@ -70,3 +70,29 @@ def test_register_schema_runs_on_connect(tmp_path):
     assert c.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
     for t in ("settings", "quota", "api_cache", "ledger"):
         c.execute(f"SELECT 1 FROM {t}")
+
+
+def test_register_column_migrates_existing_db(tmp_path):
+    import sqlite3
+
+    from gridiron_edge.db import register_column
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    old.execute("CREATE TABLE widgets_t (id INTEGER PRIMARY KEY, name TEXT)")
+    old.execute("INSERT INTO widgets_t (name) VALUES ('a')")
+    old.commit()
+    old.close()
+    register_schema("CREATE TABLE IF NOT EXISTS widgets_t (id INTEGER PRIMARY KEY, name TEXT)")
+    register_column("widgets_t", "score", "REAL")
+    c = connect(path)
+    assert c.execute("SELECT name, score FROM widgets_t").fetchone()[:] == ("a", None)
+    c.close()
+    connect(path).close()  # idempotent
+
+
+def test_eval_columns_exist(conn):
+    rec_cols = {r[1] for r in conn.execute("PRAGMA table_info(recommendations)")}
+    bet_cols = {r[1] for r in conn.execute("PRAGMA table_info(bets)")}
+    assert {"p_mkt", "p_close_fair", "clv_close", "clv_source", "clv_stale", "clv_at"} <= rec_cols
+    assert {"p_close_fair", "clv_source"} <= bet_cols
+    assert conn.execute("SELECT name FROM sqlite_master WHERE name='leg_clv'").fetchone()

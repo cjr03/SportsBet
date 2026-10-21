@@ -9,7 +9,7 @@ from dotenv import dotenv_values
 _FRACTIONS = (
     "kelly_fraction", "cap_bet", "cap_game", "cap_slate", "cap_pp_daily",
     "kalshi_price_lo", "kalshi_price_hi", "arb_fraction", "arb_max_roi",
-    "odds_reserve_frac",
+    "odds_reserve_frac", "shadow_clv_min_budget",
 )
 
 # env var name -> Settings field (secrets and the optional URL)
@@ -47,6 +47,11 @@ class Settings:
     quiet_hours: tuple[int, int] = (23, 8)
     notify_enabled: bool = True
     stale_seconds: int = 600
+    # evaluation
+    shadow_clv_min_budget: float = 0.5  # extra close pulls for not-placed signals only above this Odds API share
+    prop_close_stale_minutes: int = 60  # a prop close older than this before kickoff is labelled stale
+    drift_window: int = 50  # rolling bets per segment for drift checks
+    cfb_gate_seasons: int = 2  # CFB seasons in the gate backtest (past seasons cache forever)
     # secrets
     odds_api_key: str = ""
     cfbd_api_key: str = ""

@@ -41,6 +41,7 @@ from gridiron_edge.scheduler import LEAGUES, Job, Scheduler
 from gridiron_edge.strategy.distributions import (
     CFB_SIGMA, NFL_ML_SIGMA, NFL_SPREAD_SIGMA, NFL_TOTAL_SIGMA, EmpiricalMarginModel, NormalModel,
 )
+from gridiron_edge.strategy.fair import fair_two_way
 from gridiron_edge.types import Game, KalshiMarket, Leg, PropQuote, Quote, Recommendation, make_game_id
 from gridiron_edge.ui.widgets import compute_kpis
 
@@ -49,6 +50,7 @@ register_schema("CREATE TABLE IF NOT EXISTS scheduler_state (key TEXT PRIMARY KE
 STATE_TTL = timedelta(days=14)
 UPCOMING_WINDOW = timedelta(days=8)
 GATE_REFIT = timedelta(days=7)
+CLV_WINDOW = timedelta(minutes=30)
 QUOTE_TTL = timedelta(days=2)
 LINES_HORIZON = timedelta(hours=48)
 # sportsbook quotes and prop lines, written through to api_cache so a restart keeps them
@@ -565,10 +567,26 @@ class Services:
         return {leg["game_id"] for leg in _bet_legs(self.lifecycle.open_bets()) if leg.get("game_id")}
 
     def close_games(self) -> set[str]:
-        """Games whose closing line matters: a PLACED bet, or an active non-observe recommendation."""
+        """Games whose closing line matters: a PLACED bet, or an active non-observe recommendation.
+
+        Games with only observe-only or unconfirmed signals are added for shadow CLV, but only while
+        the Odds API budget is above shadow_clv_min_budget (close pulls are paid).
+        """
         rows = self.conn.execute("SELECT legs_json FROM recommendations "
                                  "WHERE state IN ('RECOMMENDED','PENDING') AND observe_only=0").fetchall()
-        return self.open_bet_games() | {leg["game_id"] for leg in _bet_legs(rows) if leg.get("game_id")}
+        out = self.open_bet_games() | {leg["game_id"] for leg in _bet_legs(rows) if leg.get("game_id")}
+        if self._shadow_budget_ok():
+            since = (self.clock() - UPCOMING_WINDOW).isoformat()
+            shadow = self.conn.execute("SELECT legs_json FROM recommendations WHERE created_at >= ? "
+                                       "AND kind IN ('kalshi_game','kalshi_prop')", (since,)).fetchall()
+            out |= {leg["game_id"] for leg in _bet_legs(shadow) if leg.get("game_id")}
+        return out
+
+    def _shadow_budget_ok(self) -> bool:
+        if self.odds is None:
+            return False
+        rem = self.odds.budget.remaining()
+        return rem is None or rem >= self.settings.shadow_clv_min_budget * self.odds.budget.monthly_cap
 
     async def _job_expire(self, job: Job, now: datetime):
         ids = self.lifecycle.expire_due(now)
@@ -638,7 +656,8 @@ class Services:
         self.kalshi_ok = True
         self.latest["kalshi"] = markets
         unmatched = sum(m.game_id is None for m in markets)
-        return [("api", f"kalshi: {len(markets)} markets ({unmatched} unmatched)")]
+        # free: refresh the near-kickoff closes (prop closes come only from already-paid prop pulls)
+        return [("api", f"kalshi: {len(markets)} markets ({unmatched} unmatched)")] + self._record_clv(now)
 
     async def _job_cfbd_weekly(self, job: Job, now: datetime):
         had = self.cfb_model is not None
@@ -684,24 +703,85 @@ class Services:
             return None
         return float(row[col][0])
 
+    def _close_p(self, kind: str, leg: dict, snap: pipeline.Snapshot, markets: dict[str, KalshiMarket]
+                 ) -> tuple[float | None, str | None, bool]:
+        """Market-only P(our side) at the close, where it came from, and whether it is a stale snapshot.
+
+        Game markets use the sportsbook close; props use the last paid prop pull before kickoff
+        (no extra credits), flagged stale when it is older than prop_close_stale_minutes.
+        """
+        g = self.registry.get(leg.get("game_id") or "")
+        if g is None:
+            return None, None, False
+        if kind == "kalshi_game":
+            m = markets.get(leg.get("ticker") or "")
+            p_yes = None if m is None else pipeline.market_p_yes(m, g, snap, self.settings)
+            if p_yes is None:
+                return None, None, False
+            src = "sportsbook line"
+            if m.market_type == "ml":
+                quotes = [q for q in snap.quotes if q.game_id == g.game_id]
+                fair = fair_two_way(quotes, "h2h", None, now=snap.now, stale_seconds=self.settings.stale_seconds)
+                src = fair[1] if fair else src
+            return (p_yes if leg.get("side") == "yes" else 1.0 - p_yes), src, False
+        player, stat, line = leg.get("player"), leg.get("stat"), leg.get("line")
+        if not player or not stat or line is None:
+            return None, None, False
+        props = [q for q in snap.props if q.game_id == g.game_id and q.last_update <= g.kickoff
+                 and q.book != "prizepicks" and q.decimal is not None and q.stat == stat
+                 and q.player.lower() == player.lower()]
+        if not props:
+            return None, None, False
+        loose = replace(self.settings, stale_seconds=10**9)  # the last snapshot, however old
+        sides = pipeline._book_p_sides(replace(snap, props=props), loose, g.game_id, player, stat, line)
+        if sides is None:
+            return None, None, False
+        newest = max(q.last_update for q in props)
+        stale = g.kickoff - newest > timedelta(minutes=self.settings.prop_close_stale_minutes)
+        over = leg.get("side") in ("yes", "over")
+        return (sides[0] if over else sides[1]), "prop books", stale
+
     def _record_clv(self, now: datetime) -> list[tuple[str, str]]:
-        """CLV for open single-leg Kalshi game bets kicking off soon, from the closing market fair."""
+        """CLV for open Kalshi bets, and shadow CLV for every signal (any state), kicking off soon.
+
+        Uses only data already fetched: no API calls are made here.
+        """
         markets = {m.ticker: m for m in self.latest["kalshi"]}
-        snap = replace(self.snapshot(now), predictions={})
+        snap = self.snapshot(now)
+
+        def soon(leg: dict) -> bool:
+            g = self.registry.get(leg.get("game_id") or "")
+            return g is not None and now <= g.kickoff <= now + CLV_WINDOW
+
         out = []
         for bet in self.lifecycle.open_bets():
-            if bet["kind"] != "kalshi_game":
+            if bet["kind"] not in ("kalshi_game", "kalshi_prop"):
                 continue
-            leg = Leg(**json.loads(bet["legs_json"])[0])
-            g, m = self.registry.get(leg.game_id or ""), markets.get(leg.ticker or "")
-            if g is None or m is None or not now <= g.kickoff <= now + timedelta(minutes=30):
+            leg = json.loads(bet["legs_json"])[0]
+            if not soon(leg):
                 continue
-            p_yes = pipeline.market_p_yes(m, g, snap, self.settings)  # market-only close (CFB too)
-            if p_yes is None:
-                continue
-            value = self.settler.record_clv(bet["id"], p_yes if leg.side == "yes" else 1 - p_yes)
+            p, src, _ = self._close_p(bet["kind"], leg, snap, markets)
+            value = self.settler.record_clv(bet["id"], p, src)
             if value is not None:
-                out.append(("info", f"clv bet {bet['id']}: {value:+.1%}"))
+                word = "better" if value >= 0 else "worse"
+                out.append(("info", f"bet {bet['id']}: our price was {abs(value):.1%} {word} than the closing price"))
+        n = 0
+        since = (now - UPCOMING_WINDOW).isoformat()
+        for r in self.conn.execute("SELECT id, kind, legs_json FROM recommendations WHERE created_at >= ? "
+                                   "AND kind IN ('kalshi_game','kalshi_prop','pp_entry')", (since,)).fetchall():
+            legs = json.loads(r["legs_json"])
+            if r["kind"] != "pp_entry":
+                if soon(legs[0]):
+                    p, src, stale = self._close_p(r["kind"], legs[0], snap, markets)
+                    n += self.settler.record_rec_clv(r["id"], p, now, src, stale) is not None
+                continue
+            for i, leg in enumerate(legs):
+                if soon(leg):
+                    p, _, stale = self._close_p("pp_leg", leg, snap, markets)
+                    p_rec = leg.get("p_mkt") if leg.get("p_mkt") is not None else leg.get("p_fair")
+                    n += self.settler.record_leg_clv(r["id"], i, p_rec, p, now, stale) is not None
+        if n:
+            out.append(("info", f"recorded closing prices for {n} bet idea(s), including ones not placed"))
         return out
 
     # -- scanning --------------------------------------------------------
