@@ -110,7 +110,25 @@ async def test_kpi_inconclusive():
     async with app.run_test():
         tiles = app.query_one(KpiTiles)
         tiles.update_kpis(k)
-        assert "inconclusive (n<1500)" in tiles.text
+        assert "too few bets to tell luck from skill yet" in tiles.text.lower()
+        for jargon in ("ROI", "CLV", "Max DD", "Brier", "inconclusive", "n<", "±"):
+            assert jargon not in tiles.text
+        assert tiles.text.isascii()
+
+
+async def test_kpi_verdict_comes_from_ci_not_bet_count():
+    app = Harness(KpiTiles())
+    base = {"roi": 0.08, "roi_band": 0.05, "n": 300, "record": "180-120-0", "max_dd": 0,
+            "clv_mean": 0.01, "clv_pos": 0.6, "brier": 0.2}
+    async with app.run_test():
+        tiles = app.query_one(KpiTiles)
+        tiles.update_kpis({**base, "conclusive": True, "roi_ci": (0.03, 0.13)})
+        assert "skill" in tiles.text and "too few" not in tiles.text.lower()
+        assert "+3.0% to +13.0%" in tiles.text
+        tiles.update_kpis({**base, "roi": -0.08, "conclusive": True, "roi_ci": (-0.13, -0.03)})
+        assert "losing" in tiles.text.lower() and "too few" not in tiles.text.lower()
+        tiles.update_kpis({**base, "n": 5000, "conclusive": False, "roi_ci": (-0.02, 0.18)})
+        assert "too few bets to tell luck from skill yet" in tiles.text.lower()
 
 
 def test_kpi_empty():

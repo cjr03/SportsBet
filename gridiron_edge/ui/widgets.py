@@ -14,7 +14,7 @@ from gridiron_edge.types import Game, Recommendation
 PROFIT, LOSS, PENDING, ACCENT = "#22c55e", "#ef4444", "#f59e0b", "#22d3ee"
 _RGB = {"profit": (34, 197, 94), "loss": (239, 68, 68)}
 _SURFACE_RGB = (18, 24, 41)
-MIN_CONCLUSIVE_N = 1500
+MIN_CONCLUSIVE_N = 1500  # unused: kept for importers; the verdict now comes from the ROI CI
 
 
 def _get(row, key, default=None):
@@ -91,23 +91,37 @@ class KpiTiles(Static):
     text = ""
 
     def update_kpis(self, k: dict) -> None:
+        """Plain-English tiles; the luck-vs-skill verdict comes from the profit CI, not a bet count."""
         def pct(v, sign="+"):
-            return "n/a" if v is None else f"{v * 100:{sign}.1f}%"
+            return "not enough data" if v is None else f"{v * 100:{sign}.1f}%"
 
-        roi = pct(k.get("roi"))
-        if k.get("roi_band") is not None and k.get("roi") is not None:
-            roi += f" ±{k['roi_band'] * 100:.1f}%"
+        roi, (lo, hi) = k.get("roi"), k.get("roi_ci") or (None, None)
+        profit = f"Profit per $1 staked: {pct(roi)}"
+        if lo is not None and hi is not None:
+            profit += f" (likely range {pct(lo)} to {pct(hi)})"
+        clv = k.get("clv_mean")
+        if clv is None:
+            vs_close = "Our prices vs the closing price: not enough data"
+        else:
+            word = "better" if clv >= 0 else "worse"
+            vs_close = (f"Our prices vs the closing price: {abs(clv) * 100:.1f}% {word} on average"
+                        f" ({pct(k.get('clv_pos'), '')} of bets got a better price)")
         brier = k.get("brier")
         lines = [
-            f"ROI {roi}",
-            f"CLV {pct(k.get('clv_mean'))}  ({pct(k.get('clv_pos'), '')} pos)",
-            f"Record {k.get('record', '0-0-0')}",
-            f"Max DD ${k.get('max_dd', 0) / 100:,.2f}",
-            f"Brier {'n/a' if brier is None else f'{brier:.3f}'}",
+            profit,
+            vs_close,
+            f"Won-lost-refunded: {k.get('record', '0-0-0')}",
+            f"Biggest drop from a high point: ${k.get('max_dd', 0) / 100:,.2f}",
+            "Accuracy of our chances: " + ("not enough data" if brier is None else
+                                           f"{brier:.3f} (lower is better; 0.250 is a coin flip)"),
         ]
         n = k.get("n", 0)
-        if n < MIN_CONCLUSIVE_N:
-            lines.append(f"inconclusive (n<{MIN_CONCLUSIVE_N})  n={n}")
+        if k.get("conclusive") and lo is not None and lo > 0:
+            lines.append(f"After {n} bets the profit looks like real skill, not luck")
+        elif k.get("conclusive") and hi is not None and hi < 0:
+            lines.append(f"After {n} bets we are losing by more than bad luck explains")
+        else:
+            lines.append(f"Too few bets to tell luck from skill yet ({n} settled)")
         self.text = "\n".join(lines)
         self.update(Text(self.text))
 
