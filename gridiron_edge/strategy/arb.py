@@ -54,8 +54,8 @@ def middle_window(legs: list[Leg], names: d.Names = d.DEFAULT_NAMES) -> str:
     """Where both legs of a middle pay, in plain English ("the Eagles win by 3 to 6 points")."""
     league = d.parse_game_id(legs[0].game_id)[0] or "nfl"
 
-    def name(code: str | None) -> str:
-        return team_label(code, league, names)
+    def name(code: str | None) -> str:  # "the Eagles", but plain "Alabama" for a school
+        return ("the " if league == "nfl" else "") + team_label(code, league, names)
 
     def points(n: int) -> str:
         return f"{n} point{'s' * (abs(n) != 1)}"
@@ -67,11 +67,11 @@ def middle_window(legs: list[Leg], names: d.Names = d.DEFAULT_NAMES) -> str:
         if lo.team is None:
             return f"the total lands on exactly {points(a)}" if a == b else f"the total lands between {a} and {b} points"
         if a >= 1:
-            return f"the {name(lo.team)} win by {points(a)}" if a == b else f"the {name(lo.team)} win by {a} to {b} points"
-        return f"the {name(lo.team)} margin ends between {a} and {b} points (minus means they lose)"
+            return f"{name(lo.team)} win by {points(a)}" if a == b else f"{name(lo.team)} win by {a} to {b} points"
+        return f"{name(lo.team)} margin ends between {a} and {b} points (minus means they lose)"
     x, y = legs  # cross: NO on each team's spread; margin between -floor(y) and floor(x)
-    return (f"the final margin is between the {name(y.team)} by {points(math.floor(y.line or 0))} "
-            f"and the {name(x.team)} by {points(math.floor(x.line or 0))} (a tie counts)")
+    return (f"the final margin is between {name(y.team)} by {points(math.floor(y.line or 0))} "
+            f"and {name(x.team)} by {points(math.floor(x.line or 0))} (a tie counts)")
 
 
 def has_tie_split(rules: str) -> bool:

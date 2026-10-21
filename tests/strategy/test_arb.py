@@ -162,7 +162,7 @@ def test_middle_and_contract_text_use_cfb_school_names():
     gid = "cfb:20261128:AUB@ALA"
     lo = Leg("kalshi", "x", "yes", 0.5, 0.5, gid, ticker="A", line=2.5, team="ALA")
     hi = Leg("kalshi", "x", "no", 0.5, 0.5, gid, ticker="B", line=6.5, team="ALA")
-    assert middle_window([lo, hi], names) == "the Alabama win by 3 to 6 points"
+    assert middle_window([lo, hi], names) == "Alabama win by 3 to 6 points"
     a = Leg("kalshi", "x", "no", 0.5, 0.5, gid, ticker="E", line=3.5, team="ALA")
     b = Leg("kalshi", "x", "no", 0.5, 0.5, gid, ticker="F", line=1.5, team="AUB")
-    assert "ALA" not in middle_window([a, b], names) and "Auburn by 1 point " in middle_window([a, b], names)
+    assert "ALA" not in middle_window([a, b], names) and "between Auburn by 1 point " in middle_window([a, b], names)

@@ -1446,8 +1446,9 @@ class Services:
         if "prizepicks" in self.settings.venues and not self.settings.pp_payouts_verified:
             table = payout_table(self.settings)
             out.append(("info", "PrizePicks payouts not confirmed: check your app "
-                                f"{payouts_text(table.get((3, 'power'), {}))} on a 3-pick Power Play and "
-                                f"{payouts_text(table.get((5, 'flex'), {}))} on a 5-pick Flex Play, then type: "
+                                f"{payouts_text(table.get((3, 'power'), {}))} on a 3-pick Power Play, and "
+                                f"{payouts_text(table.get((5, 'flex'), {})).removeprefix('pays ')} on a 5-pick "
+                                "Flex Play, then type: "
                                 f"set pp_payouts_verified true (PrizePicks bets are cut to "
                                 f"{self.settings.pp_unverified_mult:.0%} of normal until then). If only a "
                                 "perfect card pays (Arena), type: set pp_mode arena"))
