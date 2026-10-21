@@ -825,9 +825,13 @@ class PPLine:
 
 
 def pp_lines(snap: Snapshot, s: Settings, projector: Projector) -> list[PPLine]:
-    """Every standard PrizePicks line on an upcoming game, for display (stale ones unpriced)."""
+    """Every standard PrizePicks line on an upcoming game, for display and entries you build yourself.
+
+    A line older than props_stale_seconds (fresh=False) is still priced the same way, from the
+    sportsbook prices cached with it, so you can check an entry; the builder and texts skip it."""
     out: list[PPLine] = []
     seen: set[tuple] = set()
+    loose = replace(s, props_stale_seconds=10**9)  # stale lines: every cached sportsbook price counts
     for q in snap.props:
         if q.book != "prizepicks" or not _pp_standard(q):
             continue
@@ -838,7 +842,7 @@ def pp_lines(snap: Snapshot, s: Settings, projector: Projector) -> list[PPLine]:
         seen.add(key)
         fresh = q.source == "manual" or _prop_fresh(q, snap, s)
         team = _player_team(snap, projector, q.player)
-        got = _prop_p_sides(snap, s, projector, g, q.player, q.stat, q.point) if fresh else None
+        got = _prop_p_sides(snap, s if fresh else loose, projector, g, q.player, q.stat, q.point)
         side = p = None
         anchored = False
         if got is not None:

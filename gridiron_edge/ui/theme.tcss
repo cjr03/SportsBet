@@ -147,7 +147,7 @@ ModalScreen {
     layout: vertical;
 }
 
-ConfirmScreen {
+ConfirmScreen, AskScreen {
     align: center middle;
     background: $bg 70%;
 }
@@ -164,6 +164,8 @@ ConfirmScreen {
 #confirm-box Input { margin-bottom: 1; }
 #confirm-title { width: 1fr; height: auto; }
 #error { color: $loss; height: auto; }
+#confirm-warning { color: $pending; height: auto; margin-bottom: 1; }
+#ask-text { height: auto; margin-bottom: 1; }
 #buttons { height: auto; align-horizontal: right; }
 
 WhyScreen {

@@ -225,6 +225,18 @@ def test_prizepicks_tab_and_status_are_plain():
                 sentence(line.strip())
         sentence(ppv.status_line(view, NOW, NAMES))
     sentence(ppv.status_line(ppv.PPView([], games, ("no_lines", {}), 0, Settings()), NOW, NAMES))
+    from dataclasses import replace
+    old = [replace(ln, fetched_at=NOW - timedelta(hours=7), fresh=False) for ln in lines]
+    for refresh in (None, 0, 2):
+        view = ppv.PPView(old, games, ("stale", {"seconds": 10800}), 0, Settings(), {"nfl": True},
+                          refresh_games=refresh)
+        for line in [*ppv.board_lines(view, NOW, NAMES), ppv.nothing_to_pick_text(view), ppv.best_empty_text(view),
+                     *(r.text for r in ppv.all_rows(view, set(), NOW, NAMES))]:
+            if line.strip():
+                sentence(line.strip().removeprefix("[ ] "))
+        ev = ppv.evaluate_entry(old[:2], view, NAMES)
+        for line in ppv.entry_lines(ev, view, NAMES, now=NOW):
+            sentence(line)
 
 
 def test_report_summary_is_plain(conn):

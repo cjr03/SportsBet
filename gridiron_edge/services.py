@@ -37,7 +37,7 @@ from gridiron_edge.models.cfb import CfbRatings, cfb_prior, games_played
 from gridiron_edge.models.nfl import NflRatings, is_neutral, qb_changes
 from gridiron_edge.models.props import STAT_COLUMNS, PropProjector
 from gridiron_edge.models.ridge import implied_ratings
-from gridiron_edge.describe import Names, bet_text, book_name, expected_profit_cents, money
+from gridiron_edge.describe import Names, bet_text, book_name, expected_profit_cents, money, when
 from gridiron_edge.notify.chain import NotifyChain
 from gridiron_edge.notify.console import ConsoleNotifier
 from gridiron_edge.notify.format import PT, TEST_TEXT, drift_message, payouts_text
@@ -84,6 +84,7 @@ LOCKED_SETTINGS = {"odds_api_key", "cfbd_api_key", "therundown_api_key", "notify
                    "kalshi_base_url", "db_path"}
 SCAN_KINDS = {"games": {"kalshi_game"}, "props": {"kalshi_prop"}, "pp": {"pp_entry"}, "arb": {"arb", "middle"}}
 PP_REFRESH_HORIZON = timedelta(hours=24)  # `pp refresh` pulls props for games kicking off this soon
+PP_HINT_HORIZON = timedelta(hours=36)  # startup: suggest `pp refresh` for NFL games this soon with no lines
 NOTIFY_TEST_TEXT = TEST_TEXT
 
 
@@ -398,6 +399,9 @@ class Services:
         if self._get("first_run_done") is None:
             out += await self._guarded("first-run", self._first_run(now))
             self._put("first_run_done", now.isoformat())
+        hint = self.pp_lines_hint(now)
+        if hint:
+            out.append(("info", hint))
         return out
 
     async def _seed_teams(self, now: datetime) -> list[tuple[str, str]]:
@@ -1366,7 +1370,32 @@ class Services:
                       props=[q for q in snap.props if q.book != "prizepicks"],
                       budget=pipeline.Budget.from_snap(snap, st),
                       daily_left=math.floor(st.cap_pp_daily * snap.bankroll_cents) - snap.pp_staked_today_cents,
-                      watch_only=held)
+                      watch_only=held, **self._pp_refresh_state(now))
+
+    def _pp_refresh_state(self, now: datetime) -> dict:
+        """What `pp refresh` (key r on tab 5) could load now, for the PrizePicks summary."""
+        if self.odds is None or self.odds.disabled:
+            return {"refresh_games": None, "refresh_cost": PROPS_COST}
+        games, text = self.pp_refresh_plan(now)
+        # out of credits (games are close but none fit): say so instead of suggesting a refresh
+        why = text if not games and self._pp_refresh_games(now) else ""
+        return {"refresh_games": len(games), "refresh_cost": PROPS_COST, "refresh_why": why}
+
+    def pp_lines_hint(self, now: datetime) -> str | None:
+        """At startup: NFL games in the next 36 hours with no PrizePicks lines loaded, and how to load them."""
+        if "prizepicks" not in self.settings.venues or self.odds is None or self.odds.disabled:
+            return None
+        have = {q.game_id for q in [*self.latest.get("props", []), *self.manual_props] if q.book == "prizepicks"}
+        games = sorted((g for g in self.registry.upcoming(PP_HINT_HORIZON, now)
+                        if g.league == "nfl" and g.kickoff > now and g.status == "scheduled"
+                        and g.game_id not in have), key=lambda g: g.kickoff)
+        if not games:
+            return None
+        n, first = len(games), games[0]
+        return (f"PrizePicks: no lines loaded yet for {n} NFL game{'s' * (n != 1)} in the next 36 hours (first: "
+                f"{self._matchup(first.game_id)}, {when(first.kickoff, now)} PT). They load on their own about 3 "
+                f"hours before kickoff; to load them sooner, type pp refresh (about {PROPS_COST} Odds API credits "
+                "per game, for games in the next 24 hours; it shows the cost and asks first).")
 
     def _pp_refresh_games(self, now: datetime) -> list[Game]:
         """Upcoming games in the next 24 h the odds service lists (so a props pull can run)."""

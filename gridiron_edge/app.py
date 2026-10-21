@@ -24,7 +24,7 @@ from gridiron_edge.types import Recommendation
 from gridiron_edge.ui import home
 from gridiron_edge.ui import prizepicks as pp_ui
 from gridiron_edge.ui.commands import COMMAND_WORDS, HELP, Command, CommandError, parse_command
-from gridiron_edge.ui.screens import ConfirmScreen, WhyScreen
+from gridiron_edge.ui.screens import AskScreen, ConfirmScreen, WhyScreen
 from gridiron_edge.ui.widgets import (
     BalanceChart, BankrollHeader, EventLog, InfoLine, KpiTiles, OpenBetsList, PerfMoney, PerfTables, PickList,
     PlaceNowList, QuotaBar, ScoresPanel, Section, WatchList,
@@ -59,9 +59,11 @@ def _money(cents: int) -> str:
 
 class PrizePicksPane(TabPane):
     """Tab 5. Keys while a pick list has focus: Enter/space add or remove a pick, d explains it,
-    x clears YOUR ENTRY, c records an entry you placed on PrizePicks yourself."""
+    x clears YOUR ENTRY, c records an entry you placed on PrizePicks yourself, r loads new lines
+    (asks first with the cost, like typing pp refresh)."""
 
-    BINDINGS = [Binding("x", "app.pp_clear", "Clear entry"), Binding("c", "app.pp_confirm", "I placed this entry")]
+    BINDINGS = [Binding("x", "app.pp_clear", "Clear entry"), Binding("c", "app.pp_confirm", "I placed this entry"),
+                Binding("r", "app.pp_refresh_key", "Load new lines")]
 
 
 class CommandInput(Input):
@@ -188,12 +190,14 @@ class GridironApp(App):
             self.action_focus_command()
 
     def _focus_pick_list(self) -> bool:
-        """Focus the first visible list with a line you can pick, else ALL LINES (to scroll it)."""
+        """Focus the first visible list with a line you can pick (highlighting that line), else ALL
+        LINES (to scroll it). True when some line can be picked."""
         shown = [lst for lst in self.query(PickList) if lst.display and lst.parent.display]
         lst = next((lst for lst in shown if lst.selectable), shown[-1] if shown else None)
         if lst is not None:
             lst.focus()
-        return lst is not None
+            lst.highlight_first()
+        return lst is not None and lst.selectable
 
     def action_focus_command(self) -> None:
         self.query_one("#cmd", Input).focus()
@@ -201,7 +205,8 @@ class GridironApp(App):
     def action_focus_list(self) -> None:
         """Down in the empty command bar: into the PrizePicks lists on tab 5, else Home's PLACE NOW."""
         if self.query_one("#tabs", TabbedContent).active == "prizepicks":
-            self._focus_pick_list()
+            if not self._focus_pick_list():
+                self.log_event("info", pp_ui.nothing_to_pick_text(self._pp_view))
             return
         self.action_show_tab("home")
         lst = self.query_one("#place-now", PlaceNowList)
@@ -344,6 +349,7 @@ class GridironApp(App):
         best = pp_ui.best_rows(view, chosen, self.names)
         self.query_one("#pp-best", PickList).set_rows(best)
         self.query_one("#pp-best", PickList).display = bool(best)
+        self.query_one("#pp-best-empty", Static).update(pp_ui.best_empty_text(view))
         self.query_one("#pp-best-empty").display = not best
         self.query_one("#pp-board", PickList).set_rows(pp_ui.all_rows(view, chosen, now, self.names))
         for box in ("#pp-best-box", "#pp-entry-box", "#pp-scroll"):
@@ -354,8 +360,11 @@ class GridironApp(App):
             self.query_one("#pp-best-box").display = False
         self._show_pp_entry(view)
         if isinstance(self.focused, PickList) and not (self.focused.display and self.focused.parent.display):
-            if not self._focus_pick_list():
+            shown = any(lst.display and lst.parent.display for lst in self.query(PickList))
+            if not shown:
                 self.action_focus_command()
+            else:
+                self._focus_pick_list()
 
     def _pp_picks(self, view: pp_ui.PPView) -> list:
         live = pp_ui.pickable(view)
@@ -372,7 +381,7 @@ class GridironApp(App):
         picks = self._pp_picks(view)
         ev = pp_ui.evaluate_entry(picks, view, self.names)
         self._pp_eval = ev
-        out = pp_ui.entry_lines(ev, view, self.names, waiting=len(self._pp_selected) - len(picks))
+        out = pp_ui.entry_lines(ev, view, self.names, waiting=len(self._pp_selected) - len(picks), now=self.clock())
         match = self._pp_match() if ev.picks else None
         if match is not None:
             out.insert(len(ev.picks), pp_ui.same_picks_text(match.id))
@@ -406,6 +415,27 @@ class GridironApp(App):
             self._pp_selected.append(msg.key)
             self.log_event("info", pp_ui.added_text(ln, len(self._pp_selected)))
         self._show_pp(view.active, self.clock())
+
+    def on_pick_list_nothing_to_pick(self, msg: PickList.NothingToPick) -> None:
+        self.log_event("info", pp_ui.nothing_to_pick_text(self._pp_view))
+
+    def action_pp_refresh_key(self) -> None:
+        """Key r on tab 5: the same as typing pp refresh, but asks yes or no with the cost first."""
+        games, text = self.services.pp_refresh_plan(self.clock())
+        if not games:
+            self.log_event("info", text)
+            return
+        n = len(games)
+        question = (f"Load new PrizePicks lines now for {n} game{'s' * (n != 1)}? "
+                    + text.replace(" Type: pp refresh yes", ""))
+
+        def done(yes: bool | None) -> None:
+            if yes:
+                self._pp_refresh(True)
+            else:
+                self.log_event("info", "PrizePicks lines not loaded; no credits used.")
+
+        self.push_screen(AskScreen(question, yes="Yes, load them", no="No"), done)
 
     def on_pick_list_why_requested(self, msg: PickList.WhyRequested) -> None:
         view = self._pp_view
@@ -457,7 +487,7 @@ class GridironApp(App):
                     self._pp_selected = []
             self.refresh_views()
 
-        self.push_screen(ConfirmScreen(rec, self.names), done)
+        self.push_screen(ConfirmScreen(rec, self.names, warning=pp_ui.old_prices_text(ev, now)), done)
 
     def on_place_now_list_load_entry_requested(self, msg: PlaceNowList.LoadEntryRequested) -> None:
         rec = self.services.lifecycle.get_rec(msg.rec_id)

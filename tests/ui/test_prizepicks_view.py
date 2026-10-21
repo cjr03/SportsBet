@@ -31,7 +31,7 @@ def test_line_text_plain_english():
     assert ppv.line_text(line("D'Andre Swift", 0.58, side="under", anchored=False, stat="rush_yds", point=60.5)) == \
         "D'Andre Swift LESS than 60.5 rushing yards - our chance 58.0% (our model only - not texted)"
     assert ppv.line_text(line("X", 0.58, anchored=False), gated=False).endswith("(our model only)")
-    assert ppv.line_text(line("Y", None)).endswith("- no estimate yet")
+    assert ppv.line_text(line("Y", None)).endswith("- " + ppv.NO_PRICE)
     assert ppv.line_text(line("Y", None, team=None)).endswith("- team unknown")
 
 
@@ -84,9 +84,9 @@ def test_reason_examples():
         "Not enough lines - we can't use any picks yet (22 skipped: players whose team we don't know yet) "
         "and the smallest entry needs 3.")
     assert "we can use only 1 pick " in ppv.reason_text("few_lines", {"priced": 1, "need": 3})
-    assert ppv.reason_text("stale", {"seconds": 5400}) == "The loaded lines are over 90 minutes old, too old to use."
-    assert ppv.reason_text("stale", {"seconds": 7200}) == "The loaded lines are over 2 hours old, too old to use."
-    assert ppv.reason_text("stale", {"seconds": 3600}) == "The loaded lines are over 1 hour old, too old to use."
+    assert ppv.reason_text("stale", {"seconds": 5400}) == ("The loaded lines are over 90 minutes old, too old for an entry we text.")
+    assert ppv.reason_text("stale", {"seconds": 7200}) == ("The loaded lines are over 2 hours old, too old for an entry we text.")
+    assert ppv.reason_text("stale", {"seconds": 3600}) == ("The loaded lines are over 1 hour old, too old for an entry we text.")
     assert "drift reset" in ppv.reason_text("paused", {})
 
 
@@ -112,7 +112,7 @@ def test_best_picks_and_needed_chance():
     assert out[k + 1] == "  1. B MORE than 249.5 passing yards: our chance 61.0%, needs 56.2% (Patriots at Bears)"
     assert out[k + 2].endswith("needs 57.7% (Patriots at Bears) - our model only, not texted")
     assert len([x for x in out[k + 1:k + 4] if x.startswith("  ")]) == 3
-    assert "3 of 6 lines clear the needed chance." in out  # stale F and unpriced C never count
+    assert "4 of 6 lines clear the needed chance." in out  # old F counts (its older prices), unpriced C never
     assert ppv.clear_text(1, 1) == "1 of 1 line clears the needed chance"
     assert ppv.best_picks(view([line("C", None)])) == []
     assert "Best picks now:" not in ppv.board_lines(view([line("C", None)]), NOW)
@@ -240,7 +240,7 @@ def test_pick_rows_mark_chosen_and_headings_are_not_pickable():
     b = next(r for r in rows if r.key == ppv.pick_key(lines[1]))
     assert b.chosen and b.text.startswith("[x] B MORE")
     c = next(r for r in rows if "C 249.5" in r.text)
-    assert c.key is None and not c.heading and c.text.endswith("no estimate yet")
+    assert c.key is None and not c.heading and c.text.endswith(ppv.NO_PRICE)
     best = ppv.best_rows(v, chosen)
     assert [r.text[:7] for r in best] == ["[x] 1. ", "[ ] 2. "]
     assert best[0].text.endswith("(sportsbooks) - Patriots at Bears")
@@ -318,3 +318,43 @@ def test_pick_log_messages_are_sentences():
         "Took Caleb Williams MORE than 249.5 passing yards out of your PrizePicks entry."
     assert ppv.same_picks_text(7) == "Same picks as PrizePicks idea #7 in PLACE NOW."
     assert ppv.opened_text(7) == "Opened PrizePicks idea #7 in YOUR ENTRY on tab 5."
+
+
+def test_old_lines_stay_pickable_with_their_age():
+    old = NOW - timedelta(hours=7, minutes=10)
+    stale = [replace(line("A", 0.6), fetched_at=old, fresh=False),
+             replace(line("B", 0.58, game=DAL_PHI, team="PHI", anchored=False), fetched_at=old, fresh=False),
+             replace(line("C", None), fetched_at=old, fresh=False)]
+    v = view(stale, ("stale", {"seconds": 10800}), refresh_games=2)
+    rows = ppv.all_rows(v, set(), NOW)
+    a = next(r for r in rows if r.text.startswith("[ ] A "))
+    assert a.key is not None and a.text.endswith("(sportsbook prices from 7 hr ago)"), a.text
+    b = next(r for r in rows if r.text.startswith("[ ] B "))
+    assert b.key is not None and b.text.endswith("(our model only, line from 7 hr ago)"), b.text
+    c = next(r for r in rows if "C 249.5" in r.text)
+    assert c.key is None and c.text.endswith(ppv.NO_PRICE)
+    assert set(ppv.pickable(v)) == {a.key, b.key}
+    assert ppv.best_picks(v) == [] and "Older lines are in ALL LINES" in ppv.best_empty_text(v)
+    summary, _, _ = ppv.board_sections(v, NOW)
+    assert summary[-1] == ("These lines are 7 hours old, past the 3 hours we trust for texted entries: you can "
+                           "still pick them, but prices may have moved. To load new ones, press r or type pp "
+                           "refresh (about 6 Odds API credits, 2 games).")
+    assert "within 24 hours" in ppv.old_lines_text(view(stale, refresh_games=0), NOW)
+    assert "pp add" in ppv.old_lines_text(view(stale), NOW)  # no working Odds API key
+    ev = ppv.evaluate_entry([ppv.pickable(v)[a.key], ppv.pickable(v)[b.key]], v)
+    assert ev.old_since == old
+    text = ppv.entry_lines(ev, v, now=NOW)
+    assert ("Warning: Prices are 7 hours old and may have moved. Type pp refresh to load new ones before you "
+            "place this.") in text
+    assert ppv.old_prices_text(ppv.evaluate_entry([line("A", 0.6)], v), NOW) is None
+    why = ppv.pick_why_lines(ppv.pickable(v)[a.key], v, NOW)
+    assert any("These prices are 7 hours old" in w for w in why)
+
+
+def test_nothing_to_pick_says_why_and_what_to_do():
+    assert ppv.nothing_to_pick_text(view([], refresh_games=0)) == (
+        "No line can be picked yet: lines load about 3 hours before kickoff, or type pp refresh to load them now "
+        "(about 3 credits per game).")
+    assert "pp add" in ppv.nothing_to_pick_text(view([]))
+    unpriced = ppv.nothing_to_pick_text(view([line("C", None)], refresh_games=1))
+    assert unpriced.startswith("No line can be picked yet: none of the loaded lines has a sportsbook price")

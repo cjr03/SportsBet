@@ -15,10 +15,11 @@ class ConfirmScreen(ModalScreen[tuple[float | None, int | None, int | None] | No
 
     BINDINGS = [("escape", "cancel", "Cancel")]
 
-    def __init__(self, rec: Recommendation, names: d.Names = d.DEFAULT_NAMES):
+    def __init__(self, rec: Recommendation, names: d.Names = d.DEFAULT_NAMES, warning: str | None = None):
         super().__init__()
         self.rec = rec
         self.names = names
+        self.warning = warning  # e.g. the PrizePicks prices are hours old
 
     def compose(self) -> ComposeResult:
         r = self.rec
@@ -28,6 +29,8 @@ class ConfirmScreen(ModalScreen[tuple[float | None, int | None, int | None] | No
                 amount = f"{d.money(r.stake_cents)}, " if r.stake_cents > 0 else ""
                 yield Static(f"Did you place {which} ({amount}{d.structure_text(r.structure)})?", id="confirm-title")
                 yield Static(Text(d.bet_text(r, self.names)), id="legs")
+                if self.warning:
+                    yield Static(Text(f"Warning: {self.warning}"), id="confirm-warning")
                 yield Label("Amount you put in, in dollars (e.g. 10)")
                 yield Input(value=f"{r.stake_cents / 100:.2f}" if r.stake_cents > 0 else "", id="stake")
             else:
@@ -97,6 +100,34 @@ class ConfirmScreen(ModalScreen[tuple[float | None, int | None, int | None] | No
 
     def action_cancel(self) -> None:
         self.dismiss(None)
+
+
+class AskScreen(ModalScreen[bool]):
+    """A yes/no question, e.g. before spending API credits. Returns True only on Yes."""
+
+    BINDINGS = [("escape", "no", "No"), ("n", "no", "No"), ("y", "yes", "Yes")]
+
+    def __init__(self, text: str, yes: str = "Yes", no: str = "No"):
+        super().__init__()
+        self.text = text
+        self.labels = (yes, no)
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="confirm-box"):
+            yield Static(Text(self.text), id="ask-text")
+            with Horizontal(id="buttons"):
+                yield Button(self.labels[0], id="yes", variant="success")
+                yield Button(self.labels[1], id="no")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.dismiss(event.button.id == "yes")
+
+    def action_yes(self) -> None:
+        self.dismiss(True)
+
+    def action_no(self) -> None:
+        self.dismiss(False)
 
 
 class WhyScreen(ModalScreen[None]):

@@ -100,3 +100,19 @@ async def test_scan_logs_new_unmatched_player_names_once(services_mocked):
     assert any("Mystery Man" in m for _, m in out)
     out = await svc._job_scan(Job("scan", None, {"what": "all"}), NOW)
     assert not any("Mystery Man" in m for _, m in out)
+
+
+async def test_startup_suggests_pp_refresh_for_nfl_games_without_lines(services_mocked):
+    svc = services_mocked()
+    await svc.startup(NOW)
+    sea = next(g for g in svc.registry.all_since(NOW - timedelta(days=1)) if g.home == "SEA")
+    svc.latest["props"] = []
+    hint = svc.pp_lines_hint(NOW)  # the SEA game is ~31 h away
+    assert hint is not None and hint.startswith("PrizePicks: no lines loaded yet for 1 NFL game in the next 36 hours")
+    assert "type pp refresh" in hint and "about 3 Odds API credits per game" in hint
+    svc.latest["props"] = [PropQuote("odds_api", "prizepicks", sea.game_id, "X", "pass_yds", "over", 200.5, None,
+                                     NOW, fetched_at=NOW)]
+    assert svc.pp_lines_hint(NOW) is None
+    svc.odds = None
+    svc.latest["props"] = []
+    assert svc.pp_lines_hint(NOW) is None  # no key: nothing to suggest spending

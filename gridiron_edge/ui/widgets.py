@@ -548,6 +548,9 @@ class PickList(OptionList):
     class WhyRequested(ToggleRequested):
         pass
 
+    class NothingToPick(Message):
+        """Enter or space with no line that can be picked in this list."""
+
     def __init__(self, **kw):
         super().__init__(**kw)
         self.rows: list[PickRow] = []
@@ -581,6 +584,23 @@ class PickList(OptionList):
     @property
     def selectable(self) -> bool:
         return any(r.key is not None for r in self.rows)
+
+    def highlight_first(self) -> None:
+        """Move the highlight onto a line you can pick when it is on none (or on a heading)."""
+        if self._current() is None and self.selectable:
+            self.highlighted = next(i for i, r in enumerate(self.rows) if r.key is not None)
+
+    def on_focus(self) -> None:
+        self.highlight_first()
+
+    def action_select(self) -> None:
+        if self._current() is None:  # first Enter lands on a line; with none to pick, say why
+            if self.selectable:
+                self.highlight_first()
+            else:
+                self.post_message(self.NothingToPick())
+            return
+        super().action_select()
 
     def _current(self) -> PickKey | None:
         i = self.highlighted

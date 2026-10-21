@@ -50,7 +50,7 @@ HELP: list[tuple[str, str]] = [
     ("keys", "1-5 switch tabs; Down arrow goes into the list on screen, Escape back to typing; "
              "on Home's PLACE NOW: Enter confirms, s skips, d explains it, e opens a PrizePicks idea on tab 5; "
              "on tab 5: Enter or space adds or removes a pick, d explains it, x clears your entry, "
-             "c records an entry you placed"),
+             "c records an entry you placed, r loads new lines (asks first with the cost)"),
 ]
 
 _SETTINGS_FIELDS = {f.name for f in fields(Settings)}

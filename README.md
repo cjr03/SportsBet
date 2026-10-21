@@ -199,7 +199,7 @@ uv run pytest -q
 
 - Keys `1`-`5` switch tabs: Home, Performance, Scores, Log, PrizePicks.
 - On a bet: `Enter` confirms you placed it, `s` skips it, `d` shows "Why this bet?".
-- On the PrizePicks tab: `Enter` adds or removes a pick from your entry, `x` clears it, `c` confirms it.
+- On the PrizePicks tab: `Enter` adds or removes a pick from your entry, `x` clears it, `c` confirms it, `r` loads new lines (asks first with the credit cost). Lines older than 3 hours can still be picked for your own entry; their chance comes from the older sportsbook prices, with a warning, and they are never texted.
 - Type commands in the bar at the bottom; it autocompletes.
 
 | Command | What it does |

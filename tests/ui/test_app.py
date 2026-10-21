@@ -422,10 +422,9 @@ def _pp_dump(app) -> str:
     return "\n".join(rows) + "\n---\n" + str(app.query_one("#pp-entry", Static).render())
 
 
-def seed_pp(svc, game_id: str) -> None:
+def seed_pp(svc, game_id: str, seen: datetime = NOW - timedelta(minutes=5)) -> None:
     """Sportsbook-backed PrizePicks lines on the fixture game: two Seahawks and one Bears player."""
     from gridiron_edge.types import PropQuote
-    seen = NOW - timedelta(minutes=5)
     out = []
     for player, team, stat, line, over in (("Geno Smith", "SEA", "pass_yds", 229.5, 1.52),
                                            ("Kenneth Walker", "SEA", "rush_yds", 64.5, 1.56),
@@ -624,6 +623,119 @@ async def test_tab5_from_command_bar_keeps_letters_typing(services_mocked):
         await pilot.press("escape")
         await pilot.pause()
         assert app.focused is cmd
+
+
+def _sea(svc):
+    return next(g for g in svc.registry.all_since(NOW - timedelta(days=1)) if g.home == "SEA")
+
+
+async def test_prizepicks_old_lines_can_still_be_picked_and_recorded(services_mocked):
+    """Lines older than props_stale_seconds: rows show our chance from the older sportsbook prices and
+    their age, Enter adds them, YOUR ENTRY warns, c records with the warning; nothing is built or texted."""
+    from gridiron_edge import pipeline
+    svc = services_mocked(pp_structures=("2-power", "3-power", "4-flex", "5-flex", "6-flex"))
+    svc.ledger.deposit(100_000)
+    app = GridironApp(svc, clock=lambda: NOW)
+    async with app.run_test(size=(140, 60)) as pilot:
+        await app.workers.wait_for_complete()
+        seed_pp(svc, _sea(svc).game_id, seen=NOW - timedelta(hours=7))
+        app.refresh_views()
+        await pilot.pause()
+        summary = str(app.query_one("#pp-summary", Static).render())
+        assert "7 hours old" in summary and "pp refresh" in summary, summary
+        await pilot.press("5", "down")
+        await pilot.pause()
+        board = app.query_one("#pp-board", PickList)
+        assert app.focused is board, _pp_dump(app)
+        assert board.highlighted is not None and board.rows[board.highlighted].key is not None, _pp_dump(app)
+        rows = [r for r in board.rows if r.key is not None]
+        assert len(rows) == 3, _pp_dump(app)
+        for r in rows:
+            assert " MORE than " in r.text and "our chance " in r.text, r.text
+            assert "(sportsbook prices from 7 hr ago)" in r.text, r.text
+        await pilot.press("enter")
+        await pilot.pause()
+        assert len(app._pp_selected) == 1, log_lines(app)[-3:]
+        first = app._pp_selected[0][0]
+        other = next(i for i, r in enumerate(board.rows) if r.key is not None and r.key[0] != first
+                     and (r.key[0] == "Caleb Williams") != (first == "Caleb Williams"))
+        board.highlighted = other
+        await pilot.press("enter")
+        await pilot.pause()
+        assert len(app._pp_selected) == 2, log_lines(app)[-3:]
+        entry = str(app.query_one("#pp-entry", Static).render())
+        warn = "Prices are 7 hours old and may have moved. Type pp refresh to load new ones before you place this."
+        assert warn in entry and "Best entry type for these 2 picks" in entry, entry
+        snap = svc.snapshot(NOW)
+        assert pipeline.pp_entry_candidates(snap, svc.settings, svc.projector) == []
+        assert pipeline.pp_blocker(snap, svc.settings, svc.projector)[0] == "stale"
+        await pilot.press("c")
+        await pilot.pause()
+        assert isinstance(app.screen, ConfirmScreen)
+        assert warn in str(app.screen.query_one("#confirm-warning", Static).render())
+        app.screen.query_one("#stake", Input).value = "5"
+        await pilot.click("#ok")
+        await pilot.pause()
+        (bet,) = svc.lifecycle.open_bets()
+        assert bet["kind"] == "pp_entry" and bet["stake_cents"] == 500
+
+
+async def test_prizepicks_nothing_to_pick_says_why(services_mocked):
+    """Down/Enter with no line you can pick log what to do instead of doing nothing."""
+    from gridiron_edge.types import PropQuote
+    svc = services_mocked()
+    app = GridironApp(svc, clock=lambda: NOW)
+    async with app.run_test(size=(140, 60)) as pilot:
+        await app.workers.wait_for_complete()
+        svc.latest["props"] = []
+        app.refresh_views()
+        await pilot.pause()
+        await pilot.press("5", "down")
+        await pilot.pause()
+        assert "No line can be picked yet: lines load about 3 hours before kickoff, or type pp refresh" \
+            in log_lines(app)[-1], log_lines(app)[-3:]
+        gid = _sea(svc).game_id
+        seen = NOW - timedelta(minutes=5)
+        svc.latest["props"] = [PropQuote("odds_api", "prizepicks", gid, "Nobody Known", "pass_yds", "over",
+                                         199.5, None, seen, fetched_at=seen)]
+        app.refresh_views()
+        await pilot.pause()
+        board = app.query_one("#pp-board", PickList)
+        board.focus()
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app._pp_selected == []
+        assert "No line can be picked yet: none of the loaded lines" in log_lines(app)[-1], log_lines(app)[-3:]
+
+
+async def test_prizepicks_r_asks_before_loading_lines(services_mocked):
+    from gridiron_edge.ui.screens import AskScreen
+    svc = services_mocked()
+    clock = NOW + timedelta(hours=10)  # the SEA game is ~21 h away
+    app = GridironApp(svc, clock=lambda: clock)
+    async with app.run_test(size=(140, 60)) as pilot:
+        await app.workers.wait_for_complete()
+        seed_pp(svc, _sea(svc).game_id, seen=clock - timedelta(hours=7))
+        app.refresh_views()
+        await pilot.pause()
+        summary = str(app.query_one("#pp-summary", Static).render())
+        assert "press r" in summary and "about 3 Odds API credits" in summary, summary
+        before = svc.budgets["odds_api"].remaining()
+        await pilot.press("5", "down", "r")
+        await pilot.pause()
+        assert isinstance(app.screen, AskScreen)
+        assert "3 Odds API credits" in app.screen.text
+        await pilot.click("#no")
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        assert not isinstance(app.screen, AskScreen) and svc.budgets["odds_api"].remaining() == before
+        await pilot.press("r")
+        await pilot.pause()
+        await pilot.click("#yes")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert "Loading PrizePicks lines for 1 game" in "\n".join(log_lines(app))
 
 
 def seed_pp6(svc, sea_game) -> None:

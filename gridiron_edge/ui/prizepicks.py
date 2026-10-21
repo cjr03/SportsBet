@@ -30,6 +30,30 @@ class PPView:
     budget: Any = None  # pipeline.Budget: cap headroom for sizing an entry you build yourself
     daily_left: int | None = None  # cents left under today's PrizePicks limit
     watch_only: dict[str, bool] = field(default_factory=dict)  # league -> PrizePicks ideas held back
+    refresh_games: int | None = None  # games `pp refresh` would load now; None: no working Odds API key
+    refresh_cost: int = 3  # Odds API credits per game for a props pull
+    refresh_why: str = ""  # why nothing can load now although games are close (credits kept for game odds)
+
+
+def _hours(seconds: float) -> str:
+    """'3 hours', '1 hour', '90 minutes'."""
+    mins = round(seconds / 60)
+    return f"{mins // 60} hour{'s' * (mins != 60)}" if mins % 60 == 0 else f"{mins} minutes"
+
+
+def age_words(t: datetime, now: datetime) -> str:
+    """How old something is, rounded down: '7 hours', '1 hour', '45 minutes'."""
+    mins = max(0, int((now - t).total_seconds() // 60))
+    if mins < 60:
+        return f"{mins} minute{'s' * (mins != 1)}"
+    h = mins // 60
+    return f"{h} hour{'s' * (h != 1)}"
+
+
+def _age_short(t: datetime, now: datetime) -> str:
+    """'7 hr ago', '45 min ago'."""
+    mins = max(0, int((now - t).total_seconds() // 60))
+    return f"{mins} min ago" if mins < 60 else f"{mins // 60} hr ago"
 
 
 def best_structure(s: Settings) -> tuple[Structure, float] | None:
@@ -63,9 +87,8 @@ def reason_text(code: str, info: dict) -> str:
         case "no_lines":
             return "No PrizePicks lines are loaded yet."
         case "stale":
-            mins = round(info.get("seconds", 3 * 3600) / 60)
-            age = (f"{mins // 60} hour{'s' * (mins != 60)}" if mins % 60 == 0 else f"{mins} minutes")
-            return f"The loaded lines are over {age} old, too old to use."
+            return (f"The loaded lines are over {_hours(info.get('seconds', 3 * 3600))} old, too old for an "
+                    "entry we text.")
         case "no_structures":
             return "None of the allowed entry types can pay off with these payouts."
         case "few_lines":
@@ -101,20 +124,27 @@ def _matchup(g: Game, names: d.Names) -> str:
     return f"{names.team(g.league, g.away)} at {names.team(g.league, g.home)}"
 
 
-def _source(ln: PPLine, gated: bool) -> str:
+def _source(ln: PPLine, gated: bool, now: datetime | None = None) -> str:
+    if not ln.fresh and now is not None:  # older than props_stale_seconds: say how old the prices are
+        ago = _age_short(ln.fetched_at, now)
+        return f"(sportsbook prices from {ago})" if ln.anchored else f"(our model only, line from {ago})"
     if ln.anchored:
         return "(sportsbooks)"
     return "(our model only - not texted)" if gated else "(our model only)"
 
 
-def line_text(ln: PPLine, gated: bool = True) -> str:
+NO_PRICE = "no price yet (no sportsbook prices and no estimate from our model)"
+
+
+def line_text(ln: PPLine, gated: bool = True, now: datetime | None = None) -> str:
     """e.g. 'Caleb Williams MORE than 249.5 passing yards - our chance 56.0% (sportsbooks)'."""
     line = f"{ln.line:g}"
     if ln.p is None or ln.side is None:
-        why = "too old to use" if not ln.fresh else "no estimate yet" if ln.team else "team unknown"
+        why = NO_PRICE if ln.team else "team unknown"
         return f"{ln.player} {line} {d.stat_words(ln.stat)} - {why}"
     more = "MORE" if ln.side == "over" else "LESS"
-    return f"{ln.player} {more} than {line} {d.stat_words(ln.stat)} - our chance {ln.p:.1%} {_source(ln, gated)}"
+    return (f"{ln.player} {more} than {line} {d.stat_words(ln.stat)} - our chance {ln.p:.1%} "
+            f"{_source(ln, gated, now)}")
 
 
 def _by_game(view: PPView) -> list[tuple[Game, list[PPLine]]]:
@@ -133,6 +163,57 @@ def _next_text(view: PPView, now: datetime) -> str:
     if view.next_load is not None and view.next_load > now:
         return f"More lines load about {d.when(view.next_load, now)} PT, 3 hours before kickoff."
     return "More lines load about 3 hours before each kickoff."
+
+
+def refresh_text(view: PPView) -> str:
+    """How to load new lines now, with the cost."""
+    if view.refresh_games is None:
+        return ("New lines need a working Odds API key (ODDS_API_KEY in .env); you can type lines in with "
+                "pp add.")
+    if view.refresh_games == 0 and view.refresh_why:
+        return view.refresh_why
+    if view.refresh_games == 0:
+        return (f"Type pp refresh (or press r) to load new ones once a game is within 24 hours of kickoff "
+                f"(about {view.refresh_cost} Odds API credits per game).")
+    k = view.refresh_games
+    return (f"To load new ones, press r or type pp refresh (about {k * view.refresh_cost} Odds API credits, "
+            f"{k} game{'s' * (k != 1)}).")
+
+
+def old_lines_text(view: PPView, now: datetime) -> str | None:
+    """When the lines are older than the fresh limit: how old, what that means, and how to refresh."""
+    old = [ln.fetched_at for ln in view.lines if ln.game_id in view.games and not ln.fresh]
+    if not old:
+        return None
+    limit = _hours(view.settings.props_stale_seconds)
+    return (f"These lines are {age_words(max(old), now)} old, past the {limit} we trust for texted entries: "
+            f"you can still pick them, but prices may have moved. {refresh_text(view)}")
+
+
+def nothing_to_pick_text(view: PPView | None) -> str:
+    """Why Enter or Down on tab 5 finds no line to pick, and what to do."""
+    if view is not None and "prizepicks" not in view.settings.venues:
+        return "PrizePicks is turned off. To turn it on, type: set venues kalshi,prizepicks"
+    cost = view.refresh_cost if view is not None else 3
+    if view is not None and view.refresh_games is None:
+        what = 'type lines in with "pp add" (no working Odds API key to load them)'
+    else:
+        what = f"type pp refresh to load them now (about {cost} credits per game)"
+    if view is None or not _by_game(view):
+        return f"No line can be picked yet: lines load about 3 hours before kickoff, or {what}."
+    return ("No line can be picked yet: none of the loaded lines has a sportsbook price or an estimate from our "
+            f"model, or we don't know the player's team. Wait for new lines, or {what}.")
+
+
+BEST_EMPTY = "No pick clears its needed chance yet."
+
+
+def best_empty_text(view: PPView) -> str:
+    """BEST PICKS NOW when it is empty: only fresh lines are listed here."""
+    if any(not ln.fresh and ln.p is not None for ln in view.lines if ln.game_id in view.games):
+        return ("No fresh line clears its needed chance. Older lines are in ALL LINES below with our chance "
+                "from their older prices.")
+    return BEST_EMPTY
 
 
 def _entry_text(view: PPView) -> str:
@@ -157,7 +238,7 @@ def needed_chance(ln: PPLine, s: Settings, best: tuple[Structure, float] | None 
 
 def _clears(ln: PPLine, s: Settings, best) -> bool:
     need = needed_chance(ln, s, best)
-    return ln.p is not None and ln.fresh and need is not None and ln.p >= need
+    return ln.p is not None and need is not None and ln.p >= need
 
 
 def clear_text(n_clear: int, n: int) -> str:
@@ -166,9 +247,9 @@ def clear_text(n_clear: int, n: int) -> str:
 
 
 def best_picks(view: PPView, n: int = 3) -> list[PPLine]:
-    """The n picks with the highest chance above what they need (lines that reach it only)."""
+    """The n picks with the highest chance above what they need (fresh lines that reach it only)."""
     best = best_structure(view.settings)
-    usable = [ln for ln in view.lines if ln.game_id in view.games and ln.team is not None
+    usable = [ln for ln in view.lines if ln.game_id in view.games and ln.team is not None and ln.fresh
               and _clears(ln, view.settings, best)]
 
     def room(ln: PPLine) -> float:
@@ -210,6 +291,9 @@ def board_sections(view: PPView, now: datetime, names: d.Names = d.DEFAULT_NAMES
                needed_text(view.settings),
                _entry_text(view),
                clear_text(n_clear, n).capitalize() + "."]
+    old = old_lines_text(view, now)
+    if old:
+        summary.append(old)
     top = [f"{i}. {best_pick_text(ln, view, names, best)}" for i, ln in enumerate(best_picks(view), 1)]
     lines_out: list[str] = []
     for g, lines in groups:
@@ -287,7 +371,7 @@ def dropped_text(key: PickKey) -> str:
     player, stat, line, side = key
     more = "MORE" if side == "over" else "LESS"
     return (f"Removed {player} {more} than {line:g} {d.stat_words(stat)} from your PrizePicks entry: that line "
-            "is gone, too old to use, or we now favor the other side.")
+            "is gone or we now favor the other side.")
 
 
 def add_problem(chosen: list[PPLine], ln: PPLine, view: PPView, names: d.Names = d.DEFAULT_NAMES) -> str | None:
@@ -325,6 +409,7 @@ class EntryEval:
     stake_note: str = ""
     legs: list[Pick] = field(default_factory=list)
     linked: bool = False  # some picks share a game
+    old_since: datetime | None = None  # oldest pull among picks older than the fresh limit
 
     @property
     def ready(self) -> bool:
@@ -353,6 +438,8 @@ def evaluate_entry(picks: list[PPLine], view: PPView, names: d.Names = d.DEFAULT
     linked-together, independent and linked-apart, and the stake from the same sizing and limits."""
     s, out = view.settings, EntryEval(list(picks))
     n = len(picks)
+    old = [ln.fetched_at for ln in picks if not ln.fresh]
+    out.old_since = min(old) if old else None
     if n < MIN_PICKS:
         out.problems.append(f"Pick at least {MIN_PICKS} lines; a PrizePicks entry needs {MIN_PICKS} to "
                             f"{MAX_PICKS} picks.")
@@ -458,7 +545,16 @@ def outcome_texts(ev: EntryEval) -> list[str]:
     return out
 
 
-def entry_lines(ev: EntryEval, view: PPView, names: d.Names = d.DEFAULT_NAMES, waiting: int = 0) -> list[str]:
+def old_prices_text(ev: EntryEval, now: datetime) -> str | None:
+    """'Prices are 7 hours old and may have moved. Type pp refresh ...' when a pick uses old prices."""
+    if ev.old_since is None:
+        return None
+    return (f"Prices are {age_words(ev.old_since, now)} old and may have moved. Type pp refresh to load new ones "
+            "before you place this.")
+
+
+def entry_lines(ev: EntryEval, view: PPView, names: d.Names = d.DEFAULT_NAMES, waiting: int = 0,
+                now: datetime | None = None) -> list[str]:
     """The YOUR ENTRY box, line by line, in plain English; the last line names the keys. `waiting` is
     how many chosen picks are kept while their lines aren't loaded."""
     if not ev.picks and waiting:
@@ -476,6 +572,9 @@ def entry_lines(ev: EntryEval, view: PPView, names: d.Names = d.DEFAULT_NAMES, w
         g = view.games.get(ln.game_id)
         chance = f" - our chance {ln.p:.1%}" if ln.p is not None else ""
         out.append(f"{i}. {pick_words(ln)}{chance}" + (f" ({_matchup(g, names)})" if g else ""))
+    old = old_prices_text(ev, now) if now is not None else None
+    if old:
+        out.append(f"Warning: {old}")
     for msg in ev.problems:
         out.append(f"Can't record yet: {msg}")
     if ev.structure is not None and not ev.problems:
@@ -557,12 +656,14 @@ def _mark(chosen: bool) -> str:
     return "[x] " if chosen else "[ ] "
 
 
-def pick_row_text(ln: PPLine, view: PPView, best=None, gated: bool = True, matchup: str = "") -> str:
-    """'Caleb Williams MORE than 249.5 passing yards - our chance 56.0%, needs 56.2% (sportsbooks)'."""
+def pick_row_text(ln: PPLine, view: PPView, best=None, gated: bool = True, matchup: str = "",
+                  now: datetime | None = None) -> str:
+    """'Caleb Williams MORE than 249.5 passing yards - our chance 56.0%, needs 56.2% (sportsbooks)'.
+    With `now`, an old line says how old its prices are: '(sportsbook prices from 7 hr ago)'."""
     need = needed_chance(ln, view.settings, best if best is not None else best_structure(view.settings))
     needs = "" if need is None else f", needs {need:.1%}"
     where = f" - {matchup}" if matchup else ""
-    return f"{pick_words(ln)} - our chance {ln.p:.1%}{needs} {_source(ln, gated)}{where}"
+    return f"{pick_words(ln)} - our chance {ln.p:.1%}{needs} {_source(ln, gated, now)}{where}"
 
 
 def best_rows(view: PPView, chosen: set[PickKey], names: d.Names = d.DEFAULT_NAMES) -> list[PickRow]:
@@ -592,13 +693,14 @@ def all_rows(view: PPView, chosen: set[PickKey], now: datetime, names: d.Names =
         gated = view.model_gated.get(g.league, True)
         for ln in lines:
             if ln.p is None or ln.side is None:
-                rows.append(PickRow(f"    {line_text(ln, gated)}"))
+                rows.append(PickRow(f"    {line_text(ln, gated, now)}"))
                 continue
             if ln.team is None:
-                rows.append(PickRow(f"    {pick_row_text(ln, view, best, gated)} - {NO_TEAM}"))
+                rows.append(PickRow(f"    {pick_row_text(ln, view, best, gated, now=now)} - {NO_TEAM}"))
                 continue
             key = pick_key(ln)
-            rows.append(PickRow(_mark(key in chosen) + pick_row_text(ln, view, best, gated), key, key in chosen))
+            rows.append(PickRow(_mark(key in chosen) + pick_row_text(ln, view, best, gated, now=now), key,
+                                key in chosen))
     return rows
 
 
@@ -640,8 +742,8 @@ def pick_why_lines(ln: PPLine, view: PPView, now: datetime, names: d.Names = d.D
         out.append("No sportsbook has a price for this player and stat.")
         nearest = None
     if ln.p is None or ln.side is None:
-        why = "it is too old to use" if not ln.fresh else "we have no estimate yet" if ln.team else \
-            "we don't know the player's team yet"
+        why = ("no sportsbook prices this line and our model has no estimate for the player" if ln.team
+               else "we don't know the player's team yet")
         out.append(f"Our chance: none, because {why}.")
     elif ln.anchored:
         moved = (f", then moved from their line of {nearest:g} to PrizePicks' {ln.line:g}"
@@ -664,6 +766,10 @@ def pick_why_lines(ln: PPLine, view: PPView, now: datetime, names: d.Names = d.D
         else:
             out.append(f"Our chance: {ln.p:.1%}. None of the allowed entry types can pay off with these payouts.")
     out.append(f"PrizePicks line pulled at {d.when(ln.fetched_at, now)} PT ({_ago(ln.fetched_at, now)}).")
+    if not ln.fresh and ln.p is not None:
+        out.append(f"These prices are {age_words(ln.fetched_at, now)} old, past the "
+                   f"{_hours(s.props_stale_seconds)} we trust for texted entries, so they may have moved. Type pp "
+                   "refresh to load new ones.")
     out.append(f"[details] {ln.game_id} {ln.player}|{ln.stat}|{ln.line:g}|{ln.side} "
                f"p={'-' if ln.p is None else f'{ln.p:.4f}'} anchored={ln.anchored} fresh={ln.fresh}")
     return out
