@@ -145,3 +145,17 @@ class Recommendation:
         """Hash of kind, leg identities and prices rounded to 0.01."""
         parts = sorted(f"{leg.identity()}@{leg.price:.2f}" for leg in self.legs)
         return hashlib.sha1("\n".join([self.kind, *parts]).encode()).hexdigest()
+
+    @property
+    def idea_key(self) -> str:
+        """Hash of kind and each leg's contract, side and line, ignoring prices: one bet idea."""
+        parts = sorted(f"{leg.identity()}|{leg.side}|{leg.line}" for leg in self.legs)
+        return hashlib.sha1("\n".join([self.kind, *parts]).encode()).hexdigest()
+
+    @property
+    def family_key(self) -> str:
+        """Ideas texted as one: every arb/middle pair on the same game(s); otherwise the idea itself."""
+        if self.kind not in ("arb", "middle"):
+            return self.idea_key
+        games = sorted({leg.game_id or (leg.ticker or leg.identity()).rsplit("-", 1)[0] for leg in self.legs})
+        return hashlib.sha1("\n".join([self.kind, "family", *games]).encode()).hexdigest()

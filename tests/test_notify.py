@@ -1,11 +1,14 @@
 import subprocess
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
 
-from gridiron_edge.notify.chain import NotifyChain
+from gridiron_edge.bets.lifecycle import Lifecycle
+from gridiron_edge.db import Ledger
+from gridiron_edge.notify import NotifyResult
+from gridiron_edge.notify.chain import MAX_PER_DAY, MAX_PER_HOUR, RETEXT_GAP, NotifyChain
 from gridiron_edge.notify.console import ConsoleNotifier
 from gridiron_edge.notify.format import format_message
 from gridiron_edge.notify.imessage import IMessageNotifier
@@ -149,10 +152,11 @@ def test_quiet_hours_suppress_non_arb(conn, rec_kalshi, rec_arb, midnight):
     assert ch.notify(rec_kalshi, midnight, force=True).ok
 
 
-def test_arb_sends_to_every_channel(conn, rec_arb, noon):
+def test_arb_stops_at_first_ok_channel(conn, rec_arb, noon):
     a, b = [], []
     ch = NotifyChain(conn, [ConsoleNotifier(a), ConsoleNotifier(b)], (23, 8))
-    assert ch.notify(rec_arb, noon).ok and len(a) == 1 and len(b) == 1
+    assert ch.notify(rec_arb, noon).ok and len(a) == 1 and b == []
+    assert conn.execute("SELECT COUNT(*) FROM notifications").fetchone()[0] == 1
 
 
 def test_observe_only_never_sent(conn, rec_kalshi, noon):
@@ -203,22 +207,19 @@ def test_cooldown_one_text_per_contract_while_price_drifts(conn, noon):
     assert ch.notify(first, noon).ok
     assert ch.notify(second, noon + timedelta(minutes=5)) is None
     assert len(sink) == 1
-    assert ch.notify(rec_at(0.53), noon + timedelta(minutes=31)).ok and len(sink) == 2
+    assert ch.notify(rec_at(0.53), noon + timedelta(minutes=31)) is None
+    assert ch.notify(rec_at(0.52), noon + RETEXT_GAP).ok and len(sink) == 2
 
 
-def test_cooldown_does_not_hold_back_arbs(conn, rec_arb, noon):
-    from datetime import timedelta
-
-    from gridiron_edge.bets.lifecycle import Lifecycle
-    from gridiron_edge.db import Ledger
-
-    lc = Lifecycle(conn, Ledger(conn))
+def test_arb_price_drift_not_retexted(conn, rec_arb, noon):
+    lc = _lc(conn)
     sink = []
     ch = NotifyChain(conn, [ConsoleNotifier(sink)], (23, 8))
-    a, _ = lc.upsert_recommendation(rec_arb, noon)
+    a, _ = lc.upsert_recommendation(replace(rec_arb, id=None), noon)
     legs = [replace(leg, price=leg.price - 0.01) for leg in rec_arb.legs]
-    b, _ = lc.upsert_recommendation(_rec("arb", legs, qty=10, ev=0.05), noon)
-    assert ch.notify(a, noon).ok and ch.notify(b, noon + timedelta(minutes=5)).ok and len(sink) == 2
+    b, new = lc.upsert_recommendation(_rec("arb", legs, id=None, qty=20, ev=0.014), noon)
+    assert new and a.dedupe_key != b.dedupe_key
+    assert ch.notify(a, noon).ok and ch.notify(b, noon + timedelta(minutes=5)) is None and len(sink) == 1
 
 
 def test_format_kalshi_fee_uses_market_multiplier(rec_kalshi):
@@ -275,3 +276,160 @@ def test_every_rec_kind_formats_in_plain_english(rec_kalshi, rec_pp, rec_arb):
 def test_format_pp_uses_the_payout_table_in_use(rec_pp):
     t = format_message(rec_pp, payouts={(3, "flex"): {3: 2.25, 2: 1.25}})
     assert "pays 2.25 times your entry for 3 right, 1.25 times for 2" in t
+
+
+# -- one idea = one text ------------------------------------------------------------
+
+
+class Phone:
+    """A phone channel (counts toward the text limits, unlike the console)."""
+    name = "imessage"
+
+    def __init__(self, sink, ok=True):
+        self.sink, self.ok = sink, ok
+
+    def send(self, text):
+        self.sink.append(text)
+        return NotifyResult(self.ok, self.name, None if self.ok else "down")
+
+
+def _lc(conn):
+    return Lifecycle(conn, Ledger(conn))
+
+
+def _game_rec(ticker, ev=0.05, side="yes", price=0.50, game_id="g", line=None):
+    leg = Leg("kalshi", ticker, side, price, 0.60, game_id, ticker=ticker, line=line)
+    return _rec("kalshi_game", [leg], id=None, qty=20, ev=ev, expires_at=datetime(2026, 10, 25, 18, 0, tzinfo=PT))
+
+
+def _ladder_arb(game, a, b, ev=0.03, pa=0.28, pb=0.62):
+    """A ladder pair on one game (like the AKR/KENT spread pairs that were each texted on their own)."""
+    legs = [Leg("kalshi", a, "yes", pa, pa, game, ticker=f"KXNCAAFSPREAD-{game}-{a}", line=5.5),
+            Leg("kalshi", b, "no", pb, pb, game, ticker=f"KXNCAAFSPREAD-{game}-{b}", line=6.5)]
+    return _rec("arb", legs, id=None, qty=20, ev=ev, structure="kalshi_ladder")
+
+
+def test_yes_and_no_on_one_ticker_are_different_ideas():
+    yes, no = _game_rec("KXNFLGAME-X"), _game_rec("KXNFLGAME-X", side="no")
+    assert yes.leg_key == no.leg_key  # unchanged: the DB and CLV report rely on it
+    assert yes.idea_key != no.idea_key
+    assert _game_rec("KXNFLGAME-X", price=0.51).idea_key == yes.idea_key  # price is not part of the idea
+
+
+def test_clear_ev_gain_retexted_inside_gap_small_gain_not(conn, noon):
+    lc, sink = _lc(conn), []
+    ch = NotifyChain(conn, [ConsoleNotifier(sink)], (23, 8))
+    first, _ = lc.upsert_recommendation(_game_rec("KXNFLGAME-X", ev=0.05, price=0.50), noon)
+    small, _ = lc.upsert_recommendation(_game_rec("KXNFLGAME-X", ev=0.065, price=0.49), noon)
+    big, _ = lc.upsert_recommendation(_game_rec("KXNFLGAME-X", ev=0.08, price=0.48), noon)
+    assert ch.notify(first, noon).ok
+    assert ch.notify(small, noon + timedelta(minutes=10)) is None  # +0.015: under the 0.02 bar
+    assert ch.notify(big, noon + timedelta(minutes=20)).ok  # +0.03 and 1.6x
+    nearly, _ = lc.upsert_recommendation(_game_rec("KXNFLGAME-X", ev=0.099, price=0.47), noon)
+    assert ch.notify(nearly, noon + timedelta(minutes=30)) is None  # +0.019 over the last texted 0.08
+    assert len(sink) == 2
+
+
+def test_ev_gain_must_also_be_a_quarter_better(conn, noon):
+    lc, sink = _lc(conn), []
+    ch = NotifyChain(conn, [ConsoleNotifier(sink)], (23, 8))
+    first, _ = lc.upsert_recommendation(_game_rec("KXNFLGAME-X", ev=0.20, price=0.50), noon)
+    more, _ = lc.upsert_recommendation(_game_rec("KXNFLGAME-X", ev=0.23, price=0.49), noon)
+    assert ch.notify(first, noon).ok and ch.notify(more, noon + timedelta(minutes=5)) is None  # 1.15x
+
+
+def test_idea_retexted_after_gap(conn, noon):
+    lc, sink = _lc(conn), []
+    ch = NotifyChain(conn, [ConsoleNotifier(sink)], (23, 8))
+    a, _ = lc.upsert_recommendation(_game_rec("KXNFLGAME-X", price=0.50), noon)
+    b, _ = lc.upsert_recommendation(_game_rec("KXNFLGAME-X", price=0.51), noon)
+    assert ch.notify(a, noon).ok
+    assert ch.notify(b, noon + RETEXT_GAP - timedelta(minutes=1)) is None
+    assert ch.notify(b, noon + RETEXT_GAP).ok and len(sink) == 2
+
+
+def test_ladder_pairs_on_one_game_are_one_text(conn, noon):
+    lc, sink = _lc(conn), []
+    ch = NotifyChain(conn, [ConsoleNotifier(sink)], (23, 8))
+    a, _ = lc.upsert_recommendation(_ladder_arb("26OCT24AKRKENT", "AKR6", "KENT7"), noon)
+    b, _ = lc.upsert_recommendation(_ladder_arb("26OCT24AKRKENT", "AKR3", "KENT10"), noon)
+    assert a.leg_key != b.leg_key and a.family_key == b.family_key
+    assert ch.notify(a, noon).ok and ch.notify(b, noon + timedelta(minutes=5)) is None and len(sink) == 1
+    other, _ = lc.upsert_recommendation(_ladder_arb("26OCT24MISSTEX", "MISS15", "TEX17"), noon)
+    assert other.family_key != a.family_key and ch.notify(other, noon).ok
+
+
+def test_family_key_falls_back_to_event_ticker():
+    a = _ladder_arb(None, "AKR6", "KENT7")
+    a.legs = [replace(g, ticker=f"KXNCAAFSPREAD-26OCT24AKRKENT-{g.description}") for g in a.legs]
+    b = _ladder_arb(None, "AKR3", "KENT10")
+    b.legs = [replace(g, ticker=f"KXNCAAFSPREAD-26OCT24AKRKENT-{g.description}") for g in b.legs]
+    assert a.family_key == b.family_key and a.idea_key != b.idea_key
+
+
+def test_seventh_idea_in_an_hour_is_held_and_summarised(conn, noon):
+    lc, sink = _lc(conn), []
+    ch = NotifyChain(conn, [Phone(sink)], (23, 8))
+    recs = [lc.upsert_recommendation(_game_rec(f"KXNFLGAME-{i}", game_id=f"g{i}"), noon)[0]
+            for i in range(MAX_PER_HOUR + 1)]
+    for i, r in enumerate(recs[:MAX_PER_HOUR]):
+        assert ch.notify(r, noon + timedelta(minutes=i)).ok
+    held = ch.notify(recs[-1], noon + timedelta(minutes=10))
+    assert held == NotifyResult(False, "held", "rate limit") and ch.held == [recs[-1]]
+    res = ch.flush_held(noon + timedelta(minutes=10))
+    assert res.ok and len(sink) == MAX_PER_HOUR + 1 and f"#{recs[-1].id}" in sink[-1]
+    assert len(sink[-1]) <= 480 and sink[-1].isascii() and ch.held == []
+    row = conn.execute("SELECT rec_id, dedupe_key FROM notifications ORDER BY id DESC LIMIT 1").fetchone()
+    assert row["rec_id"] is None and row["dedupe_key"] == "summary"
+    assert ch.flush_held(noon + timedelta(minutes=11)) is None  # nothing held
+
+
+def test_one_summary_per_hour(conn, noon):
+    lc, sink = _lc(conn), []
+    ch = NotifyChain(conn, [Phone(sink)], (23, 8))
+    for i in range(MAX_PER_HOUR + 2):
+        r, _ = lc.upsert_recommendation(_game_rec(f"KXNFLGAME-{i}", game_id=f"g{i}"), noon)
+        ch.notify(r, noon)
+        if i == MAX_PER_HOUR:
+            assert ch.flush_held(noon).ok
+    assert ch.flush_held(noon + timedelta(minutes=30)) is None and len(ch.held) == 1
+    assert ch.flush_held(noon + timedelta(minutes=61)).ok and ch.held == []
+
+
+def test_daily_cap_holds_and_summary_goes_to_console_only(conn, noon):
+    lc = _lc(conn)
+    for i in range(MAX_PER_DAY):  # 30 texts over the last day, none in the last hour
+        conn.execute("INSERT INTO notifications (ts, rec_id, dedupe_key, channel, ok, text) "
+                     "VALUES (?,?,?,?,1,'x')",
+                     ((noon - timedelta(hours=2, minutes=i * 40)).isoformat(), 1000 + i, f"k{i}", "imessage"))
+    phone, log = [], []
+    ch = NotifyChain(conn, [Phone(phone), ConsoleNotifier(log)], (23, 8))
+    r, _ = lc.upsert_recommendation(_game_rec("KXNFLGAME-NEW"), noon)
+    assert ch.notify(r, noon).channel == "held"
+    res = ch.flush_held(noon)
+    assert res.ok and res.channel == "console" and phone == [] and f"#{r.id}" in log[0]
+
+
+def test_burst_of_120_arbs_is_six_texts_and_one_summary(conn, noon):
+    lc, sink = _lc(conn), []
+    ch = NotifyChain(conn, [Phone(sink), ConsoleNotifier([])], (23, 8))
+    for i in range(120):
+        r, _ = lc.upsert_recommendation(_ladder_arb(f"G{i}", "A6", "B7", ev=0.01 + i / 1000), noon)
+        ch.notify(r, noon)
+    ch.flush_held(noon)
+    assert len(sink) == MAX_PER_HOUR + 1
+    assert conn.execute("SELECT COUNT(*) FROM notifications WHERE channel='console'").fetchone()[0] == 0
+
+
+def test_upgrade_fills_keys_for_texts_already_sent(conn, noon):
+    lc = _lc(conn)
+    a, _ = lc.upsert_recommendation(_ladder_arb("26OCT24AKRKENT", "AKR6", "KENT7"), noon)
+    conn.execute("DROP TABLE notifications")
+    conn.execute("CREATE TABLE notifications (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, "
+                 "rec_id INTEGER, dedupe_key TEXT, channel TEXT NOT NULL, ok INTEGER NOT NULL, error TEXT, "
+                 "text TEXT NOT NULL)")
+    conn.execute("INSERT INTO notifications (ts, rec_id, dedupe_key, channel, ok, text) VALUES (?,?,?,?,1,'x')",
+                 (noon.isoformat(), a.id, a.dedupe_key, "imessage"))
+    ch = NotifyChain(conn, [ConsoleNotifier([])], (23, 8))
+    b, _ = lc.upsert_recommendation(_ladder_arb("26OCT24AKRKENT", "AKR3", "KENT10"), noon)
+    assert ch.notify(b, noon + timedelta(minutes=10)) is None  # same game as the text before the upgrade

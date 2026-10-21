@@ -1280,17 +1280,25 @@ class Services:
         recs = [r for r in pipeline.scan(self.snapshot(now), self.settings, self.projector, _league_of)
                 if self._wanted(r, what)]
         out = []
-        for rec in recs:
+        families: set[str] = set()  # one text per idea family (e.g. every ladder pair on a game) per scan
+        same_family = held = 0
+        for rec in sorted(recs, key=lambda r: r.ev, reverse=True):  # best first, so the text limits keep them
             saved, new = self.lifecycle.upsert_recommendation(rec, now)
             if not new:
                 continue
             out.append(("rec", _describe(saved, self.notifier.names)))
             if saved.observe_only:
                 continue
+            if saved.family_key in families:
+                same_family += 1
+                continue
+            families.add(saved.family_key)
             res = self.notifier.notify(saved, now)
             if res is None:
-                continue  # notifications off, quiet hours, or already sent
-            if res.ok:
+                continue  # notifications off, quiet hours, or already texted
+            if res.channel == "held":
+                held += 1
+            elif res.ok:
                 self.lifecycle.mark_pending(saved.id)
                 sent = f"Bet idea #{saved.id} texted via {CHANNEL_WORDS.get(res.channel, res.channel)}"
                 if res.channel == ConsoleNotifier.name:  # no phone channel worked: show the text here
@@ -1298,6 +1306,17 @@ class Services:
                 out.append(("text", sent))
             else:
                 out.append(("error", f"The text for bet idea #{saved.id} did not go out: {res.error}"))
+        if same_family:
+            out.append(("info", f"{_plural(same_family, 'more idea')} on games already texted this scan "
+                        "were not texted; see them in the app."))
+        if held:
+            out.append(("info", f"{_plural(held, 'bet idea')} held for a summary text (text limit reached)."))
+        res = self.notifier.flush_held(now)
+        if res is not None:
+            if res.ok:
+                out.append(("text", f"Summary of held bet ideas texted via {CHANNEL_WORDS.get(res.channel, res.channel)}"))
+            else:
+                out.append(("error", f"The summary text of held bet ideas did not go out: {res.error}"))
         new_names = sorted(set(getattr(self.projector, "unmatched", ())) - self._reported_unmatched)
         if new_names:
             self._reported_unmatched |= set(new_names)
