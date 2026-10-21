@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx
 from textual.widgets import Input, Static, TabbedContent
@@ -276,7 +276,7 @@ async def test_number_keys_switch_tabs_only_when_bar_empty(services_mocked):
         await app.workers.wait_for_complete()
         tabs = app.query_one("#tabs", TabbedContent)
         assert tabs.active == "home"
-        for key, tab in (("2", "performance"), ("3", "scores"), ("4", "log"), ("1", "home")):
+        for key, tab in (("2", "performance"), ("3", "scores"), ("4", "log"), ("5", "prizepicks"), ("1", "home")):
             await pilot.press(key)
             await pilot.pause()
             assert tabs.active == tab
@@ -381,3 +381,35 @@ def test_today_profit_counts_bets_settled_today_that_were_placed_yesterday(servi
     _bet(svc, "2026-10-30T18:00", 700)                               # placed yesterday, still open
     app = GridironApp(svc, clock=lambda: NOW)  # 11:05 PT on Oct 31
     assert app._today_profit(NOW) == -100
+
+
+async def test_prizepicks_tab_and_home_status_line(services_mocked):
+    svc = services_mocked()
+    app = GridironApp(svc, clock=lambda: NOW)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await app.workers.wait_for_complete()  # first run probes one game's props (PrizePicks included)
+        app.refresh_views()
+        await pilot.pause()
+        status = str(app.query_one("#pp-status", Static).render())
+        assert status.startswith("PrizePicks: ") and "loaded for 1 game (Bears at Seahawks)" in status
+        assert "See tab 5." in status
+        await pilot.press("5")
+        await pilot.pause()
+        board = str(app.query_one("#pp-board", Static).render())
+        assert "Lines as of" in board and "Bears at Seahawks - kickoff" in board
+        assert "needs about" in board and "per pick" in board
+
+
+async def test_pp_refresh_asks_first_then_loads(services_mocked):
+    svc = services_mocked()
+    app = GridironApp(svc, clock=lambda: NOW + timedelta(hours=10))  # the SEA game is ~21 h away
+    async with app.run_test(size=SIZE) as pilot:
+        await app.workers.wait_for_complete()
+        await submit(app, pilot, "pp refresh")
+        last = log_lines(app)[-1]
+        assert "This uses about 3 credits per game x 1 game = 3 of your" in last and "Type: pp refresh yes" in last
+        await submit(app, pilot, "pp refresh yes")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        text = "\n".join(log_lines(app))
+        assert "Player lines for Bears at Seahawks:" in text and "PrizePicks" in text

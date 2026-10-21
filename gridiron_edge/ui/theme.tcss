@@ -51,6 +51,14 @@ OpenBetsList > .option-list--option { padding: 0 1; }
     color: #94a3b8;
 }
 
+#pp-status {
+    height: auto;
+    padding: 0 2;
+    color: #94a3b8;
+}
+#pp-scroll { height: 1fr; background: $surface; }
+#pp-board { padding: 1 2; }
+
 #performance { layout: vertical; }
 BalanceChart { height: 1fr; }
 ScoresPanel, EventLog { height: 1fr; }

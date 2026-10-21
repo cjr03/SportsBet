@@ -71,3 +71,49 @@ async def test_bad_prizepicks_setting_is_not_saved(services_mocked):
         svc.set_setting("pp_payouts_json", "{bad")
     assert svc._get("set.pp_payouts_json") is None
     assert svc.settings.pp_payouts_json == ""
+
+
+async def test_first_run_prizepicks_probe_plain_english(services_mocked):
+    lines = [m for k, m in await services_mocked().startup(NOW) if k == "info"]
+    probe = [m for m in lines if m.startswith("PrizePicks lines:")]
+    assert len(probe) == 1 and "working" in probe[0] and "Bears at Seahawks" in probe[0]
+    assert not any("unavailable on this key" in m for m in lines)
+
+
+async def test_first_run_probe_without_prizepicks_lines(services_mocked, load):
+    import httpx
+    body = load("odds_api_event_props.json")
+    body["bookmakers"] = [b for b in body["bookmakers"] if b["key"] != "prizepicks"]
+    services_mocked.router.get(url__regex=r"the-odds-api\.com/v4/sports/americanfootball_nfl/events/[^/]+/odds"
+                               ).mock(return_value=httpx.Response(200, json=body))
+    lines = [m for k, m in await services_mocked().startup(NOW) if k == "info"]
+    probe = next(m for m in lines if m.startswith("PrizePicks lines:"))
+    assert "none posted yet for Bears at Seahawks" in probe and "3 hours before each kickoff" in probe
+    assert '"pp add"' in probe
+
+
+async def test_pp_games_are_active_prizepicks_ideas_and_open_entries(services_mocked):
+    svc = services_mocked()
+    svc.ledger.deposit(100_000)
+    _game(svc, "nfl:a")
+    _game(svc, "nfl:b", "KC", "BUF")
+    _game(svc, "nfl:c", "NYJ", "MIA")
+    leg = lambda gid: Leg("prizepicks", "x", "over", 0.0, 0.6, gid, player=f"P {gid}", stat="rush_yds", line=50.5)
+    _place(svc, "pp_entry", [leg("nfl:a")], stake=500, structure="2-power")
+    rec = Recommendation(None, "pp_entry", [leg("nfl:b")], 500, None, 0.05, 0.5, "2-power", NOW, KICK)
+    svc.lifecycle.upsert_recommendation(rec, NOW)
+    watch = Recommendation(None, "pp_entry", [leg("nfl:c")], 0, None, 0.05, 0.5, "2-power", NOW, KICK,
+                           observe_only=True)
+    svc.lifecycle.upsert_recommendation(watch, NOW)
+    assert svc.pp_games() == {"nfl:a", "nfl:b"}
+
+
+async def test_pp_refresh_plan_stays_within_budget(services_mocked):
+    svc = services_mocked()
+    await svc.startup(NOW)
+    games, text = svc.pp_refresh_plan(NOW + timedelta(hours=10))
+    assert len(games) == 1 and "3 credits per game x 1 game = 3 of your" in text and text.endswith("pp refresh yes")
+    svc.odds.budget.record(52, 448, 3)  # just above the guard's 50-credit floor
+    games, text = svc.pp_refresh_plan(NOW + timedelta(hours=10))
+    assert games == [] and "Nothing can load now." in text
+    assert (await svc.pp_refresh(NOW + timedelta(hours=10))) == [("info", text)]

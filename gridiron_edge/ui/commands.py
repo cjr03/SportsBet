@@ -21,7 +21,7 @@ COMMAND_WORDS: list[str] = [
     "scan", "scan games", "scan props", "scan pp", "scan arb", "scan all",
     "refresh", "refresh nfl", "refresh cfb",
     "bets", "bets open", "bets settled",
-    "settle", "pp add", "quota",
+    "settle", "pp add", "pp refresh", "pp refresh yes", "quota",
     "notify test", "notify on", "notify off",
     "set", "venues", "backtest", "fit blend", "report", "drift reset", "help",
 ]
@@ -36,6 +36,8 @@ HELP: list[tuple[str, str]] = [
     ("bets [open|settled]", "list your open or finished bets"),
     ("settle <id> <won|lost|refund> [payout]", "mark a bet as finished by hand"),
     ('pp add "<player>" <stat> <line> <team> <game_id>', "type in a PrizePicks line yourself"),
+    ("pp refresh", "load PrizePicks lines now for games in the next 24 hours (shows the credit cost first; "
+                   "pp refresh yes runs it)"),
     ("quota", "how many free API calls are left"),
     ("notify test|on|off", "send a test text, or turn texts on or off"),
     ("set <setting> <value>", "change a setting"),
@@ -45,7 +47,7 @@ HELP: list[tuple[str, str]] = [
     ("report", "how the bets have done so far"),
     ("drift reset <nfl|cfb> <ml|spread|total|prop|prizepicks> / drift reset all",
      "turn a paused kind of bet back on after our prices fell behind the market"),
-    ("keys", "1-4 switch tabs; Down arrow picks a bet; Enter confirms, s skips, d explains it"),
+    ("keys", "1-5 switch tabs; Down arrow picks a bet; Enter confirms, s skips, d explains it"),
 ]
 
 _SETTINGS_FIELDS = {f.name for f in fields(Settings)}
@@ -136,8 +138,14 @@ def parse_command(text: str) -> Command:
             u = 'pp add "<player>" <stat> <line> <team> <game_id>'
             return Command("pp add", {"player": player, "stat": stat,
                                       "line": _float(line, u), "team": team, "game_id": game_id})
+        case "pp", ["refresh"]:
+            return Command("pp refresh", {"confirmed": False})
+        case "pp", ["refresh", "yes"]:
+            return Command("pp refresh", {"confirmed": True})
+        case "pp", ["refresh", *_]:
+            raise _usage("pp refresh  (then: pp refresh yes)")
         case "pp", _:
-            raise _usage('pp add "<player>" <stat> <line> <team> <game_id>')
+            raise _usage('pp add "<player>" <stat> <line> <team> <game_id>  or  pp refresh')
         case "quota" | "venues" | "report" | "help", []:
             return Command(word, {})
         case "notify", [("test" | "on" | "off") as mode]:

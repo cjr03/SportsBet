@@ -47,6 +47,7 @@ from gridiron_edge.strategy.kelly import Bet, optimize_slate, to_cents
 from gridiron_edge.strategy.prizepicks import (
     Pick,
     allowed_structures,
+    breakeven,
     build_best_entry,
     payout_table,
     robust_kelly,
@@ -680,6 +681,100 @@ def _pp_picks(snap: Snapshot, s: Settings, projector: Projector) -> list[Pick]:
         side, p = ("over", p_over) if p_over >= p_under else ("under", p_under)
         picks.append(Pick(q.player, team, g.game_id, q.stat, q.point, side, p, anchored))
     return picks
+
+
+@dataclass(frozen=True)
+class PPLine:
+    """One loaded PrizePicks line with our better side and chance (None when we can't price it)."""
+    game_id: str
+    player: str
+    team: str | None
+    stat: str
+    line: float
+    side: str | None
+    p: float | None
+    anchored: bool
+    fetched_at: datetime
+    fresh: bool
+
+
+def pp_lines(snap: Snapshot, s: Settings, projector: Projector) -> list[PPLine]:
+    """Every standard PrizePicks line on an upcoming game, for display (stale ones unpriced)."""
+    out: list[PPLine] = []
+    seen: set[tuple] = set()
+    for q in snap.props:
+        if q.book != "prizepicks" or not _pp_standard(q):
+            continue
+        key = (q.game_id, normalize_name(q.player), q.stat, q.point)
+        g = _upcoming(snap, q.game_id)
+        if g is None or key in seen:
+            continue
+        seen.add(key)
+        fresh = q.source == "manual" or _prop_fresh(q, snap, s)
+        team = _player_team(snap, projector, q.player)
+        got = _prop_p_sides(snap, s, projector, g, q.player, q.stat, q.point) if fresh else None
+        side = p = None
+        anchored = False
+        if got is not None:
+            p_over, p_under, anchored = got
+            side, p = ("over", p_over) if p_over >= p_under else ("under", p_under)
+        out.append(PPLine(g.game_id, q.player, team, q.stat, q.point, side, p, anchored, q.seen_at, fresh))
+    return out
+
+
+def pp_blocker(snap: Snapshot, s: Settings, projector: Projector) -> tuple[str, dict] | None:
+    """Why no PrizePicks entry can be texted now, as (code, details); None when one can be built.
+
+    Codes: no_lines, stale, no_structures, few_lines, few_good, one_team, few_games, model_only,
+    no_value, paused (drift/CLV), watch_only (gate), daily_cap."""
+    lines = pp_lines(snap, s, projector)
+    if not lines:
+        return ("no_lines", {})
+    if not any(ln.fresh for ln in lines):
+        return ("stale", {})
+    table, allowed = payout_table(s), allowed_structures(s)
+    sts = [st for st in allowed if st in table and table[st].get(st[0], 0) > 1]
+    if not sts:
+        return ("no_structures", {})
+    need = min(st[0] for st in sts)
+    picks = _pp_picks(snap, s, projector)
+    if len(picks) < need:
+        no_team = sum(ln.fresh and ln.team is None for ln in lines)
+        return ("few_lines", {"priced": len(picks), "need": need, "no_team": no_team})
+    good, two_teams, enough, spread = 0, False, False, False
+    for st in sts:
+        be = breakeven(st, table)
+        qual = [pk for pk in picks if pk.p >= be + (s.pp_margin_market if pk.anchored else s.pp_margin_model)]
+        good = max(good, len(qual))
+        if len(qual) < st[0]:
+            continue
+        enough = True
+        if len({pk.team for pk in qual}) >= 2:
+            two_teams = True
+            per_game = defaultdict(int)
+            for pk in qual:
+                per_game[pk.game_id] += 1
+            spread = spread or sum(min(c, s.pp_max_per_game) for c in per_game.values()) >= st[0]
+    if not enough:
+        return ("few_good", {"good": good, "need": need})
+    if not two_teams:
+        return ("one_team", {})
+    if not spread:
+        return ("few_games", {"cap": s.pp_max_per_game})
+    pool = [pk for pk in picks if pk.anchored or not _model_gated(snap, snap.games[pk.game_id].league)]
+    found = build_best_entry(pool, s, allowed, payouts=table, brute=s.pp_brute_force)
+    if found is None:
+        any_found = build_best_entry(picks, s, allowed, payouts=table, brute=s.pp_brute_force)
+        return ("model_only", {}) if any_found is not None else ("no_value", {})
+    leagues = {snap.games[pk.game_id].league for pk in found[0]}
+    keys = [(lg, k) for lg in leagues for k in ("prop", "pp")]
+    if any(snap.paused.get(k) for k in keys):
+        return ("paused", {})
+    if any(snap.gates.get(k) for k in keys):
+        return ("watch_only", {})
+    if math.floor(s.cap_pp_daily * snap.bankroll_cents) - snap.pp_staked_today_cents < max(s.min_stake_cents, 1):
+        return ("daily_cap", {})
+    return None
 
 
 def _pp_rec(legs: list[Pick], st: tuple, ev: float, stake: int, observe: bool, table: dict,

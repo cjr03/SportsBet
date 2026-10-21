@@ -1,4 +1,4 @@
-"""The Textual app: focus-mode tabs (Home, Performance, Scores, Log), command bar, scheduler workers."""
+"""The Textual app: focus-mode tabs (Home, Performance, Scores, Log, PrizePicks), command bar, scheduler workers."""
 import json
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -7,7 +7,7 @@ from rich.text import Text
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal
+from textual.containers import Horizontal, VerticalScroll
 from textual.suggester import SuggestFromList
 from textual.widgets import Footer, Input, Static, TabbedContent, TabPane
 
@@ -22,6 +22,7 @@ from gridiron_edge.scheduler import LEAGUES, Job
 from gridiron_edge.services import NOTIFY_TEST_TEXT, Services
 from gridiron_edge.types import Leg, Recommendation
 from gridiron_edge.ui import home
+from gridiron_edge.ui import prizepicks as pp_ui
 from gridiron_edge.ui.commands import COMMAND_WORDS, HELP, Command, CommandError, parse_command
 from gridiron_edge.ui.screens import ConfirmScreen, WhyScreen
 from gridiron_edge.ui.widgets import (
@@ -33,7 +34,7 @@ ODDS_GAMES_COST = 3  # credits per league for h2h+spreads+totals
 _USER_ERRORS = (CommandError, LifecycleError, InvalidAmount, ValueError)
 
 
-TABS = ("home", "performance", "scores", "log")
+TABS = ("home", "performance", "scores", "log", "prizepicks")
 
 
 def _money(cents: int) -> str:
@@ -41,10 +42,10 @@ def _money(cents: int) -> str:
 
 
 class CommandInput(Input):
-    """The command bar. While it is empty, 1-4 switch tabs and Down jumps to the PLACE NOW list."""
+    """The command bar. While it is empty, 1-5 switch tabs and Down jumps to the PLACE NOW list."""
 
     async def _on_key(self, event: events.Key) -> None:
-        if not self.value and event.character in ("1", "2", "3", "4"):
+        if not self.value and event.character in ("1", "2", "3", "4", "5"):
             event.stop()
             event.prevent_default()
             self.app.action_show_tab(TABS[int(event.character) - 1])
@@ -72,6 +73,7 @@ class GridironApp(App):
         Binding("2", "show_tab('performance')", "Performance"),
         Binding("3", "show_tab('scores')", "Scores"),
         Binding("4", "show_tab('log')", "Log"),
+        Binding("5", "show_tab('prizepicks')", "PrizePicks"),
         Binding("colon,slash", "focus_command", "Type a command", show=False),
         Binding("escape", "focus_command", "Command bar", show=False),
     ]
@@ -82,6 +84,7 @@ class GridironApp(App):
         self.clock = clock
         services.clock = clock  # the scheduler's view of "upcoming" follows the app clock
         self._active_jobs: set[tuple] = set()
+        self._pp_view: pp_ui.PPView | None = None  # rebuilt with the other views, not every tick
 
     def compose(self) -> ComposeResult:
         yield BankrollHeader()
@@ -89,6 +92,7 @@ class GridironApp(App):
             with TabPane("1 Home", id="home"):
                 yield Section("PLACE NOW", PlaceNowList(id="place-now"), "place-empty", id="place-box")
                 yield Section("OPEN BETS", OpenBetsList(id="open-bets"), "open-empty", id="open-box")
+                yield Static("", id="pp-status")
             with TabPane("2 Performance", id="performance"):
                 yield BalanceChart()
                 yield KpiTiles()
@@ -97,9 +101,12 @@ class GridironApp(App):
                 yield ScoresPanel()
             with TabPane("4 Log", id="log"):
                 yield EventLog()
+            with TabPane("5 PrizePicks", id="prizepicks"):
+                with VerticalScroll(id="pp-scroll"):
+                    yield Static("", id="pp-board")
         yield Static("", id="status")
         with Horizontal(id="command-bar"):
-            yield CommandInput(id="cmd", placeholder="type a command (try help) - 1-4 switch tabs",
+            yield CommandInput(id="cmd", placeholder="type a command (try help) - 1-5 switch tabs",
                                suggester=SuggestFromList(COMMAND_WORDS))
         yield Footer()
 
@@ -202,6 +209,16 @@ class GridironApp(App):
         bets = self.query_one("#open-box", Section)
         bets.body.set_bets(views)
         bets.show_empty(None if views else "No open bets. Bets you confirm show up here.")
+        self._show_pp(sum(r.kind == "pp_entry" for r in recs), now)
+
+    def _show_pp(self, active: int, now: datetime) -> None:
+        """The Home PrizePicks status line and the PrizePicks tab."""
+        view = self._pp_view
+        if view is None:
+            return
+        view.active = active
+        self.query_one("#pp-status", Static).update(Text(pp_ui.status_line(view, now, self.names)))
+        self.query_one("#pp-board", Static).update(Text("\n".join(pp_ui.board_lines(view, now, self.names))))
 
     def _today_profit(self, now: datetime) -> int:
         """Today's win/loss: net result of every bet settled since PT midnight, whenever it was placed.
@@ -229,6 +246,11 @@ class GridironApp(App):
                                               remaining("therundown"), s.kalshi_ok)
         self.query_one(BalanceChart).update_series(s.ledger.history(), s.balance_markers())
         self.query_one(KpiTiles).update_kpis(s.performance(now))
+        try:
+            self._pp_view = s.pp_view(now)
+        except Exception as e:  # never let the PrizePicks summary take the dashboard down
+            self._pp_view = None
+            self.query_one("#pp-status", Static).update(Text(f"PrizePicks: could not load the lines ({e})."))
         self.refresh_home()
         games = [g for g in s.registry.all_since(now - timedelta(hours=12))
                  if g.kickoff <= now + timedelta(days=7)]
@@ -275,6 +297,8 @@ class GridironApp(App):
             case "settle":
                 s.settler.manual_settle(a["id"], a["result"], a["cents"], now)
                 self.log_event("settle", f"bet {a['id']} marked {a['result']} - bankroll now {_money(s.ledger.balance())}")
+            case "pp refresh":
+                self._pp_refresh(a["confirmed"])
             case "pp add":
                 s.add_manual_pp(a["player"], a["stat"], a["line"], a["team"], a["game_id"], now)
                 self.log_event("info", f"PrizePicks line added: {a['player']} {a['line']} {d.stat_words(a['stat'])}")
@@ -331,6 +355,18 @@ class GridironApp(App):
             self.log_event("info", f"refreshing Kalshi and TheRundown (add --force for sportsbook odds, "
                                    f"~{cost} credits)")
         self._spawn([*jobs, Job("scan")], "manual-refresh")
+
+    def _pp_refresh(self, confirmed: bool) -> None:
+        games, text = self.services.pp_refresh_plan(self.clock())
+        if not confirmed or not games:
+            self.log_event("info", text)
+            return
+        self.log_event("info", f"loading PrizePicks lines for {len(games)} game{'s' * (len(games) != 1)}...")
+        self.run_worker(self._run_pp_refresh(), group="pp-refresh", exclusive=True)
+
+    async def _run_pp_refresh(self) -> None:
+        self.log_lines(await self.services.pp_refresh(self.clock()))
+        self.refresh_views()
 
     def _bets(self, which: str) -> None:
         lc = self.services.lifecycle

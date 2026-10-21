@@ -253,3 +253,45 @@ def test_projector_gets_opponent_and_market_game_script(mk, settings):
     assert seen["opponent"] == "A1"
     assert seen["team_spread"] == pytest.approx(-7.0, abs=0.01)
     assert seen["team_total"] == pytest.approx(26.0, abs=0.01)
+
+
+# -- 4. every loaded PrizePicks line is visible, and a blocked entry says why -----------------------
+
+from gridiron_edge.pipeline import pp_blocker, pp_lines  # noqa: E402
+
+
+def test_pp_lines_lists_every_line_with_our_chance(settings):
+    snap = _pp_snap(n=3)
+    snap.props.append(PropQuote("odds_api", "prizepicks", "g0", "Nobody", "rush_yds", "over", 20.5, None, NOW))
+    lines = pp_lines(snap, settings, Stub())
+    assert len(lines) == 4
+    priced = [ln for ln in lines if ln.p is not None]
+    assert len(priced) == 3 and all(ln.anchored and ln.fresh and ln.side == "over" for ln in priced)
+    nobody = next(ln for ln in lines if ln.player == "Nobody")
+    assert nobody.p is None and nobody.team is None
+
+
+def test_pp_blocker_reasons(settings):
+    assert pp_blocker(snap_with(), settings, Stub()) == ("no_lines", {})
+    snap = _pp_snap()
+    assert pp_blocker(snap, settings, Stub()) is None  # an entry can be built
+    old = NOW - timedelta(seconds=settings.props_stale_seconds + 60)
+    aged = [replace(q, fetched_at=old, last_update=old) for q in snap.props]
+    assert pp_blocker(replace(snap, props=aged), settings, Stub())[0] == "stale"
+    code, info = pp_blocker(_pp_snap(n=2), settings, Stub())
+    assert code == "few_lines" and info == {"priced": 2, "need": 3, "no_team": 0}
+    one_team = replace(snap, player_teams={p: "KC" for p in snap.player_teams})
+    assert pp_blocker(one_team, settings, Stub())[0] == "one_team"
+    assert pp_blocker(replace(snap, gates={("nfl", "pp"): True}), settings, Stub())[0] == "watch_only"
+    paused = {("nfl", "pp"): True}
+    assert pp_blocker(replace(snap, gates=paused, paused=paused), settings, Stub())[0] == "paused"
+    proj = Stub({(f"Player {i}", "rush_yds"): (80.0, 15.0) for i in range(8)})
+    assert pp_blocker(_pp_snap(books=False), settings, proj)[0] == "model_only"
+
+
+def test_pp_blocker_too_few_good_picks(settings):
+    snap = _pp_snap()
+    # sportsbooks make every line a coin flip: nothing clears the needed chance
+    flat = [replace(q, decimal=1.95) if q.book == "draftkings" else q for q in snap.props]
+    code, info = pp_blocker(replace(snap, props=flat), settings, Stub())
+    assert code == "few_good" and info["good"] == 0 and info["need"] == 3

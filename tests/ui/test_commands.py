@@ -20,6 +20,8 @@ from gridiron_edge.ui.commands import COMMAND_WORDS, Command, CommandError, pars
     ('pp add "Patrick Mahomes" pass_yds 275.5 KC g1',
      Command("pp add", {"player": "Patrick Mahomes", "stat": "pass_yds", "line": 275.5,
                         "team": "KC", "game_id": "g1"})),
+    ("pp refresh", Command("pp refresh", {"confirmed": False})),
+    ("pp refresh yes", Command("pp refresh", {"confirmed": True})),
     ("quota", Command("quota", {})),
     ("notify test", Command("notify", {"mode": "test"})),
     ("set kelly_fraction 0.5", Command("set", {"field": "kelly_fraction", "value": "0.5"})),
@@ -40,6 +42,7 @@ def test_parses(text, expected):
     "set nosuch 1", "", 'pp add "unterminated',
     "withdraw", "confirm 42 0.5 0", "scan bogus", "settle 3 maybe",
     "backtest nfl 2025-2018", "notify maybe", "drift reset nba spread", "drift", "skip", "quota extra",
+    "pp refresh now", "pp",
 ])
 def test_rejects(text):
     with pytest.raises(CommandError) as e:

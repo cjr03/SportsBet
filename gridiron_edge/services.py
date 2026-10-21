@@ -42,7 +42,7 @@ from gridiron_edge.notify.console import ConsoleNotifier
 from gridiron_edge.notify.format import PT, format_message
 from gridiron_edge.notify.imessage import IMessageNotifier
 from gridiron_edge.notify.ntfy import NtfyNotifier
-from gridiron_edge.scheduler import LEAGUES, Job, Scheduler
+from gridiron_edge.scheduler import LEAGUES, PROPS_COST, PROPS_SLATE_LEAD, Job, Scheduler
 from gridiron_edge.strategy.distributions import (
     CFB_SIGMA, MIN_EMPIRICAL_RESIDUALS, NFL_ML_SIGMA, NFL_SPREAD_SIGMA, NFL_TOTAL_SIGMA,
     ConditionalMarginModel, MarginModel, NormalModel,
@@ -51,6 +51,7 @@ from gridiron_edge.strategy.kelly import clv_throttle
 from gridiron_edge.strategy.prizepicks import payout_table
 from gridiron_edge.strategy.fair import fair_two_way
 from gridiron_edge.types import Game, KalshiMarket, Leg, PropQuote, Quote, Recommendation, make_game_id
+from gridiron_edge.ui.prizepicks import PPView
 from gridiron_edge.ui.widgets import compute_kpis
 
 register_schema("CREATE TABLE IF NOT EXISTS scheduler_state (key TEXT PRIMARY KEY, ts TEXT NOT NULL)")
@@ -79,6 +80,7 @@ CFB_BURN_IN_GAMES = 150
 LOCKED_SETTINGS = {"odds_api_key", "cfbd_api_key", "therundown_api_key", "notify_phone", "ntfy_topic",
                    "kalshi_base_url", "db_path"}
 SCAN_KINDS = {"games": {"kalshi_game"}, "props": {"kalshi_prop"}, "pp": {"pp_entry"}, "arb": {"arb", "middle"}}
+PP_REFRESH_HORIZON = timedelta(hours=24)  # `pp refresh` pulls props for games kicking off this soon
 NOTIFY_TEST_TEXT = "GE test - if your phone did not alert, enable ntfy (NTFY_TOPIC in .env)"
 
 
@@ -968,8 +970,18 @@ class Services:
         if row is None or row["odds_event_id"] is None:
             return [("info", f"Player odds: the odds service has no listing for game {gid} yet")]
         props = await self.odds.event_props(job.league, row["odds_event_id"], essential=job.essential)
+        if self.odds.last_status == "skipped_budget":
+            return [("info", f"Player lines for {self._matchup(gid)}: skipped to protect the credit reserve")]
         self._merge("props", "odds_api", props, now)
-        return [("api", f"odds_api props {gid}: {len(props)} lines, {self.odds.budget.remaining()} credits left")]
+        pp = sum(q.book == "prizepicks" for q in props)
+        return [("api", f"Player lines for {self._matchup(gid)}: {pp} PrizePicks, {len(props) - pp} sportsbook - "
+                        f"{self.odds.budget.remaining()} credits left")]
+
+    def _matchup(self, gid: str) -> str:
+        g = self.registry.get(gid)
+        if g is None:
+            return gid
+        return f"{self.notifier.names.team(g.league, g.away)} at {self.notifier.names.team(g.league, g.home)}"
 
     async def _job_kalshi_refresh(self, job: Job, now: datetime):
         series = [s for lg in GAME_SERIES.values() for s in lg.values()] + list(PROP_SERIES_STAT)
@@ -1244,6 +1256,89 @@ class Services:
             out.append(("info", f"checked for bets: {len(recs)} found, nothing new"))
         return out
 
+    # -- PrizePicks visibility ----------------------------------------------------
+    def _pp_probe_text(self, probed: tuple[str, int] | None, now: datetime) -> str:
+        """The first-run PrizePicks check, in plain English. probed: (game_id, PrizePicks lines) or None."""
+        later = ("We load lines about 3 hours before each kickoff. If they never show up, your odds "
+                 'plan may not include PrizePicks; you can type lines in with "pp add".')
+        if probed is None:
+            return "PrizePicks lines: no upcoming NFL game to check yet. " + later
+        gid, n = probed
+        game = self._matchup(gid)
+        if n:
+            return (f"PrizePicks lines: working - {n} line{'s' * (n != 1)} found for {game}. "
+                    "More load about 3 hours before each kickoff.")
+        return f"PrizePicks lines: none posted yet for {game}. " + later
+
+    def _next_props_load(self, now: datetime) -> datetime | None:
+        """When the scheduler's next slate props pull is due (NFL first, as the budget rule is)."""
+        upcoming = [g for g in self.registry.upcoming(UPCOMING_WINDOW, now) if g.kickoff - PROPS_SLATE_LEAD > now
+                    and Job("odds_props", g.league, {"game_id": g.game_id, "window": "slate"}).key
+                    not in self.scheduler.state]
+        for league in LEAGUES:
+            times = [g.kickoff - PROPS_SLATE_LEAD for g in upcoming if g.league == league]
+            if times:
+                return min(times)
+        return None
+
+    def pp_view(self, now: datetime) -> PPView:
+        """Every loaded PrizePicks line with our chance, and why no entry can be texted (if so)."""
+        snap = self.snapshot(now)
+        lines = pipeline.pp_lines(snap, self.settings, self.projector)
+        blocker = pipeline.pp_blocker(snap, self.settings, self.projector) if lines else ("no_lines", {})
+        gated = {lg: pipeline._model_gated(snap, lg) for lg in LEAGUES}
+        return PPView(lines, snap.games, blocker, 0, self.settings, gated,
+                      self._next_props_load(now) if self.odds is not None else None)
+
+    def _pp_refresh_games(self, now: datetime) -> list[Game]:
+        """Upcoming games in the next 24 h the odds service lists (so a props pull can run)."""
+        ids = {r["game_id"] for r in self.conn.execute(
+            "SELECT game_id FROM games WHERE odds_event_id IS NOT NULL")}
+        games = [g for g in self.registry.upcoming(PP_REFRESH_HORIZON, now)
+                 if g.kickoff > now and g.game_id in ids and g.status == "scheduled"]
+        return sorted(games, key=lambda g: (LEAGUES.index(g.league), g.kickoff))
+
+    def pp_refresh_plan(self, now: datetime) -> tuple[list[Game], str]:
+        """`pp refresh`: which games a props pull would cover and what it costs, in plain English."""
+        if self.odds is None or self.odds.disabled:
+            return [], "PrizePicks lines come from The Odds API, and its key isn't working (ODDS_API_KEY in .env)."
+        games = self._pp_refresh_games(now)
+        if not games:
+            return [], "No games kick off in the next 24 hours, so there are no PrizePicks lines to load."
+        guard = self.odds.budget
+        rem = guard.remaining()
+        affordable = len(games)
+        while affordable and not guard.can_spend(PROPS_COST * affordable):
+            affordable -= 1
+        cost = PROPS_COST * len(games)
+        left = "an unknown number" if rem is None else str(rem)
+        text = (f"This uses about {PROPS_COST} credits per game x {len(games)} game{'s' * (len(games) != 1)} = "
+                f"{cost} of your {left} left.")
+        if affordable < len(games):
+            text += (f" Only {affordable} fit without dipping into the credits kept for game odds; "
+                     "those load first (NFL first).")
+            if not affordable:
+                return [], text.replace(" those load first (NFL first).", " Nothing can load now.")
+        return games[:affordable], text + " Type: pp refresh yes"
+
+    async def pp_refresh(self, now: datetime) -> list[tuple[str, str]]:
+        """`pp refresh yes`: props pulls for the next 24 h's games within budget, then a PrizePicks scan."""
+        games, text = self.pp_refresh_plan(now)
+        if not games:
+            return [("info", text)]
+        out: list[tuple[str, str]] = []
+        for g in games:
+            job = Job("odds_props", g.league, {"game_id": g.game_id, "window": "manual"})
+            out += await self.run_job(job, now)
+            self.scheduler.mark_done(job, now)
+            if self.odds.last_status == "skipped_budget":
+                out.append(("info", "Stopped loading PrizePicks lines to keep the credits needed for game odds."))
+                break
+        scan = Job("scan", args={"what": "pp"})
+        out += await self.run_job(scan, now)
+        self.scheduler.mark_done(scan, now)
+        return out
+
     # -- commands ---------------------------------------------------------
     def add_manual_pp(self, player: str, stat: str, line: float, team: str, game_id: str, now: datetime) -> None:
         """`pp add`: a PrizePicks line typed in by hand (used when the Odds API key lacks PrizePicks)."""
@@ -1276,12 +1371,14 @@ class Services:
                     "SELECT game_id, odds_event_id FROM games WHERE league='nfl' AND odds_event_id IS NOT NULL"
                     " AND kickoff_utc > ? ORDER BY kickoff_utc LIMIT 1", (now.astimezone(UTC).isoformat(),)
                 ).fetchone()
+                probed = None
                 if row is not None:
-                    self._merge("props", "odds_api", await self.odds.event_props("nfl", row["odds_event_id"]), now)
+                    props = await self.odds.event_props("nfl", row["odds_event_id"])
+                    self._merge("props", "odds_api", props, now)
+                    probed = (row["game_id"], sum(q.book == "prizepicks" for q in props))
             books = sorted(self.odds.seen_books)
             out.append(("info", f"Sportsbooks on the odds service: {', '.join(dict.fromkeys(book_name(b) for b in books)) or 'none'}"))
-            if "prizepicks" not in books:
-                out.append(("info", 'PrizePicks lines unavailable on this key - use "pp add"'))
+            out.append(("info", self._pp_probe_text(probed, now)))
         if self.rundown is not None:
             rd = self.rundown
             out.append(("info", f"Scores service: {rd.tier} plan, scores about {max(1, round(rd.delay_seconds / 60))} min behind"))
