@@ -14,12 +14,16 @@ LEAGUES = ("nfl", "cfb")
 # every game in a kickoff slot has fresh lines together), plus a refresh in the last hour only for
 # games with an active PrizePicks idea or open entry.
 PROPS_COST = 3  # credits per pull: 3 markets x 1 region (odds_api.PROPS_COST)
+GAME_ODDS_COST = 3  # credits per game-odds pull (odds_api.GAME_ODDS_COST)
 PROPS_SLATE_LEAD = timedelta(hours=3)
 PROPS_REFRESH_LEAD = timedelta(minutes=60)
+PROPS_RETRY = timedelta(minutes=15)  # a props pull that didn't run (budget, game not listed) retries after
 # Budget (500 free credits a month): NFL props first (~16 games x 3 = ~48 credits a week). CFB props
 # only while the credits left stay above PROPS_CFB_RESERVE, kept for game-odds pulls (early/mid
 # windows and closing lines, ~120 a month), plus the NFL props still to come before the monthly
-# reset (assumed the 1st, UTC). The guard's own 10% floor applies on top.
+# reset (assumed the 1st, UTC). The guard's own 10% floor applies on top. CFB props wait until the
+# quota is known (the first paid pull records it). NFL last-hour refresh pulls are not in the
+# weekly estimate; they run only for games with a PrizePicks idea, so a few a week at most.
 PROPS_CFB_RESERVE = 120
 NFL_PROPS_PER_WEEK = 16 * PROPS_COST
 SCAN_DEBOUNCE = timedelta(seconds=60)
@@ -48,6 +52,19 @@ def cfb_props_floor(now: datetime) -> int:
     nxt = datetime(t.year + (t.month == 12), t.month % 12 + 1, 1, tzinfo=UTC)
     weeks_left = (nxt - t).total_seconds() / timedelta(weeks=1).total_seconds()
     return PROPS_CFB_RESERVE + math.ceil(weeks_left * NFL_PROPS_PER_WEEK)
+
+
+def props_fit(guard: BudgetGuard | None, spend: int, floor: int | None = None) -> bool:
+    """Whether `spend` credits of props pulls (cumulative) fit: within the guard and, when `floor` is
+    given, leaving at least `floor` credits. An unknown quota never clears a floor."""
+    if guard is None:
+        return True
+    if not guard.can_spend(spend):
+        return False
+    if floor is None:
+        return True
+    rem = guard.remaining()
+    return rem is not None and rem - spend >= floor
 
 
 def _in_close_window(kickoff: datetime, now: datetime) -> bool:
@@ -94,14 +111,22 @@ class Scheduler:
         self.close_games = close_games
         self.pp_games = pp_games
         self._scan_pending = False
+        self._retry_at: dict[tuple, datetime] = {}  # props pulls that didn't run: not before this
 
     # -- recording -------------------------------------------------------
     def mark_done(self, job: Job, now: datetime) -> None:
+        if self._retry_at.get(job.key, now) > now:
+            return  # deferred while running (skipped for budget or game not listed): try again later
+        self._retry_at.pop(job.key, None)
         self.state[job.key] = now
         if job.name == "scan":
             self._scan_pending = False
         elif job.name in _SCAN_TRIGGERS:
             self._scan_pending = True
+
+    def defer(self, job: Job, until: datetime) -> None:
+        """The job ran but did nothing: leave it undone and don't offer it again before `until`."""
+        self._retry_at[job.key] = until
 
     def request_scan(self, now: datetime) -> None:
         self._scan_pending = True
@@ -146,8 +171,9 @@ class Scheduler:
 
         add(Job("kalshi_refresh"), self._kalshi_every(now, upcoming, live))
 
-        out += self._odds_games(now, local, upcoming)
-        out += self._odds_props(now, local, upcoming)
+        games = self._odds_games(now, local, upcoming)
+        out += games
+        out += self._odds_props(now, local, upcoming, committed=GAME_ODDS_COST * len(games))
 
         if self.has_open_bets():
             add(Job("settle"), timedelta(minutes=5))
@@ -207,19 +233,18 @@ class Scheduler:
                     out.append(job)
         return out
 
-    def _odds_props(self, now: datetime, local: datetime, upcoming) -> list[Job]:
+    def _odds_props(self, now: datetime, local: datetime, upcoming, committed: int = 0) -> list[Job]:
+        """committed: credits the game-odds jobs due in this same tick will spend."""
         guard = self.budgets.get("odds_api")
-        rem = guard.remaining() if guard is not None else None
         floor = cfb_props_floor(now)
         out: list[Job] = []
 
         def add(job: Job) -> None:
-            spend = PROPS_COST * (len(out) + 1)
-            if guard is not None and not guard.can_spend(spend):
+            if self._retry_at.get(job.key, now) > now:
                 return
-            if job.league == "cfb" and rem is not None and rem - spend < floor:
-                return
-            out.append(job)
+            spend = committed + PROPS_COST * (len(out) + 1)
+            if props_fit(guard, spend, floor if job.league == "cfb" else None):
+                out.append(job)
 
         def slate(g) -> Job:
             return Job("odds_props", g.league, {"game_id": g.game_id, "window": "slate"})

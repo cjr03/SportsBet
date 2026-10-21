@@ -117,3 +117,37 @@ async def test_pp_refresh_plan_stays_within_budget(services_mocked):
     games, text = svc.pp_refresh_plan(NOW + timedelta(hours=10))
     assert games == [] and "Nothing can load now." in text
     assert (await svc.pp_refresh(NOW + timedelta(hours=10))) == [("info", text)]
+
+
+async def test_pp_refresh_plan_keeps_the_scheduler_floor_on_a_full_cfb_slate(services_mocked):
+    """A Saturday's worth of CFB games must not eat the credits kept for game odds and NFL props."""
+    from gridiron_edge.scheduler import PROPS_COST, cfb_props_floor
+    svc = services_mocked()
+    await svc.startup(NOW)
+    at = NOW + timedelta(hours=10)
+    for i in range(40):
+        gid = f"cfb:2026110{i % 2}:T{i}"
+        svc.registry.upsert(Game(gid, "cfb", 2026, 10, at + timedelta(hours=2, minutes=i), f"H{i}", f"A{i}"))
+        svc.registry.set_odds_event(gid, f"ev{i}")
+    floor = cfb_props_floor(at)
+    svc.odds.budget.record(floor + 4 * PROPS_COST, 500 - floor - 4 * PROPS_COST, 3)
+    games, text = svc.pp_refresh_plan(at)
+    assert len(games) == 4 and games[0].league == "nfl" and "Only 4 fit" in text
+    assert "NFL player lines still to come" in text
+    svc.odds.budget.record(floor, 500 - floor, 3)
+    games, text = svc.pp_refresh_plan(at)
+    assert games == [] and "Nothing can load now." in text
+
+
+async def test_props_job_skipped_is_retried_not_marked_done(services_mocked):
+    from gridiron_edge.scheduler import PROPS_RETRY, Job
+    svc = services_mocked()
+    await svc.startup(NOW)
+    _game(svc, "nfl:unlisted", "KC", "BUF", kick=NOW + timedelta(hours=2))
+    job = Job("odds_props", "nfl", {"game_id": "nfl:unlisted", "window": "slate"})
+    lines = await svc.run_job(job, NOW)
+    assert "does not list this game yet" in lines[0][1]
+    svc.scheduler.mark_done(job, NOW)
+    assert job.key not in svc.scheduler.state
+    svc.scheduler.mark_done(job, NOW + PROPS_RETRY)  # once the retry wait is over it can be recorded
+    assert svc.scheduler.state[job.key] == NOW + PROPS_RETRY

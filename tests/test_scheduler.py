@@ -1,7 +1,9 @@
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from gridiron_edge.scheduler import PROPS_CFB_RESERVE, PROPS_COST, Job, Scheduler, cfb_props_floor
+from gridiron_edge.scheduler import (
+    PROPS_CFB_RESERVE, PROPS_COST, PROPS_RETRY, Job, Scheduler, cfb_props_floor,
+)
 from gridiron_edge.types import Game
 
 PT = ZoneInfo("America/Los_Angeles")
@@ -47,6 +49,12 @@ def sched(reg, ok=True, rem=None, **kw):
 
 def names(jobs, name):
     return [j for j in jobs if j.name == name]
+
+
+def odds_done(s, now=T0):
+    """Mark this week's game-odds windows done so a test sees only the props budget."""
+    run_all(s, names(s.due(now), "odds_games"), now)
+    return s
 
 
 def run_all(s, jobs, now):
@@ -211,7 +219,7 @@ def test_props_skip_when_budget_low():
 
 def test_props_never_past_the_guard():
     games = [game(f"n{i}", T0 + timedelta(hours=2)) for i in range(10)]
-    props = names(sched(FakeRegistry(games), rem=50 + 4 * PROPS_COST).due(T0), "odds_props")
+    props = names(odds_done(sched(FakeRegistry(games), rem=50 + 4 * PROPS_COST)).due(T0), "odds_props")
     assert len(props) == 4
 
 
@@ -220,17 +228,38 @@ def test_props_nfl_first_cfb_only_above_reserve():
     assert floor > PROPS_CFB_RESERVE  # also holds back the NFL props still to come this month
     games = [game(f"c{i}", T0 + timedelta(hours=1, minutes=i), "cfb") for i in range(8)]
     games += [game(f"n{i}", T0 + timedelta(hours=2)) for i in range(3)]
-    props = names(sched(FakeRegistry(games), rem=floor + 3 * PROPS_COST + 2 * PROPS_COST).due(T0), "odds_props")
+    props = names(odds_done(sched(FakeRegistry(games), rem=floor + 3 * PROPS_COST + 2 * PROPS_COST)).due(T0),
+                  "odds_props")
     assert [j.league for j in props] == ["nfl"] * 3 + ["cfb"] * 2
-    props = names(sched(FakeRegistry(games), rem=floor).due(T0), "odds_props")
+    props = names(odds_done(sched(FakeRegistry(games), rem=floor)).due(T0), "odds_props")
     assert [j.league for j in props] == ["nfl"] * 3
-    assert len(names(sched(FakeRegistry(games)).due(T0), "odds_props")) == 11  # quota not known yet
+    # quota not known yet: NFL goes, CFB waits for the first pull to record it
+    assert [j.league for j in names(sched(FakeRegistry(games)).due(T0), "odds_props")] == ["nfl"] * 3
+
+
+def test_props_count_game_odds_due_in_the_same_tick():
+    """Game-odds pulls in the same tick spend first; props only get what is left."""
+    games = [game(f"n{i}", T0 + timedelta(hours=2)) for i in range(10)]
+    s = sched(FakeRegistry(games), rem=50 + 4 * PROPS_COST)
+    due = s.due(T0)  # Wednesday: this week's NFL early game-odds pull has not run yet
+    assert len(names(due, "odds_games")) == 1 and len(names(due, "odds_props")) == 3
+    assert len(names(odds_done(s).due(T0), "odds_props")) == 4
 
 
 def test_cfb_props_floor_shrinks_through_the_month():
     early = datetime(2026, 10, 2, 12, tzinfo=timezone.utc)
     late = datetime(2026, 10, 30, 12, tzinfo=timezone.utc)
     assert cfb_props_floor(early) > cfb_props_floor(late) >= PROPS_CFB_RESERVE
+
+
+def test_deferred_props_pull_retries_later_instead_of_being_done():
+    s = sched(FakeRegistry([game("g", T0 + timedelta(hours=2))]))
+    job = names(s.due(T0), "odds_props")[0]
+    s.defer(job, T0 + PROPS_RETRY)  # e.g. the odds service didn't list the game yet
+    s.mark_done(job, T0)
+    assert job.key not in s.state
+    assert not names(s.due(T0 + timedelta(minutes=5)), "odds_props")
+    assert [j.key for j in names(s.due(T0 + PROPS_RETRY), "odds_props")] == [job.key]
 
 
 def test_props_not_due_outside_three_hours():

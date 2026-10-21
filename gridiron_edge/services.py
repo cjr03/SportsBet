@@ -42,7 +42,9 @@ from gridiron_edge.notify.console import ConsoleNotifier
 from gridiron_edge.notify.format import PT, TEST_TEXT, drift_message, payouts_text
 from gridiron_edge.notify.imessage import IMessageNotifier
 from gridiron_edge.notify.ntfy import NtfyNotifier
-from gridiron_edge.scheduler import LEAGUES, PROPS_COST, PROPS_SLATE_LEAD, Job, Scheduler
+from gridiron_edge.scheduler import (
+    LEAGUES, PROPS_COST, PROPS_RETRY, PROPS_SLATE_LEAD, Job, Scheduler, cfb_props_floor, props_fit,
+)
 from gridiron_edge.strategy.distributions import (
     CFB_SIGMA, MIN_EMPIRICAL_RESIDUALS, NFL_ML_SIGMA, NFL_SPREAD_SIGMA, NFL_TOTAL_SIGMA,
     ConditionalMarginModel, MarginModel, NormalModel,
@@ -1012,9 +1014,11 @@ class Services:
         gid = job.args["game_id"]
         row = self.conn.execute("SELECT odds_event_id FROM games WHERE game_id=?", (gid,)).fetchone()
         if row is None or row["odds_event_id"] is None:
+            self.scheduler.defer(job, now + PROPS_RETRY)
             return [("info", f"Player lines for {self._matchup(gid)}: the odds service does not list this game yet.")]
         props = await self.odds.event_props(job.league, row["odds_event_id"], essential=job.essential)
         if self.odds.last_status == "skipped_budget":
+            self.scheduler.defer(job, now + PROPS_RETRY)
             return [("info", f"Player lines for {self._matchup(gid)}: skipped to keep credits in reserve.")]
         self._merge("props", "odds_api", props, now)
         pp = sum(q.book == "prizepicks" for q in props)
@@ -1354,16 +1358,19 @@ class Services:
             return [], "No games kick off in the next 24 hours, so there are no PrizePicks lines to load."
         guard = self.odds.budget
         rem = guard.remaining()
-        affordable = len(games)
-        while affordable and not guard.can_spend(PROPS_COST * affordable):
-            affordable -= 1
+        # These pulls are extra to the schedule, so every league keeps the scheduler's CFB floor: the
+        # game-odds reserve plus the NFL player lines still to come this month.
+        floor = cfb_props_floor(now)
+        affordable = 0
+        while affordable < len(games) and props_fit(guard, PROPS_COST * (affordable + 1), floor):
+            affordable += 1
         cost = PROPS_COST * len(games)
         left = "an unknown number" if rem is None else str(rem)
         each = "1 game" if len(games) == 1 else f"{len(games)} games, {PROPS_COST} each"
         text = f"This uses about {cost} Odds API credits ({each}) out of {left} left this month."
         if affordable < len(games):
-            text += (f" Only {affordable} fit without dipping into the credits kept for game odds; "
-                     "those load first (NFL first).")
+            text += (f" Only {affordable} fit without dipping into the credits kept for game odds and "
+                     "the NFL player lines still to come this month; those load first (NFL first).")
             if not affordable:
                 return [], text.replace(" those load first (NFL first).", " Nothing can load now.")
         return games[:affordable], text + " Type: pp refresh yes"
