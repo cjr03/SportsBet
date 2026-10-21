@@ -59,13 +59,22 @@ def _row_to_rec(r: sqlite3.Row) -> Recommendation:
         id=r["id"], kind=r["kind"], legs=[Leg(**d) for d in json.loads(r["legs_json"])],
         stake_cents=r["stake_cents"], qty=r["qty"], ev=r["ev"], p_win=r["p_win"],
         structure=r["structure"], snapshot_ts=_dt(r["snapshot_ts"]), expires_at=_dt(r["expires_at"]),
-        state=r["state"], observe_only=bool(r["observe_only"]), tie_risk=bool(r["tie_risk"]))
+        state=r["state"], observe_only=bool(r["observe_only"]), tie_risk=bool(r["tie_risk"]),
+        why=json.loads(r["why_json"]) if "why_json" in r.keys() and r["why_json"] else None)
+
+
+def _add_why_column(conn: sqlite3.Connection) -> None:
+    """Older databases predate recommendations.why_json: add it (nullable, so existing rows are fine)."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(recommendations)")}
+    if cols and "why_json" not in cols:
+        conn.execute("ALTER TABLE recommendations ADD COLUMN why_json TEXT")
 
 
 class Lifecycle:
     def __init__(self, conn: sqlite3.Connection, ledger: Ledger):
         self.conn = conn
         self.ledger = ledger
+        _add_why_column(conn)
 
     def upsert_recommendation(self, rec: Recommendation, now: datetime) -> tuple[Recommendation, bool]:
         row = self.conn.execute("SELECT id FROM recommendations WHERE dedupe_key=?",
@@ -85,6 +94,9 @@ class Lifecycle:
                  rec.stake_cents, rec.qty, rec.ev, rec.p_win, rec.structure,
                  rec.snapshot_ts.isoformat(), rec.expires_at.isoformat(), state,
                  int(rec.observe_only), int(rec.tie_risk), now.isoformat()))
+            if rec.why is not None:
+                self.conn.execute("UPDATE recommendations SET why_json=? WHERE id=?",
+                                  (json.dumps(rec.why), cur.lastrowid))
         return self.get_rec(cur.lastrowid), True
 
     def get_rec(self, rec_id: int) -> Recommendation | None:

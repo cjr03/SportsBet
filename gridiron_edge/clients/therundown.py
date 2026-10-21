@@ -16,7 +16,10 @@ RESERVE_FRAC = 0.10
 DAILY_CAP = 20_000
 DAILY_RESERVE_FRAC = 0.10  # non-essential calls stop when the day's points fall below this share
 SENTINEL = 0.0001  # price meaning "off the board"
-AFFILIATE = {19: "draftkings", 23: "fanduel", 22: "betmgm", 25: "kalshi"}
+BASE_AFFILIATES = (19, 23, 22, 25)
+# sharper books, requested only once X-Bookmakers says this key may see them (keys match the Odds API's)
+EXTRA_AFFILIATES = {3: "pinnacle", 11: "lowvig", 6: "betonlineag", 7: "bookmaker"}
+AFFILIATE = {19: "draftkings", 23: "fanduel", 22: "betmgm", 25: "kalshi", **EXTRA_AFFILIATES}
 MARKET = {1: "h2h", 2: "spreads", 3: "totals"}
 _LIVE = {"STATUS_IN_PROGRESS", "STATUS_HALFTIME", "STATUS_END_PERIOD",
          "STATUS_END_OF_REGULATION", "STATUS_OVERTIME", "STATUS_DELAYED"}
@@ -64,6 +67,7 @@ class TheRundownClient:
         self.delay_seconds: int | None = None
         self.tier: str | None = None
         self.bookmakers_header: str | None = None
+        self.extra_affiliates = True
         # (UTC date of the reading, X-Datapoints-Remaining): the daily cap resets each day
         self.daily: tuple[date, int] | None = None
         self._cost: dict[tuple, int] = {}  # last X-Datapoints per (league, params) as a cost estimate
@@ -108,7 +112,10 @@ class TheRundownClient:
         if (delay := _int(h.get("X-Data-Delay-Seconds"))) is not None:
             self.delay_seconds = delay
         self.tier = h.get("X-Tier", self.tier)
-        self.bookmakers_header = h.get("X-Bookmakers", self.bookmakers_header)
+        books = h.get("X-Bookmakers", self.bookmakers_header)
+        if books != self.bookmakers_header:
+            log.info("therundown: X-Bookmakers %s", books)
+        self.bookmakers_header = books
         self.last_status = "ok"
         body = resp.json()
         return body.get("events", []) if isinstance(body, dict) else body
@@ -154,8 +161,14 @@ class TheRundownClient:
                 period=None if period is None else str(period), clock=sc.get("display_clock")))
         return out
 
-    async def lines(self, league: League, day: date) -> list[Quote]:
-        params = {"market_ids": "1,2,3", "affiliate_ids": "19,23,22,25", "main_line": "true"}
+    def _affiliates(self) -> list[int]:
+        allowed = {_int(a) for a in (self.bookmakers_header or "").split(",")}
+        extra = [a for a in EXTRA_AFFILIATES if a in allowed] if self.extra_affiliates else []
+        return [*BASE_AFFILIATES, *sorted(extra, key=lambda a: list(EXTRA_AFFILIATES).index(a))]
+
+    async def lines(self, league: League, day: date, fetched_at: datetime | None = None) -> list[Quote]:
+        params = {"market_ids": "1,2,3", "affiliate_ids": ",".join(map(str, self._affiliates())),
+                  "main_line": "true"}
         out: list[Quote] = []
         for ev in await self._events(league, day, params):
             m = self._match(league, ev)
@@ -163,15 +176,16 @@ class TheRundownClient:
                 continue
             game_id, home, away = m
             try:
-                out.extend(self._event_quotes(ev, game_id, home, away))
+                out.extend(self._event_quotes(ev, game_id, home, away, fetched_at))
             except (KeyError, ValueError, TypeError, AttributeError) as e:
                 log.warning("therundown: skipping malformed event %s: %r", ev.get("event_id"), e)
                 self.malformed += 1
         return out
 
-    def _event_quotes(self, ev: dict, game_id: str, home: dict, away: dict) -> list[Quote]:
+    def _event_quotes(self, ev: dict, game_id: str, home: dict, away: dict,
+                      fetched_at: datetime | None = None) -> list[Quote]:
         out: list[Quote] = []
-        fetched = datetime.now(UTC)
+        fetched = fetched_at or datetime.now(UTC)
         team_side = {home["team_id"]: "home", away["team_id"]: "away"}
         for mk in ev.get("markets", []):
             market = MARKET.get(mk.get("market_id"))
@@ -195,7 +209,7 @@ class TheRundownClient:
                             ts = price.get("updated_at")
                             at = datetime.fromisoformat(ts.replace("Z", "+00:00")) if ts else fetched
                             out.append(Quote("therundown", book, game_id, market, side, value,
-                                             american_to_decimal(float(p)), at))
+                                             american_to_decimal(float(p)), at, fetched))
                         except (ValueError, TypeError, AttributeError) as e:
                             log.warning("therundown: skipping malformed price %s/%s: %r", game_id, book, e)
                             self.malformed += 1

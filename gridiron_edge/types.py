@@ -39,7 +39,12 @@ class Quote:
     side: Literal["home", "away", "over", "under"]
     point: float | None
     decimal: float
-    last_update: datetime
+    last_update: datetime  # the book's own stamp: when the price last changed
+    fetched_at: datetime | None = None  # when we pulled it; staleness is measured from here
+
+    @property
+    def seen_at(self) -> datetime:
+        return self.fetched_at or self.last_update
 
 
 @dataclass(frozen=True)
@@ -77,6 +82,7 @@ class KalshiMarket:
     result: str
     fee_multiplier: float
     fetched_at: datetime
+    rules_secondary: str = ""  # settlement fine print (tie handling for NFL moneylines)
 
 
 @dataclass(frozen=True)
@@ -114,6 +120,9 @@ class Recommendation:
     state: str = "RECOMMENDED"
     observe_only: bool = False
     tie_risk: bool = False
+    # machine-readable reasons, e.g. {"fair_source": "pinnacle", "books": [...], "p_market": .52,
+    # "p_model": .55, "model_weight": .3}; the UI renders it, nothing downstream depends on it
+    why: dict | None = None
 
     @property
     def leg_key(self) -> str:

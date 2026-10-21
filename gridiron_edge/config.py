@@ -9,8 +9,9 @@ from dotenv import dotenv_values
 _FRACTIONS = (
     "kelly_fraction", "cap_bet", "cap_game", "cap_slate", "cap_pp_daily",
     "kalshi_price_lo", "kalshi_price_hi", "arb_fraction", "arb_max_roi",
-    "odds_reserve_frac",
+    "odds_reserve_frac", "nfl_tie_prob",
 )
+MEDIAN_FAIR_POLICIES = ("observe", "block", "allow")
 
 # env var name -> Settings field (secrets and the optional URL)
 _ENV_FIELDS = {
@@ -42,6 +43,9 @@ class Settings:
     arb_fraction: float = 0.10
     arb_max_roi: float = 0.08
     odds_reserve_frac: float = 0.10
+    nfl_tie_prob: float = 0.004  # P(tie) per NFL game since 2012: Kalshi YES on either team loses it
+    # game recs whose fair price is only the soft-book median: observe (log, no stake), block or allow
+    median_fair_policy: str = "observe"
     # behaviour
     venues: tuple[str, ...] = ("kalshi", "prizepicks")
     quiet_hours: tuple[int, int] = (23, 8)
@@ -91,6 +95,8 @@ def _validate(s: Settings) -> None:
         raise ValueError(f"kelly_fraction must be in (0, 1], got {s.kelly_fraction}")
     if s.min_stake_cents < 0 or s.stale_seconds < 0:
         raise ValueError("min_stake_cents and stale_seconds must be >= 0")
+    if s.median_fair_policy not in MEDIAN_FAIR_POLICIES:
+        raise ValueError(f"median_fair_policy must be one of {', '.join(MEDIAN_FAIR_POLICIES)}")
     if len(s.quiet_hours) != 2 or not all(0 <= h <= 23 for h in s.quiet_hours):
         raise ValueError(f"quiet_hours must be two hours 0-23, got {s.quiet_hours}")
 

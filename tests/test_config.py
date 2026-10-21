@@ -59,3 +59,13 @@ def test_unknown_override_and_int_coercion(tmp_path):
         load_settings(env_file=f, overrides={"nope": "1"})
     s = load_settings(env_file=f, overrides={"min_stake_cents": "250", "notify_enabled": "false"})
     assert s.min_stake_cents == 250 and s.notify_enabled is False
+
+
+def test_fair_pricing_settings(tmp_path):
+    s = load_settings(env_file=tmp_path / "missing.env")
+    assert s.median_fair_policy == "observe" and s.nfl_tie_prob == pytest.approx(0.004)
+    assert load_settings(env_file=tmp_path / "x", overrides={"median_fair_policy": "block"}).median_fair_policy == "block"
+    with pytest.raises(ValueError):
+        load_settings(env_file=tmp_path / "x", overrides={"median_fair_policy": "sometimes"})
+    with pytest.raises(ValueError):
+        load_settings(env_file=tmp_path / "x", overrides={"nfl_tie_prob": "2"})

@@ -120,3 +120,26 @@ async def test_daily_reading_from_another_day_is_ignored(respx_mock, rd, load):
     rd.daily = (date(2000, 1, 1), 0)
     await rd.scores("nfl", date(2026, 11, 1))
     assert route.call_count == 1
+
+
+async def test_lines_stamp_fetch_time(respx_mock, rd, load):
+    respx_mock.get(url__regex=r".*/sports/2/events/.*").mock(return_value=_ok(load))
+    qs = await rd.lines("nfl", date(2026, 11, 1))
+    assert qs and all(q.fetched_at is not None for q in qs)
+
+
+async def test_lines_add_sharp_affiliates_only_when_allowed(respx_mock, rd, load):
+    route = respx_mock.get(url__regex=r".*/sports/2/events/.*").mock(
+        return_value=_ok(load, **{"X-Bookmakers": "19,23,22,25,3,11"}))
+    await rd.lines("nfl", date(2026, 11, 1))  # first call: allowed list unknown yet
+    assert route.calls[0].request.url.params["affiliate_ids"] == "19,23,22,25"
+    await rd.lines("nfl", date(2026, 11, 1))
+    assert route.calls[1].request.url.params["affiliate_ids"] == "19,23,22,25,3,11"
+    rd.extra_affiliates = False
+    await rd.lines("nfl", date(2026, 11, 1))
+    assert route.calls[2].request.url.params["affiliate_ids"] == "19,23,22,25"
+
+
+def test_extra_affiliates_map_to_odds_api_book_keys():
+    from gridiron_edge.clients.therundown import AFFILIATE
+    assert AFFILIATE[3] == "pinnacle" and AFFILIATE[11] == "lowvig" and AFFILIATE[6] == "betonlineag"
