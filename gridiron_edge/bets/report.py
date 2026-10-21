@@ -159,7 +159,7 @@ def _money(cents: int) -> str:
 
 def _pct(x: float | None, signed: bool = True) -> str:
     if x is None:
-        return "n/a"
+        return "not enough data"
     return f"{x * 100:+.1f}%" if signed else f"{x * 100:.1f}%"
 
 

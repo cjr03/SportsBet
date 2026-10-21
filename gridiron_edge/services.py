@@ -485,7 +485,7 @@ class Services:
                 snaps, injuries, missing = await asyncio.to_thread(self._read_player_status, seasons)
                 if missing:
                     out.append(("info", "Player bets: injury and playing-time data unavailable right now; "
-                                        "those checks are off"))
+                                        "those checks are off."))
             self.projector, gate = await asyncio.to_thread(self._build_projector, weekly, snaps, injuries, cur)
             self.projector_live = bool(gate["live"])
             if gate["n"]:
@@ -495,7 +495,7 @@ class Services:
                                        else "player bets priced by our projection alone are shown but not texted")))
             else:
                 out.append(("info", "Player projections: not enough history to check them yet - player bets priced by our "
-                                    "projection alone are shown but not texted"))
+                                    "projection alone are shown but not texted."))
         else:
             self.projector = _NoProjector()
         self.player_teams = self._latest_teams(weekly)
@@ -515,7 +515,7 @@ class Services:
             qb1 = await asyncio.to_thread(self.nflverse.depth_chart_qb1, season)
         except Exception as e:  # noqa: BLE001 - the disagreement cap still guards these games
             return [("info", "Could not check NFL starting quarterbacks right now; "
-                             "games where our number is far from the betting market still use the market only")]
+                             "games where our number is far from the betting market still use the market only.")]
         teams = qb_changes(sched, qb1, now.date())
         self.qb_changes = {self.teams.canonical("nfl", t) or t for t in teams}
         if not self.qb_changes:
@@ -762,7 +762,8 @@ class Services:
         inputs = self._nfl_inputs if league == "nfl" else self._cfb_inputs
         games, predict = await inputs(years, now.date())
         if not games:
-            raise ValueError(f"no {league} history with lines for {start}-{end}")
+            raise ValueError(f"no past {'NFL' if league == 'nfl' else 'college football'} games with betting lines "
+                             f"for {start}-{end}")
         mm = self.margin_models.get("nfl_spread") if league == "nfl" else self.margin_models.get("cfb")
         return await asyncio.to_thread(walkforward_ats, league, games, predict, mm)
 
@@ -779,7 +780,7 @@ class Services:
                               "total_line": float(r["total_line"]),
                               "total": float(r["home_score"] + r["away_score"])})
         if not games:
-            raise ValueError(f"no nfl totals history for {start}-{end}")
+            raise ValueError(f"no past NFL games with a closing total for {start}-{end}")
 
         def predict_asof(d: date):
             model = NflRatings.fit(sched, epa, d)
@@ -817,7 +818,8 @@ class Services:
         if (stored and not force and set(stored["leagues"]) >= set(spans)
                 and now - datetime.fromisoformat(stored["fitted_at"]) < GATE_REFIT):
             results = stored["leagues"]
-            out = [("info", f"Model checks: using results from {stored['fitted_at'][:10]}")]
+            at = datetime.fromisoformat(stored["fitted_at"]).astimezone(PT)
+            out = [("info", f"Model checks: using the results from {at:%b} {at.day}.")]
             closed: set[str] = set()
         else:
             prev = (stored or {}).get("leagues", {})
@@ -831,15 +833,15 @@ class Services:
                         closed.add(league)
                         _log.info("gate %s: %s", league, e)
                         out.append(("info", f"{_gate_label(league)}: no past games to check the model on yet, "
-                                            "so bets are shown but not texted"))
+                                            "so bets are shown but not texted."))
                     else:
-                        out.append(("info", f"{_gate_label(league)}: no model or past games yet, nothing to check"))
+                        out.append(("info", f"{_gate_label(league)}: no model or past games yet, nothing to check."))
                     continue
                 except Exception as e:  # noqa: BLE001 - one league's failure must not ungate the others
                     closed.add(league)
                     _log.warning("gate %s: backtest failed: %r", league, e)
                     out.append(("error", f"{_gate_label(league)}: could not check the model on past games "
-                                         "(data download failed), so bets are shown but not texted"))
+                                         "(data download failed), so bets are shown but not texted."))
                     continue
                 results[league] = self._gate_result(fit, metrics, prev.get(league), recent)
                 if league == "nfl":
@@ -849,8 +851,8 @@ class Services:
                             tfit, tm, prev.get(league, {}).get("total"), recent)
                     except Exception as e:  # noqa: BLE001 - totals stay market-only and gated
                         _log.info("gate nfl totals: %r", e)
-                        out.append(("info", "NFL over/unders: could not test our totals model on past games "
-                                            "yet, so totals use the sportsbooks' number only"))
+                        out.append(("info", "NFL total-points bets: could not test our totals model on past games "
+                                            "yet, so totals use the sportsbooks' number only."))
             if set(results) >= set(spans):
                 self._put("gates", json.dumps({"fitted_at": now.isoformat(), "leagues": results}))
         self.gates_complete = set(results) >= set(spans)
@@ -874,7 +876,7 @@ class Services:
         for lg, r in results.items():
             out.append(("info", _gate_line(_gate_label(lg), r)))
             if r.get("total") is not None:
-                out.append(("info", _gate_line("NFL over/unders", r["total"])))
+                out.append(("info", _gate_line("NFL total-points bets", r["total"])))
         return out
 
     def _gate_spans(self, now: datetime) -> dict[str, tuple[int, int]]:

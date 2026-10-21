@@ -51,9 +51,9 @@ def test_rejects(text):
 
 
 def test_unknown_message_and_words():
-    with pytest.raises(CommandError, match=r"unknown command: frobnicate \(try help\)"):
+    with pytest.raises(CommandError, match=r"Unknown command: frobnicate \(try: help\)"):
         parse_command("frobnicate")
-    with pytest.raises(CommandError, match=r"usage: withdraw <amount>"):
+    with pytest.raises(CommandError, match=r"Usage: withdraw <amount>"):
         parse_command("withdraw")
     assert "pp add" in COMMAND_WORDS and "notify test" in COMMAND_WORDS
 

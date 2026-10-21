@@ -490,8 +490,7 @@ def kalshi_game_candidates(snap: Snapshot, s: Settings) -> list[Recommendation]:
 
     out = []
     for m, g, sd, gf in best.values():
-        desc = {"ml": f"{m.team} ML", "spread": f"{m.team} wins by >{m.line}",
-                "total": f"Total over {m.line}"}[m.market_type]
+        desc = contract_text(m.market_type, m.team, m.line, g.away, g.home, g.league)
         tie = m.market_type == "ml" and ml_tie_risk(m, g.league)
         # the gate judges the model: a market-only edge (w=0) may go live when market_only_live is on
         gated = snap.gates.get((g.league, m.market_type), False) and (gf.model_weight > 0

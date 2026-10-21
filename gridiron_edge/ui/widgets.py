@@ -246,7 +246,7 @@ class EventLog(RichLog):
         self.lines_text: list[str] = []
         self.last_kind, self.last_msg = "", ""
 
-    LABELS = {"rec": "idea", "confirm": "placed", "settle": "settled", "api": "usage", "info": "note"}
+    LABELS = {"rec": "idea", "confirm": "placed", "settle": "settled", "api": "usage", "info": "note", "warn": "warning"}
 
     def event(self, kind: str, msg: str) -> None:
         line = Text(datetime.now().strftime("%H:%M:%S") + " ")

@@ -19,7 +19,7 @@ from gridiron_edge.db import InsufficientFunds, InvalidAmount
 from gridiron_edge.notify.format import PT
 from gridiron_edge.bets.report import segment_label
 from gridiron_edge.scheduler import LEAGUES, Job
-from gridiron_edge.services import NOTIFY_TEST_TEXT, Services
+from gridiron_edge.services import CHANNEL_WORDS, NOTIFY_TEST_TEXT, Services
 from gridiron_edge.types import Leg, Recommendation
 from gridiron_edge.ui import home
 from gridiron_edge.ui import prizepicks as pp_ui
@@ -30,6 +30,7 @@ from gridiron_edge.ui.widgets import (
     ScoresPanel, Section,
 )
 
+_LEAGUE = {"nfl": "NFL", "cfb": "college football"}
 ODDS_GAMES_COST = 3  # credits per league for h2h+spreads+totals
 _USER_ERRORS = (CommandError, LifecycleError, InvalidAmount, ValueError)
 
@@ -60,7 +61,27 @@ class CommandInput(Input):
 
 def _funds_error(e: InsufficientFunds) -> str:
     msg = str(e)
-    return msg if "insufficient" in msg.lower() else f"insufficient funds: {msg}"
+    return msg if msg.startswith("Not enough money") else f"Not enough money in the bankroll: {msg}"
+
+
+# lifecycle errors are short codes; say them as sentences
+_ERROR_WORDS = {
+    "unknown id": "There is no bet idea or bet with that number.",
+    "not pending": "That bet idea can't be confirmed any more (it was already placed, skipped or replaced).",
+    "expired": "That bet idea has gone stale; wait for a fresh one.",
+    "bet is not open": "That bet is already settled.",
+}
+
+
+def error_text(e: Exception) -> str:
+    """A user error as one plain sentence starting with a capital letter."""
+    msg = str(e)
+    msg = _ERROR_WORDS.get(msg, msg)
+    return msg[:1].upper() + msg[1:]
+
+
+def _settle_word(result: str) -> str:
+    return {"won": "won", "lost": "lost", "refund": "refunded"}.get(result, result)
 
 
 class GridironApp(App):
@@ -106,7 +127,7 @@ class GridironApp(App):
                     yield Static("", id="pp-board")
         yield Static("", id="status")
         with Horizontal(id="command-bar"):
-            yield CommandInput(id="cmd", placeholder="type a command (try help) - 1-5 switch tabs",
+            yield CommandInput(id="cmd", placeholder="Type a command (try: help). Keys 1-5 switch tabs.",
                                suggester=SuggestFromList(COMMAND_WORDS))
         yield Footer()
 
@@ -130,15 +151,16 @@ class GridironApp(App):
         await self.services.aclose()
 
     async def _startup(self) -> None:
-        self.log_event("info", "starting: loading teams, games, models...")
+        self.log_event("info", "Starting up: loading teams, games and team ratings...")
         self.log_lines(await self.services.startup(self.clock()))
         self.refresh_views()
         self.set_interval(self.TICK_S, self.tick)
 
     # -- event log --------------------------------------------------------
     def log_event(self, kind: str, msg: str) -> None:
+        msg = msg[:1].upper() + msg[1:]  # every log line reads as a sentence
         self.query_one(EventLog).event(kind, msg)
-        self.query_one("#status", Static).update(Text(f"{EventLog.LABELS.get(kind, kind)}: {msg}"))
+        self.query_one("#status", Static).update(Text(f"{EventLog.LABELS.get(kind, kind).capitalize()}: {msg}"))
 
     def log_lines(self, lines: list[tuple[str, str]]) -> None:
         for kind, msg in lines:
@@ -250,7 +272,7 @@ class GridironApp(App):
             self._pp_view = s.pp_view(now)
         except Exception as e:  # never let the PrizePicks summary take the dashboard down
             self._pp_view = None
-            self.query_one("#pp-status", Static).update(Text(f"PrizePicks: could not load the lines ({e})."))
+            self.query_one("#pp-status", Static).update(Text(f"PrizePicks: could not show the lines ({e})."))
         self.refresh_home()
         games = [g for g in s.registry.all_since(now - timedelta(hours=12))
                  if g.kickoff <= now + timedelta(days=7)]
@@ -271,7 +293,7 @@ class GridironApp(App):
         except InsufficientFunds as e:
             self.log_event("error", _funds_error(e))
         except _USER_ERRORS as e:
-            self.log_event("error", str(e))
+            self.log_event("error", error_text(e))
         self.refresh_views()
 
     def _dispatch(self, cmd: Command) -> None:
@@ -279,16 +301,16 @@ class GridironApp(App):
         match cmd.name:
             case "deposit":
                 s.ledger.deposit(a["cents"], note="manual")
-                self.log_event("deposit", f"added {_money(a['cents'])} - bankroll now {_money(s.ledger.balance())}")
+                self.log_event("deposit", f"Added {_money(a['cents'])}. Bankroll is now {_money(s.ledger.balance())}.")
             case "withdraw":
                 s.ledger.withdraw(a["cents"], note="manual")
-                self.log_event("withdraw", f"took out {_money(a['cents'])} - bankroll now {_money(s.ledger.balance())}")
+                self.log_event("withdraw", f"Took out {_money(a['cents'])}. Bankroll is now {_money(s.ledger.balance())}.")
             case "confirm":
                 self._confirm(a["id"], a["price"], a["qty"])
             case "skip":
                 self._skip(a["id"])
             case "scan":
-                self.log_event("info", "looking for bets now...")
+                self.log_event("info", "Looking for bets now...")
                 self._spawn([Job("scan", args={"what": a["what"]})], "manual-scan")
             case "refresh":
                 self._refresh(a["league"], a["force"])
@@ -296,12 +318,13 @@ class GridironApp(App):
                 self._bets(a["which"])
             case "settle":
                 s.settler.manual_settle(a["id"], a["result"], a["cents"], now)
-                self.log_event("settle", f"bet {a['id']} marked {a['result']} - bankroll now {_money(s.ledger.balance())}")
+                self.log_event("settle", f"Bet #{a['id']} marked as {_settle_word(a['result'])}. "
+                                         f"Bankroll is now {_money(s.ledger.balance())}.")
             case "pp refresh":
                 self._pp_refresh(a["confirmed"])
             case "pp add":
                 s.add_manual_pp(a["player"], a["stat"], a["line"], a["team"], a["game_id"], now)
-                self.log_event("info", f"PrizePicks line added: {a['player']} {a['line']} {d.stat_words(a['stat'])}")
+                self.log_event("info", f"PrizePicks line added: {a['player']} {a['line']:g} {d.stat_words(a['stat'])}.")
             case "quota":
                 for line in s.quota_lines():
                     self.log_event("api", line)
@@ -309,38 +332,41 @@ class GridironApp(App):
                 self._notify(a["mode"], now)
             case "set":
                 s.set_setting(a["field"], a["value"])
-                self.log_event("info", f"setting {a['field'].replace('_', ' ')} is now {getattr(s.settings, a['field'])}")
+                self.log_event("info", f"Setting changed: {a['field'].replace('_', ' ')} is now "
+                                       f"{getattr(s.settings, a['field'])}.")
             case "venues":
-                self.log_event("info", f"venues: {', '.join(s.settings.venues)} (change with: set venues a,b)")
+                sites = ", ".join(d.book_name(v) for v in s.settings.venues)
+                self.log_event("info", f"Betting sites in use: {sites} (change with: set venues kalshi,prizepicks).")
             case "backtest":
-                self.log_event("info", f"testing the {a['league'].upper()} model on {a['start']}-{a['end']} games...")
+                self.log_event("info", f"Testing the {_LEAGUE[a['league']]} model on {a['start']}-{a['end']} games...")
                 self.run_worker(self._backtest(a["league"], a["start"], a["end"]), group="backtest")
             case "fit":
-                self.log_event("info", "rechecking which markets our model has earned...")
+                self.log_event("info", "Rechecking which kinds of bets our model has earned...")
                 self.run_worker(self._fit_blend(), group="backtest")
             case "report":
                 self._report()
             case "drift":
                 names = s.reset_drift(a["segment"])
                 if not names:
-                    self.log_event("info", "nothing was paused")
+                    self.log_event("info", "Nothing was paused.")
                 for name in names:
-                    self.log_event("info", f"{segment_label(name)} are back on (no longer watch-only)")
+                    label = segment_label(name)
+                    self.log_event("info", f"{label[:1].upper() + label[1:]} are back on (texted again).")
             case "help":
                 for usage, what in HELP:
-                    self.log_event("info", f"{usage}  -  {what}")
+                    self.log_event("info", f"{usage}  -  {what[:1].upper() + what[1:]}")
                 self.action_show_tab("log")
 
     def _confirm(self, rec_id: int, price: float | None, qty: int | None) -> None:
         bet_id = self.services.lifecycle.confirm(rec_id, self.clock(), price, qty)
-        self.log_event("confirm", f"bet {bet_id} recorded from idea #{rec_id} - bankroll now "
-                                  f"{_money(self.services.ledger.balance())}")
+        self.log_event("confirm", f"Bet #{bet_id} recorded from idea #{rec_id}. Bankroll is now "
+                                  f"{_money(self.services.ledger.balance())}.")
 
     def _skip(self, rec_id: int) -> None:
         if self.services.lifecycle.get_rec(rec_id) is None:
             raise LifecycleError("unknown id")
         self.services.lifecycle.skip(rec_id)
-        self.log_event("info", f"skipped idea #{rec_id}")
+        self.log_event("info", f"Skipped bet idea #{rec_id}.")
 
     def _refresh(self, league: str | None, force: bool) -> None:
         leagues = [league] if league else list(LEAGUES)
@@ -349,11 +375,12 @@ class GridironApp(App):
             jobs += [Job("rundown_scores", lg), Job("rundown_lines", lg)]
         cost = ODDS_GAMES_COST * len(leagues)
         if force:
-            self.log_event("info", f"refresh --force: pulling sportsbook odds, ~{cost} Odds API credits")
+            self.log_event("info", f"Refreshing everything, including sportsbook prices (about {cost} Odds API "
+                                   "credits)...")
             jobs += [Job("odds_games", lg, {"window": "manual"}, essential=True) for lg in leagues]
         else:
-            self.log_event("info", f"refreshing Kalshi and TheRundown (add --force for sportsbook odds, "
-                                   f"~{cost} credits)")
+            self.log_event("info", "Refreshing Kalshi prices and scores... (type refresh --force to also load "
+                                   f"sportsbook prices, about {cost} Odds API credits)")
         self._spawn([*jobs, Job("scan")], "manual-refresh")
 
     def _pp_refresh(self, confirmed: bool) -> None:
@@ -361,7 +388,7 @@ class GridironApp(App):
         if not confirmed or not games:
             self.log_event("info", text)
             return
-        self.log_event("info", f"loading PrizePicks lines for {len(games)} game{'s' * (len(games) != 1)}...")
+        self.log_event("info", f"Loading PrizePicks lines for {len(games)} game{'s' * (len(games) != 1)}...")
         self.run_worker(self._run_pp_refresh(), group="pp-refresh", exclusive=True)
 
     async def _run_pp_refresh(self) -> None:
@@ -372,24 +399,25 @@ class GridironApp(App):
         lc = self.services.lifecycle
         rows = lc.open_bets() if which == "open" else lc.settled_bets(10)
         if not rows:
-            self.log_event("info", f"no {which} bets")
+            self.log_event("info", f"No {which} bets.")
         for b in rows:
-            tail = (f"{b['result']}, paid {_money(b['payout_cents'] or 0)}" if which == "settled"
-                    else f"placed {d.when(datetime.fromisoformat(b['placed_at']), self.clock())}")
-            self.log_event("info", f"bet {b['id']}: {d.bet_row_text(b, self.names)} - "
-                                   f"{_money(b['stake_cents'] + b['fee_cents'])} in, {tail}")
+            tail = (f"{_settle_word(b['result'])}, {_money(b['payout_cents'] or 0)} paid back" if which == "settled"
+                    else f"placed {d.when(datetime.fromisoformat(b['placed_at']), self.clock())} PT")
+            self.log_event("info", f"Bet #{b['id']}: {d.bet_row_text(b, self.names)} - "
+                                   f"{_money(b['stake_cents'] + b['fee_cents'])} in, {tail}.")
 
     def _notify(self, mode: str, now: datetime) -> None:
         if mode == "test":
             r = self.services.notify_test(now)
             if r.ok:
-                self.log_event("text", f"test sent via {r.channel}"
-                               + (": " + NOTIFY_TEST_TEXT if r.channel == "console" else ""))
+                self.log_event("text", f"Test text sent via {CHANNEL_WORDS.get(r.channel, r.channel)}"
+                               + (": " + NOTIFY_TEST_TEXT if r.channel == "console" else "."))
             else:
-                self.log_event("error", f"notify test failed ({r.channel}): {r.error}")
+                self.log_event("error", f"The test text did not go out ({CHANNEL_WORDS.get(r.channel, r.channel)}): "
+                                        f"{r.error}")
             return
         self.services.set_setting("notify_enabled", "true" if mode == "on" else "false")
-        self.log_event("info", f"texts {mode}")
+        self.log_event("info", f"Texts turned {mode}.")
 
     def _report(self) -> None:
         for line in self.services.report(self.clock())["summary"]:
@@ -400,24 +428,25 @@ class GridironApp(App):
         try:
             fit, m = await self.services.backtest(league, start, end, self.clock())
         except Exception as e:
-            self.log_event("error", f"could not test the model on past games: {e}")
+            self.log_event("error", f"Could not test the model on past games: {e}")
             return
         verdict = "kept tracking-only (not proven yet)" if fit.gated else "allowed to suggest bets"
-        self.log_event("info", f"{league.upper()} model test, {start}-{end}: {m['n']} games, picked the "
-                               f"spread winner {m['ats_pct']:.1%} of the time, accuracy score "
-                               f"{m['brier']:.3f} - our model is {verdict}")
+        self.log_event("info", f"{_LEAGUE[league]} model test, {start}-{end}: {m['n']:,} games; it picked the "
+                               f"point-spread winner {m['ats_pct']:.1%} of the time (accuracy score "
+                               f"{m['brier']:.3f}, lower is better; 0.250 is a coin flip). Our model is {verdict}.")
 
     async def _fit_blend(self) -> None:
         try:
             self.log_lines(await self.services.fit_gates(self.clock(), force=True))
         except Exception as e:
-            self.log_event("error", f"could not recheck the model: {e}")
+            self.log_event("error", f"Could not recheck the model: {e}")
 
     # -- PLACE NOW keys: Enter confirm, s skip, d why ------------------------------
     def _open_rec(self, rec_id: int) -> Recommendation | None:
         rec = self.services.lifecycle.get_rec(rec_id)
         if rec is None or rec.state not in ("RECOMMENDED", "PENDING"):
-            self.log_event("error", f"idea #{rec_id} can't be confirmed any more")
+            self.log_event("error", f"Bet idea #{rec_id} can't be confirmed any more (it was placed, skipped or "
+                                    "went stale).")
             self.refresh_home()
             return None
         return rec
@@ -429,14 +458,14 @@ class GridironApp(App):
 
         def done(result: tuple[float | None, int | None] | None) -> None:
             if result is None:
-                self.log_event("info", f"idea #{rec.id} not confirmed")
+                self.log_event("info", f"Bet idea #{rec.id} not confirmed.")
                 return
             try:
                 self._confirm(rec.id, *result)
             except InsufficientFunds as e:
                 self.log_event("error", _funds_error(e))
             except _USER_ERRORS as e:
-                self.log_event("error", str(e))
+                self.log_event("error", error_text(e))
             self.refresh_views()
 
         self.push_screen(ConfirmScreen(rec, self.names), done)
@@ -445,7 +474,7 @@ class GridironApp(App):
         try:
             self._skip(msg.rec_id)
         except _USER_ERRORS as e:
-            self.log_event("error", str(e))
+            self.log_event("error", error_text(e))
         self.refresh_home()
 
     def on_place_now_list_why_requested(self, msg: PlaceNowList.WhyRequested) -> None:

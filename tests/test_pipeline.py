@@ -74,7 +74,7 @@ def test_kalshi_ml_edge_found(mk, settings):
     assert len(recs) == 1
     r = recs[0]
     assert r.kind == "kalshi_game" and r.legs[0].side == "yes" and r.ev > 0.025 and r.stake_cents > 0
-    assert r.legs[0].description == "H1 ML" and r.tie_risk and r.expires_at == game(1).kickoff
+    assert r.legs[0].description == "H1 win" and r.tie_risk and r.expires_at == game(1).kickoff
     assert r.snapshot_ts == NOW and r.stake_cents == round(r.qty * 0.48 * 100)
 
 
@@ -107,7 +107,7 @@ def test_spread_uses_distribution(mk, settings):
 
     recs = run(0.40, 0.61)
     assert len(recs) == 1 and recs[0].legs[0].side == "yes"
-    assert recs[0].legs[0].description == "H1 wins by >2.5"
+    assert recs[0].legs[0].description == "H1 win by 3 or more points"
     assert recs[0].legs[0].p_fair == pytest.approx(NormalModel(NFL_SPREAD_SIGMA).p_greater(3.0, 2.5), abs=1e-3)
     assert run(0.60, 0.52) == []
 

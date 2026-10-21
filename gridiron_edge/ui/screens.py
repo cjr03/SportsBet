@@ -50,17 +50,17 @@ class ConfirmScreen(ModalScreen[tuple[float | None, int | None] | None]):
             try:
                 price = float(raw_p)
             except ValueError:
-                raise ValueError("price must be a number between 0 and 1") from None
+                raise ValueError("The price must be a number in dollars between 0 and 1, e.g. 0.47") from None
             if not 0 < price < 1:
-                raise ValueError("price must be between 0 and 1 (exclusive)")
+                raise ValueError("The price must be in dollars between 0 and 1, e.g. 0.47")
         qty = None
         if raw_q:
             try:
                 qty = int(raw_q)
             except ValueError:
-                raise ValueError("quantity must be a whole number") from None
+                raise ValueError("The number of contracts must be a whole number") from None
             if qty < 1:
-                raise ValueError("quantity must be at least 1")
+                raise ValueError("The number of contracts must be at least 1")
         return price, qty
 
     def on_button_pressed(self, event: Button.Pressed) -> None:

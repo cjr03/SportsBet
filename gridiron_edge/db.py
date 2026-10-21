@@ -110,7 +110,8 @@ class Ledger:
         try:
             if cents < 0 and self.balance() + cents < 0:
                 raise InsufficientFunds(
-                    f"{kind} of ${-cents / 100:,.2f} exceeds balance ${self.balance() / 100:,.2f}")
+                    f"Not enough money: that needs ${-cents / 100:,.2f} but the bankroll has "
+                    f"${self.balance() / 100:,.2f}.")
             cur = self.conn.execute(
                 "INSERT INTO ledger (ts, kind, amount_cents, bet_id, note) VALUES (?,?,?,?,?)",
                 (ts, kind, cents, bet_id, note))

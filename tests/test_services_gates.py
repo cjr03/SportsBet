@@ -185,7 +185,7 @@ async def test_gate_log_lines_are_plain_english(services_mocked):
     nfl = next(m for m in msgs if m.startswith("NFL spreads/moneylines"))
     assert "checked on 600 past games" in nfl
     assert "not yet trusted, bets are shown but not texted" in nfl
-    tot = next(m for m in msgs if m.startswith("NFL over/unders"))
+    tot = next(m for m in msgs if m.startswith("NFL total-points bets"))
     assert "sportsbooks' number only" in tot
     assert "no nfl totals history" not in tot  # raw exception text stays out of the Log tab
     for m in msgs:

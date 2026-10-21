@@ -54,7 +54,7 @@ _SETTINGS_FIELDS = {f.name for f in fields(Settings)}
 
 
 def _usage(text: str) -> CommandError:
-    return CommandError(f"usage: {text}")
+    return CommandError(f"Usage: {text}")
 
 
 def _int(raw: str, usage: str, minimum: int = 1) -> int:
@@ -88,9 +88,9 @@ def parse_command(text: str) -> Command:
     try:
         parts = shlex.split(text)
     except ValueError as e:
-        raise CommandError(f"could not parse command: {e}") from None
+        raise CommandError(f"Could not read that command: {e}") from None
     if not parts:
-        raise CommandError("empty command (try help)")
+        raise CommandError("Empty command (try: help)")
     word, rest = parts[0].lower(), parts[1:]
 
     match word, rest:
@@ -104,7 +104,7 @@ def parse_command(text: str) -> Command:
             if opt:
                 price = _float(opt[0], u)
                 if not 0 < price < 1:
-                    raise CommandError("price must be between 0 and 1 (exclusive)")
+                    raise CommandError("The price must be in dollars between 0 and 1, e.g. 0.47")
             if len(opt) == 2:
                 qty = _int(opt[1], u)
             return Command("confirm", {"id": _int(i, u), "price": price, "qty": qty})
@@ -154,7 +154,7 @@ def parse_command(text: str) -> Command:
             raise _usage("notify test|on|off")
         case "set", [name, value]:
             if name not in _SETTINGS_FIELDS:
-                raise CommandError(f"unknown setting: {name}")
+                raise CommandError(f"Unknown setting: {name}")
             return Command("set", {"field": name, "value": value})
         case "set", _:
             raise _usage("set <field> <value>")
@@ -182,4 +182,4 @@ def parse_command(text: str) -> Command:
         case ("quota" | "venues" | "report" | "help"), _:
             raise _usage(word)
         case _:
-            raise CommandError(f"unknown command: {word} (try help)")
+            raise CommandError(f"Unknown command: {word} (try: help)")

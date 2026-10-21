@@ -70,7 +70,7 @@ async def test_withdraw_too_much_shows_error(services_mocked):
         await submit(app, pilot, "deposit 10")
         await submit(app, pilot, "withdraw 50")
         last = log_lines(app)[-1]
-        assert "error" in last and "insufficient" in last
+        assert "error" in last and "Not enough money" in last
         assert svc.ledger.balance() == 1000
         assert app.query_one(BankrollHeader).target_cents == 1000
 
@@ -284,7 +284,7 @@ async def test_number_keys_switch_tabs_only_when_bar_empty(services_mocked):
         assert app.query_one("#cmd", Input).value == "deposit 2" and tabs.active == "home"
         await pilot.press("enter")
         await pilot.pause()
-        assert "added $2.00" in str(app.query_one("#status", Static).render())
+        assert "Added $2.00" in str(app.query_one("#status", Static).render())
 
 
 async def test_home_empty_state_explains_itself(services_mocked):
