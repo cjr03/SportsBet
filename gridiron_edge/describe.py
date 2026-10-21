@@ -246,7 +246,7 @@ def source_text(why: dict) -> str | None:
     base = _SOURCE_WORDS.get(src.removeprefix("anchored-"), src)
     text = (f"the last price from {base}, moved by how much the other sportsbooks have moved since"
             if anchored else base)
-    books = [book_name(b) for b in why.get("books") or []]
+    books = [b for b in dict.fromkeys(book_name(b) for b in why.get("books") or []) if b not in text]
     if books:
         text += f" ({', '.join(dict.fromkeys(books))})"
     method = _METHOD_WORDS.get(why.get("method") or "")

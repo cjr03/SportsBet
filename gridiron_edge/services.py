@@ -382,7 +382,7 @@ class Services:
             for n in names:
                 if n:
                     self.teams.add("cfb", n, code)
-        return [("info", f"teams: {len(rows)} FBS")]
+        return [("info", f"College teams loaded: {len(rows)} top-division schools")]
 
     def _apply_scores(self, games: list[Game]) -> int:
         n = 0
@@ -606,7 +606,7 @@ class Services:
         if len(spreads) < MIN_EMPIRICAL_RESIDUALS:
             self.margin_models.pop(CFB_MARGIN_KEY, None)
             return [("info", f"college winning margins: only {len(spreads)} saved past games with betting lines, "
-                             "so a simple bell curve is used (a college backtest saves more)")]
+                             "so a simple bell curve is used (testing the college model on past seasons saves more)")]
         self.margin_models[CFB_MARGIN_KEY] = ConditionalMarginModel(spreads, margins, CFB_SIGMA)
         return [("info", f"college winning margins learned from {len(spreads):,} past games with betting lines")]
 

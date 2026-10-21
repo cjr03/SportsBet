@@ -141,7 +141,7 @@ class KpiTiles(Static):
 
 
 class QuotaBar(Static):
-    CAPS = {"Odds": 500, "CFBD": 1000, "Rundown": 200000}
+    CAPS = {"Odds API": 500, "College data": 1000, "Scores data": 200000}  # calls / data points left
     BAR_W = 8
 
     def __init__(self, **kw):
@@ -154,7 +154,7 @@ class QuotaBar(Static):
         low = False
         for name, val in zip(self.CAPS, (odds, cfbd, rundown)):
             if val is None:
-                out.append(f"{name} n/a  ", style="dim")
+                out.append(f"{name}: not set up  ", style="dim")
                 continue
             frac = max(0.0, min(1.0, val / self.CAPS[name]))
             is_low = frac < 0.10
@@ -165,7 +165,7 @@ class QuotaBar(Static):
                        style=LOSS if is_low else ACCENT)
             out.append(f" {val}  ")
         out.append("Kalshi ")
-        out.append("ok" if kalshi_ok else "down", style=PROFIT if kalshi_ok else LOSS)
+        out.append("working" if kalshi_ok else "not reachable", style=PROFIT if kalshi_ok else LOSS)
         self.set_class(low, "low")
         self.update(out)
         if low and not self._pulsing:

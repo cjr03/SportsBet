@@ -117,7 +117,7 @@ def test_why_panel_renders_fair_pricing_reasons_in_plain_english():
     lines = d.why_lines(rec(why=why), NOW, kelly_fraction=0.25, cap_bet=0.02)
     text = "\n".join(lines[:-1])
     assert "the last price from Pinnacle, the sharpest sportsbook, moved by how much" in text
-    assert "(Pinnacle)" in text and "adjusted from a line half a point away" in text
+    assert "(Pinnacle)" not in text and "adjusted from a line half a point away" in text  # no repeated name
     assert "Sportsbooks say 54%; our team ratings say 58% and count for 30% of our number." in text
     assert "0.4% chance of a tie" in text
     assert not [j for j in JARGON if j in text], text
