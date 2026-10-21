@@ -1,4 +1,5 @@
 """Decides which fetch jobs are due; pure given its state and the game registry."""
+import math
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Callable, Literal
@@ -9,8 +10,18 @@ from gridiron_edge.budget import BudgetGuard
 JobName = Literal["kalshi_refresh", "rundown_scores", "rundown_lines", "odds_games", "odds_props",
                   "cfbd_weekly", "nflverse_refresh", "settle", "scan", "expire"]
 LEAGUES = ("nfl", "cfb")
-PROPS_WEEKLY_CAP = 8
-PROPS_COST = 3
+# Player props: one "slate" pull per game from 3 h before kickoff (inside props_stale_seconds, so
+# every game in a kickoff slot has fresh lines together), plus a refresh in the last hour only for
+# games with an active PrizePicks idea or open entry.
+PROPS_COST = 3  # credits per pull: 3 markets x 1 region (odds_api.PROPS_COST)
+PROPS_SLATE_LEAD = timedelta(hours=3)
+PROPS_REFRESH_LEAD = timedelta(minutes=60)
+# Budget (500 free credits a month): NFL props first (~16 games x 3 = ~48 credits a week). CFB props
+# only while the credits left stay above PROPS_CFB_RESERVE, kept for game-odds pulls (early/mid
+# windows and closing lines, ~120 a month), plus the NFL props still to come before the monthly
+# reset (assumed the 1st, UTC). The guard's own 10% floor applies on top.
+PROPS_CFB_RESERVE = 120
+NFL_PROPS_PER_WEEK = 16 * PROPS_COST
 SCAN_DEBOUNCE = timedelta(seconds=60)
 # Weekday numbers: Mon=0 ... Sun=6. (weekday, hour) of each league's odds-window anchors.
 _EARLY = {"nfl": (1, 9), "cfb": (6, 12)}
@@ -28,6 +39,15 @@ CLOSE_SLOP = timedelta(minutes=5)  # kickoff times differ slightly between provi
 def _odds_time(t: datetime) -> str:
     """The Odds API's documented commence-time form: UTC with a literal Z."""
     return t.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def cfb_props_floor(now: datetime) -> int:
+    """Credits that must stay after a CFB props pull: the game-odds reserve plus the NFL props
+    still expected before the quota resets on the 1st."""
+    t = now.astimezone(UTC)
+    nxt = datetime(t.year + (t.month == 12), t.month % 12 + 1, 1, tzinfo=UTC)
+    weeks_left = (nxt - t).total_seconds() / timedelta(weeks=1).total_seconds()
+    return PROPS_CFB_RESERVE + math.ceil(weeks_left * NFL_PROPS_PER_WEEK)
 
 
 def _in_close_window(kickoff: datetime, now: datetime) -> bool:
@@ -60,9 +80,11 @@ class Scheduler:
                  tz=ZoneInfo("America/Los_Angeles"),
                  has_open_bets: Callable[[], bool] = lambda: False,
                  open_bet_games: Callable[[], set[str]] = lambda: set(),
-                 close_games: Callable[[], set[str]] = lambda: set()):
+                 close_games: Callable[[], set[str]] = lambda: set(),
+                 pp_games: Callable[[], set[str]] = lambda: set()):
         """open_bet_games: game ids with a PLACED bet. close_games: game ids whose closing line
-        matters (a PLACED bet or a live, non-observe recommendation)."""
+        matters (a PLACED bet or a live, non-observe recommendation). pp_games: game ids with an
+        active PrizePicks idea or open entry (their prop lines are refreshed near kickoff)."""
         self.registry = registry
         self.budgets = budgets
         self.state: dict = {} if state is None else state
@@ -70,6 +92,7 @@ class Scheduler:
         self.has_open_bets = has_open_bets
         self.open_bet_games = open_bet_games
         self.close_games = close_games
+        self.pp_games = pp_games
         self._scan_pending = False
 
     # -- recording -------------------------------------------------------
@@ -186,20 +209,36 @@ class Scheduler:
 
     def _odds_props(self, now: datetime, local: datetime, upcoming) -> list[Job]:
         guard = self.budgets.get("odds_api")
-        if guard is not None and not guard.can_spend(PROPS_COST):
-            return []
-        week = local.isocalendar()[:2]
-        used = sum(1 for k, t in self.state.items()
-                   if k[0] == "odds_props" and t.astimezone(self.tz).isocalendar()[:2] == week)
-        cands = sorted((g for g in upcoming if g.kickoff - now <= timedelta(hours=2)),
-                       key=lambda g: (LEAGUES.index(g.league), g.kickoff))
+        rem = guard.remaining() if guard is not None else None
+        floor = cfb_props_floor(now)
         out: list[Job] = []
-        for g in cands:
-            if used + len(out) >= PROPS_WEEKLY_CAP:
-                break
-            job = Job("odds_props", g.league, {"game_id": g.game_id})
+
+        def add(job: Job) -> None:
+            spend = PROPS_COST * (len(out) + 1)
+            if guard is not None and not guard.can_spend(spend):
+                return
+            if job.league == "cfb" and rem is not None and rem - spend < floor:
+                return
+            out.append(job)
+
+        def slate(g) -> Job:
+            return Job("odds_props", g.league, {"game_id": g.game_id, "window": "slate"})
+
+        for g in sorted((g for g in upcoming if now < g.kickoff <= now + PROPS_SLATE_LEAD),
+                        key=lambda g: (LEAGUES.index(g.league), g.kickoff)):
+            if slate(g).key not in self.state:  # a late start still pulls once, up to kickoff
+                add(slate(g))
+        near = [g for g in upcoming if now < g.kickoff <= now + PROPS_REFRESH_LEAD]
+        if not near:
+            return out
+        wanted = set(self.pp_games())  # lazily: only when a game is in its last hour
+        for g in sorted(near, key=lambda g: (LEAGUES.index(g.league), g.kickoff)):
+            pulled = self.state.get(slate(g).key)
+            if g.game_id not in wanted or pulled is None or pulled > g.kickoff - PROPS_REFRESH_LEAD:
+                continue  # never pulled, or pulled within the last hour already
+            job = Job("odds_props", g.league, {"game_id": g.game_id, "window": "refresh"})
             if job.key not in self.state:
-                out.append(job)
+                add(job)
         return out
 
 

@@ -902,6 +902,13 @@ class Services:
             out |= {leg["game_id"] for leg in _bet_legs(shadow) if leg.get("game_id")}
         return out
 
+    def pp_games(self) -> set[str]:
+        """Games with an active (not watch-only) PrizePicks idea or an open PrizePicks entry."""
+        rows = self.conn.execute("SELECT legs_json FROM recommendations WHERE kind='pp_entry' "
+                                 "AND state IN ('RECOMMENDED','PENDING') AND observe_only=0").fetchall()
+        bets = [b for b in self.lifecycle.open_bets() if b["kind"] == "pp_entry"]
+        return {leg["game_id"] for leg in _bet_legs(rows) + _bet_legs(bets) if leg.get("game_id")}
+
     def _shadow_budget_ok(self) -> bool:
         if self.odds is None:
             return False
@@ -1458,7 +1465,8 @@ def build_services(settings: Settings, transports: dict[str, httpx.AsyncBaseTran
     scheduler = Scheduler(view, budgets, state=_SchedulerState(conn, datetime.now(UTC)),
                           has_open_bets=lambda: bool(lifecycle.open_bets()),
                           open_bet_games=lambda: services.open_bet_games(),
-                          close_games=lambda: services.close_games())
+                          close_games=lambda: services.close_games(),
+                          pp_games=lambda: services.pp_games())
     services = Services(
         settings=settings, conn=conn, ledger=ledger, lifecycle=lifecycle,
         settler=Settler(conn, lifecycle, registry, payout_table(settings)), teams=teams, registry=registry, budgets=budgets,

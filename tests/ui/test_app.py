@@ -192,7 +192,7 @@ async def test_quotes_and_props_survive_restart(services_mocked, monkeypatch):
     svc = services_mocked()
     assert not [ln for ln in await svc.run_job(EARLY, NOW) if ln[0] == "error"]
     (gid,) = [r["game_id"] for r in svc.conn.execute("SELECT game_id FROM games WHERE odds_event_id='evt1'")]
-    props_job = Job("odds_props", "nfl", {"game_id": gid})
+    props_job = Job("odds_props", "nfl", {"game_id": gid, "window": "slate"})
     assert not [ln for ln in await svc.run_job(props_job, NOW) if ln[0] == "error"]
     for job in (EARLY, props_job):
         svc.scheduler.mark_done(job, NOW)
