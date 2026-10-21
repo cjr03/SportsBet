@@ -94,3 +94,10 @@ def test_prizepicks_settings_accept_good_values():
     assert s.pp_payouts_json
     assert apply_override(s, "pp_structures", "3-power, 5-flex").pp_structures == ("3-power", "5-flex")
     assert apply_override(s, "pp_payouts_json", "").pp_payouts_json == ""
+
+
+def test_stale_seconds_outlasts_the_lines_poll():
+    from gridiron_edge.config import Settings
+    from gridiron_edge.scheduler import RUNDOWN_LINES_EVERY
+    # TheRundown refreshes lines every 30 min: game quotes must stay fresh until the next pull
+    assert Settings().stale_seconds > RUNDOWN_LINES_EVERY.total_seconds()

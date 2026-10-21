@@ -270,3 +270,13 @@ def test_settler_takes_payout_table(env):
     conn, lc, reg, _ = env
     st = Settler(conn, lc, reg, payouts={(2, "power"): {2: 3.5}})
     assert st.payouts[(2, "power")] == {2: 3.5}
+
+
+def test_middle_with_one_leg_paying_is_lost(env):
+    conn, lc, reg, st = env
+    reg.upsert(game(home=31, away=24))  # PHI by 7: YES PHI >2.5 pays, NO PHI >3.5 loses
+    lo = Leg("kalshi", "x", "yes", 0.52, 0.5, GID, ticker="SP-PHI3", team="PHI", line=2.5)
+    hi = Leg("kalshi", "x", "no", 0.50, 0.5, GID, ticker="SP-PHI4", team="PHI", line=3.5)
+    bet_id = place(lc, [lo, hi], kind="middle", qty=10, stake=1020)
+    done = st.settle_ready(KICK + timedelta(hours=4), lambda t: None, no_stat)
+    assert done == [(bet_id, "lost", 1000)]  # $1 a pair back on $1.02 a pair: a loss, payout kept

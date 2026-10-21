@@ -87,7 +87,8 @@ class Settings:
     venues: tuple[str, ...] = ("kalshi", "prizepicks")
     quiet_hours: tuple[int, int] = (23, 8)
     notify_enabled: bool = True
-    stale_seconds: int = 600
+    # game quotes stay fresh past TheRundown's 30-minute lines poll (plus slack)
+    stale_seconds: int = 2100
     # props are pulled once near kickoff, so their anchors age from fetch time over a longer window
     props_stale_seconds: int = 10800
     # furthest a prop is repriced from the book's point (yards / pass yards / counts)

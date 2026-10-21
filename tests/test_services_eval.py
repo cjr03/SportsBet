@@ -240,3 +240,36 @@ def test_calibration_lines_plain_english():
     rel = [{"lo": 0.4, "hi": 0.6, "n": 12, "mean_p": 0.5, "hit_rate": 0.55},
            {"lo": 0.6, "hi": 0.8, "n": 0, "mean_p": None, "hit_rate": None}]
     assert calibration_lines(rel) == ["When we said 40-60%, it happened 55% of the time (12 bets)"]
+
+
+def test_prop_close_keeps_pulls_older_than_props_ttl(services_mocked):
+    from gridiron_edge.types import PropQuote
+    svc = services_mocked()
+    gid = "nfl:20261031:AAA@BBB"
+    svc.registry.upsert(Game(gid, "nfl", 2026, 9, KICK, "BBB", "AAA"))
+    old = NOW - timedelta(hours=5)  # older than props_stale_seconds (3 h): still the last close
+    svc.latest["props"] = [
+        PropQuote("odds_api", "draftkings", gid, "D.J. Moore", "rush_yds", "over", 49.5, 1.90, old),
+        PropQuote("odds_api", "draftkings", gid, "D.J. Moore", "rush_yds", "under", 49.5, 1.90, old)]
+    leg = {"game_id": gid, "player": "DJ Moore", "stat": "rush_yds", "line": 49.5, "side": "over"}
+    p, src, stale = svc._close_p("kalshi_prop", leg, svc.snapshot(NOW), {})
+    assert p is not None and src == "prop books" and stale
+
+
+def test_nfl_ml_close_is_tie_adjusted(services_mocked, mk):
+    from gridiron_edge import pipeline
+    svc = services_mocked()
+    gid = "nfl:20261031:AAA@BBB"
+    g = Game(gid, "nfl", 2026, 9, KICK, "BBB", "AAA")
+    svc.registry.upsert(g)
+    m = mk("ML-BBB", "E", "ml", "BBB", yes_ask=0.50, game_id=gid)
+    svc.latest["kalshi"] = [m]
+    svc.latest["quotes"] = [Quote("odds_api", "pinnacle", gid, "h2h", "home", None, 1.80, NOW),
+                            Quote("odds_api", "pinnacle", gid, "h2h", "away", None, 2.10, NOW)]
+    snap = svc.snapshot(NOW)
+    gf = pipeline._game_fair(m, g, snap, svc.settings)
+    assert gf.tie_prob > 0
+    for side in ("yes", "no"):
+        leg = {"game_id": gid, "ticker": m.ticker, "side": side}
+        p, _, _ = svc._close_p("kalshi_game", leg, snap, {m.ticker: m})
+        assert p == pytest.approx(gf.market_side(side))

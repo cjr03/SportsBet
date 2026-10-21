@@ -92,3 +92,11 @@ def test_market_only_rec_live_when_setting_on(mk, settings):
     pred = Prediction("g1", 3.0, None, "t")  # the model contributes: the gate still applies
     with_model = replace(snap, predictions={"g1": pred}, quotes=snap.quotes + spreads("g1", -3.0))
     assert kalshi_game_candidates(with_model, replace(settings, market_only_live=True))[0].observe_only
+
+
+def test_market_only_live_never_overrides_a_pause(mk, settings):
+    m = mk("E1-H1", "E1", "ml", "H1", yes_ask=0.48, game_id="g1")
+    key = ("nfl", "ml")
+    snap = snap_with(quotes=h2h("g1", 1.80, 2.10), kalshi=[m], gates={key: True}, paused={key: True})
+    # drift / CLV throttle paused the market: a market-only rec stays observe-only (no text)
+    assert kalshi_game_candidates(snap, replace(settings, market_only_live=True))[0].observe_only

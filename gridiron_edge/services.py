@@ -1038,24 +1038,26 @@ class Services:
             return None, None, False
         if kind == "kalshi_game":
             m = markets.get(leg.get("ticker") or "")
-            p_yes = None if m is None else pipeline.market_p_yes(m, g, snap, self.settings)
-            if p_yes is None:
+            # market-only side probability, tie-adjusted like p_mkt at rec time (NFL moneylines)
+            gf = None if m is None else pipeline._game_fair(m, g, snap, self.settings)
+            if gf is None:
                 return None, None, False
             src = "sportsbook line"
             if m.market_type == "ml":
                 quotes = [q for q in snap.quotes if q.game_id == g.game_id]
                 fair = fair_two_way(quotes, "h2h", None, now=snap.now, stale_seconds=self.settings.stale_seconds)
                 src = fair[1] if fair else src
-            return (p_yes if leg.get("side") == "yes" else 1.0 - p_yes), src, False
+            return gf.market_side("yes" if leg.get("side") == "yes" else "no"), src, False
         player, stat, line = leg.get("player"), leg.get("stat"), leg.get("line")
         if not player or not stat or line is None:
             return None, None, False
         props = [q for q in snap.props if q.game_id == g.game_id and q.last_update <= g.kickoff
                  and q.book != "prizepicks" and q.decimal is not None and q.stat == stat
-                 and q.player.lower() == player.lower()]
+                 and normalize_name(q.player) == normalize_name(player)]
         if not props:
             return None, None, False
-        loose = replace(self.settings, stale_seconds=10**9)  # the last snapshot, however old
+        # the last snapshot, however old
+        loose = replace(self.settings, stale_seconds=10**9, props_stale_seconds=10**9)
         sides = pipeline._book_p_sides(replace(snap, props=props), loose, g.game_id, player, stat, line)
         if sides is None:
             return None, None, False
@@ -1179,7 +1181,8 @@ class Services:
         pp_legs = _bet_legs([b for b in bets if b["kind"] == "pp_entry"])
         pp_players = {normalize_name(leg["player"]) for leg in pp_legs if leg.get("player")}
         st = self._open_state(now, games)
-        gates = {**self.gates, **st.pop("paused")}
+        paused = st.pop("paused")
+        gates = {**self.gates, **paused}
         open_keys = {r["leg_key"] for r in self.conn.execute(
             "SELECT r.leg_key FROM recommendations r JOIN bets b ON b.rec_id = r.id "
             "WHERE b.state='PLACED' AND r.state='PLACED'")}
@@ -1196,7 +1199,7 @@ class Services:
             projector_live=self.projector_live,
             pp_open_players=pp_players,
             pp_open_games={leg["game_id"] for leg in pp_legs if leg.get("game_id")},
-            **st)
+            paused=paused, **st)
 
     def _wanted(self, rec: Recommendation, what: str) -> bool:
         venue = "prizepicks" if rec.kind == "pp_entry" else "kalshi"

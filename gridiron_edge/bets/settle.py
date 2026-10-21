@@ -124,6 +124,8 @@ class Settler:
             return "refund", refund_all, refund_all
         won = sum(bet["qty"] * 100 for g in grades if g == "won")
         refunded = sum(self._leg_refund_cents(bet, leg) for g, leg in zip(grades, legs) if g == "refund")
+        if bet["kind"] == "middle":  # won only if the pairs returned more than they cost
+            return ("won" if won + refunded > refund_all else "lost"), won + refunded, refunded
         result = "won" if "won" in grades else "refund" if "refund" in grades else "lost"
         return result, won + refunded, refunded
 

@@ -102,6 +102,8 @@ class Snapshot:
     pp_open_players: set[str] = field(default_factory=set)
     pp_open_games: set[str] = field(default_factory=set)
     clv_mult: dict[str, float] = field(default_factory=dict)
+    # (league, market) paused by the CLV throttle or drift (also merged into gates); no setting lifts it
+    paused: dict[tuple[str, str], bool] = field(default_factory=dict)
 
 
 def slate_window(g: Game) -> str:
@@ -494,7 +496,8 @@ def kalshi_game_candidates(snap: Snapshot, s: Settings) -> list[Recommendation]:
         gated = snap.gates.get((g.league, m.market_type), False) and (gf.model_weight > 0
                                                                        or not s.market_only_live)
         # soft-book median only: no sharp price behind it, so log it rather than stake it
-        observe = gated or (gf.fair.source == "median" and s.median_fair_policy == "observe")
+        observe = (snap.paused.get((g.league, m.market_type), False) or gated
+                   or (gf.fair.source == "median" and s.median_fair_policy == "observe"))
         p_mkt = gf.market_side(sd.side)
         out.append(_kalshi_rec("kalshi_game", m, g, sd, desc, snap, m.market_type, tie, gf.why(), observe,
                                p_mkt=p_mkt))
