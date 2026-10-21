@@ -122,3 +122,33 @@ def test_display_names_for_cfb(resolver):
     resolver.set_display("cfb", "OSU", "Ohio State")
     resolver.set_display("cfb", "OSU", "Ohio State")
     assert resolver.display_names() == {("cfb", "OSU"): "Ohio State"}
+
+
+# -- spread markets: the team comes from the ticker suffix, not the "X wins by over N" sentence ----
+
+def test_kalshi_ticker_team_from_suffix():
+    from gridiron_edge.matching import kalshi_ticker_team
+    assert kalshi_ticker_team("KXNFLSPREAD-26OCT26DALPHI-PHI8", "DAL", "PHI") == "PHI"
+    assert kalshi_ticker_team("KXNCAAFSPREAD-26OCT24AKRKENT-KENT7", "AKR", "KENT") == "KENT"
+    assert kalshi_ticker_team("KXNCAAFSPREAD-26OCT24AKRKENT-AKR6", "AKR", "KENT") == "AKR"
+    assert kalshi_ticker_team("KXNCAAFSPREAD-26OCT24COLOOKST-OKST8", "COLO", "OKST") == "OKST"
+    assert kalshi_ticker_team("KXNFLGAME-26NOV02CHISEA-SEA", "CHI", "SEA") == "SEA"
+    assert kalshi_ticker_team("KXNFLTOTAL-26NOV02CHISEA-45", "CHI", "SEA") is None
+    assert kalshi_ticker_team("KXNFLSPREAD-26NOV02CHISEA-SEAX3", "CHI", "SEA") is None
+    assert kalshi_ticker_team("KXNCAAFSPREAD-26OCT24OKOKST-OKST3", "OK", "OKST") == "OKST"  # longest code wins
+
+
+def test_kalshi_resolver_spread_team_from_ticker(registry):
+    ko = datetime(2026, 10, 27, 0, 20, tzinfo=timezone.utc)
+    g = Game("nfl:20261026:DAL@PHI", "nfl", 2026, 8, ko, "PHI", "DAL")
+    registry.upsert(g)
+    r = kalshi_resolver(registry, registry.teams)
+    assert r({"event_ticker": "KXNFLSPREAD-26OCT26DALPHI", "ticker": "KXNFLSPREAD-26OCT26DALPHI-PHI8",
+              "yes_sub_title": "Philadelphia wins by over 7.5 points"}) == (g.game_id, "PHI")
+    assert r({"event_ticker": "KXNFLSPREAD-26OCT26DALPHI", "ticker": "KXNFLSPREAD-26OCT26DALPHI-DAL3",
+              "yes_sub_title": "Dallas wins by over 2.5 points"}) == (g.game_id, "DAL")
+    assert r({"event_ticker": "KXNFLTOTAL-26OCT26DALPHI", "ticker": "KXNFLTOTAL-26OCT26DALPHI-45",
+              "yes_sub_title": "Over 44.5 points"}) == (g.game_id, None)
+    # no ticker: the sentence still resolves with "wins by over ..." stripped
+    assert r({"event_ticker": "KXNFLSPREAD-26OCT26DALPHI",
+              "yes_sub_title": "Philadelphia wins by over 7.5 points"}) == (g.game_id, "PHI")

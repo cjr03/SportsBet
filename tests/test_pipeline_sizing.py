@@ -19,7 +19,7 @@ from gridiron_edge.pipeline import (
 )
 from gridiron_edge.strategy.distributions import NFL_SPREAD_SIGMA, EmpiricalMarginModel
 from gridiron_edge.types import Leg, PropQuote
-from test_pipeline import BANKROLL, NOW, StubProjector, _pp_snap, game, h2h, snap_with, spreads
+from test_pipeline import BANKROLL, NOW, TIE_SPLIT, StubProjector, _pp_snap, game, h2h, snap_with, spreads
 
 NFL = lambda m: "nfl"  # noqa: E731
 
@@ -219,8 +219,9 @@ def test_pp_arena_mode_reports_perfect_only_odds(settings):
 # -- arbs and middles ----------------------------------------------------------------------------
 
 def _pair(mk, **kw):
-    return [mk("E1-H1", "E1", "ml", "H1", yes_ask=0.45, game_id="g1", yes_ask_size=500),
-            mk("E1-A1", "E1", "ml", "A1", yes_ask=0.45, game_id="g1", yes_ask_size=80, **kw)]
+    ms = [mk("E1-H1", "E1", "ml", "H1", yes_ask=0.45, game_id="g1", yes_ask_size=500),
+          mk("E1-A1", "E1", "ml", "A1", yes_ask=0.45, game_id="g1", yes_ask_size=80, **kw)]
+    return [replace(m, rules_secondary=TIE_SPLIT) for m in ms]
 
 
 def test_stale_arb_dropped(mk, settings):

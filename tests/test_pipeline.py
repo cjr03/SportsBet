@@ -185,13 +185,23 @@ def test_pp_pick_without_known_team_skipped(settings):
     assert len(pp_entry_candidates(replace(snap, player_teams={}), settings, StubProjector(teams=teams))) == 1
 
 
+TIE_SPLIT = "If the game ends in a tie, the market will resolve to $0.50 for each team."
+
+
+def _ml_pair(mk, **kw):
+    return [replace(mk("E1-H1", "E1", "ml", "H1", yes_ask=0.45, game_id="g1", **kw), rules_secondary=TIE_SPLIT),
+            replace(mk("E1-A1", "E1", "ml", "A1", yes_ask=0.45, game_id="g1", **kw), rules_secondary=TIE_SPLIT)]
+
+
 def test_arb_rec(mk, settings):
-    ms = [mk("E1-H1", "E1", "ml", "H1", yes_ask=0.45, game_id="g1"),
-          mk("E1-A1", "E1", "ml", "A1", yes_ask=0.45, game_id="g1")]
+    ms = _ml_pair(mk)
     recs = arb_candidates(snap_with(kalshi=ms), settings, lambda m: "nfl")
     assert len(recs) == 1
     r = recs[0]
-    assert r.kind == "arb" and len(r.legs) == 2 and r.tie_risk and r.qty >= 1 and r.ev > 0
+    assert r.kind == "arb" and len(r.legs) == 2 and not r.tie_risk and r.qty >= 1 and r.ev > 0
+    # without a 50/50 tie clause an NFL tie pays nothing: not an arb
+    bare = [replace(m, rules_secondary="") for m in ms]
+    assert arb_candidates(snap_with(kalshi=bare), settings, lambda m: "nfl") == []
     # qty limited by the arb bankroll fraction
     assert r.stake_cents <= settings.arb_fraction * BANKROLL
 
@@ -319,8 +329,7 @@ def test_open_bet_on_player_blocks_new_kalshi_prop_rec(mk, settings):
 
 
 def test_placed_arb_not_recommended_again(mk, settings):
-    ms = [mk("E1-H1", "E1", "ml", "H1", yes_ask=0.45, game_id="g1"),
-          mk("E1-A1", "E1", "ml", "A1", yes_ask=0.45, game_id="g1")]
+    ms = _ml_pair(mk)
     (rec,) = arb_candidates(snap_with(kalshi=ms), settings, lambda m: "nfl")
     moved = [replace(m, yes_ask=0.44) for m in ms]
     assert arb_candidates(snap_with(kalshi=moved, open_leg_keys={rec.leg_key}), settings, lambda m: "nfl") == []
@@ -500,3 +509,28 @@ def test_kalshi_game_rec_records_market_p(mk, settings):
     r = kalshi_game_candidates(_ml_snap(mk, 0.48), settings)[0]
     assert r.legs[0].p_mkt is not None and r.p_mkt == r.legs[0].p_mkt
     assert r.legs[0].p_mkt == pytest.approx(r.legs[0].p_fair)  # no model: fair is the market
+
+
+def test_spread_leg_without_team_is_not_an_over_under():
+    from gridiron_edge.pipeline import direction_key
+    from gridiron_edge.types import Leg
+    g = game(1)
+    leg = Leg("kalshi", "x", "yes", 0.3, 0.3, "g1", ticker="KXNCAAFSPREAD-26OCT24AKRKENT-AKR6", line=5.5)
+    assert direction_key(leg, g) is None
+    tot = Leg("kalshi", "x", "yes", 0.3, 0.3, "g1", ticker="KXNFLTOTAL-26OCT24A1H1-45", line=44.5)
+    assert direction_key(tot, g) == "g1|over"
+
+
+def test_arb_candidates_recheck_every_payoff(mk, settings, monkeypatch):
+    """Belt and braces: a mixed-team pair from any path never becomes a rec."""
+    from gridiron_edge import pipeline
+    from gridiron_edge.strategy.arb import Arb, _leg
+    ev = "KXNFLSPREAD-26OCT26A1H1"
+    a = mk(f"{ev}-H16", ev, "spread", "H1", line=5.5, yes_ask=0.28, game_id="g1")
+    b = mk(f"{ev}-A17", ev, "spread", "A1", line=6.5, yes_ask=0.39, yes_bid=0.38, no_ask=0.62, game_id="g1")
+    bogus = Arb("kalshi_ladder", "g1", [_leg(a, "yes", 0.28), _leg(b, "no", 0.62)], 100, 92.0, 100.0,
+                0.08, False, NOW)
+    monkeypatch.setattr(pipeline, "kalshi_ladders", lambda ms: [bogus])
+    monkeypatch.setattr(pipeline, "kalshi_middles", lambda ms, mo: [bogus])
+    assert arb_candidates(snap_with(kalshi=[a, b]), settings, lambda m: "nfl") == []
+    assert pipeline.middle_candidates(snap_with(kalshi=[a, b]), settings) == []

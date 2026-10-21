@@ -16,6 +16,11 @@ PAGE_LIMIT = 100
 _PROP_SUFFIX = re.compile(r":\s*\d+\+\s*$")
 
 
+def series_type(ticker: str | None) -> str | None:
+    """A market ticker's type from its series ("ml", "spread", "total", "prop"); None if unknown."""
+    return _SERIES_TYPE.get((ticker or "").split("-")[0])
+
+
 def _num(raw) -> float:
     try:
         return float(raw)

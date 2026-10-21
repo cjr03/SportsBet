@@ -15,8 +15,11 @@ def test_cross_venue_none_when_no_arb():
 
 def test_ml_pair_found_with_fees(mk):
     arbs = kalshi_ml_pairs([mk("E1-SEA", "E1", "ml", "SEA", yes_ask=0.45, yes_ask_size=100),
-                            mk("E1-CHI", "E1", "ml", "CHI", yes_ask=0.45, yes_ask_size=50)], lambda m: "nfl")
-    assert len(arbs) == 1 and arbs[0].qty == 50 and arbs[0].tie_risk and 0 < arbs[0].roi < 0.1
+                            mk("E1-CHI", "E1", "ml", "CHI", yes_ask=0.45, yes_ask_size=50)], lambda m: "cfb")
+    assert len(arbs) == 1 and arbs[0].qty == 50 and not arbs[0].tie_risk and 0 < arbs[0].roi < 0.1
+    # NFL with no tie clause: a tie pays nothing, so it is not an arb at all
+    assert kalshi_ml_pairs([mk("E1-SEA", "E1", "ml", "SEA", yes_ask=0.45, yes_ask_size=100),
+                            mk("E1-CHI", "E1", "ml", "CHI", yes_ask=0.45, yes_ask_size=50)], lambda m: "nfl") == []
 
 
 def test_ml_pair_none_when_fees_eat_it(mk):
@@ -139,8 +142,8 @@ def test_middle_window_text():
     lo = Leg("kalshi", "x", "yes", 0.5, 0.5, "g", ticker="A", line=2.5, team="PHI")
     hi = Leg("kalshi", "x", "no", 0.5, 0.5, "g", ticker="B", line=6.5, team="PHI")
     assert middle_window([lo, hi]) == "the Eagles win by 3 to 6 points"
-    tl = Leg("kalshi", "x", "yes", 0.5, 0.5, "g", ticker="C", line=41.5)
-    th = Leg("kalshi", "x", "no", 0.5, 0.5, "g", ticker="D", line=44.5)
+    tl = Leg("kalshi", "x", "yes", 0.5, 0.5, "g", ticker="KXNFLTOTAL-26OCT26DALPHI-42", line=41.5)
+    th = Leg("kalshi", "x", "no", 0.5, 0.5, "g", ticker="KXNFLTOTAL-26OCT26DALPHI-45", line=44.5)
     assert middle_window([th, tl]) == "the total lands between 42 and 44 points"
     a = Leg("kalshi", "x", "no", 0.5, 0.5, "g", ticker="E", line=3.5, team="PHI")
     b = Leg("kalshi", "x", "no", 0.5, 0.5, "g", ticker="F", line=6.5, team="DAL")
@@ -171,3 +174,119 @@ def test_middle_and_contract_text_use_cfb_school_names():
     a = Leg("kalshi", "x", "no", 0.5, 0.5, gid, ticker="E", line=3.5, team="ALA")
     b = Leg("kalshi", "x", "no", 0.5, 0.5, gid, ticker="F", line=1.5, team="AUB")
     assert "ALA" not in middle_window([a, b], names) and "from an Auburn win by 1 to an Alabama win by 3" in middle_window([a, b], names)
+
+
+# -- payoff verifier: every pair must pay >= $1 in every final score --------------------------------
+from gridiron_edge.strategy.arb import contract_text, payoff_range  # noqa: E402
+
+CFB_EV = "KXNCAAFSPREAD-26OCT24AKRKENT"
+
+
+def _no_bad_middles(mids):
+    """No YES/NO pair across two teams; only NO/NO cross middles (always >= $1) may remain."""
+    return all(a.kind == "cross_middle" and a.payout_min >= a.qty for a in mids)
+
+
+def _rec146(mk, team_akr="AKR", team_kent="KENT"):
+    """Placed rec 146: YES Akron wins by >5.5 @0.28 + NO Kent State wins by >6.5 @0.62."""
+    akr = replace(mk(f"{CFB_EV}-AKR6", CFB_EV, "spread", team_akr, line=5.5, yes_ask=0.28, yes_bid=0.27),
+                  series="KXNCAAFSPREAD")
+    kent = replace(mk(f"{CFB_EV}-KENT7", CFB_EV, "spread", team_kent, line=6.5, yes_ask=0.39, yes_bid=0.38,
+                      no_ask=0.62), series="KXNCAAFSPREAD")
+    return akr, kent
+
+
+def test_rec146_mixed_team_ladder_rejected(mk):
+    akr, kent = _rec146(mk)
+    assert payoff_range([(akr, "yes"), (kent, "no")], ties=False) == (0.0, 2.0)
+    assert kalshi_ladders([akr, kent]) == []
+    assert _no_bad_middles(kalshi_middles([akr, kent], 0.5))
+
+
+def test_rec146_with_unknown_teams_rejected(mk):
+    akr, kent = _rec146(mk, None, None)
+    assert payoff_range([(akr, "yes"), (kent, "no")], ties=False) is None
+    assert kalshi_ladders([akr, kent]) == []
+    assert kalshi_middles([akr, kent], 0.5) == []
+
+
+def test_rec174_equal_lines_other_team_rejected(mk):
+    ev = "KXNFLSPREAD-26OCT25TENCLE"
+    ten = mk(f"{ev}-TEN5", ev, "spread", "TEN", line=4.5, yes_ask=0.30)
+    cle = mk(f"{ev}-CLE5", ev, "spread", "CLE", line=4.5, yes_ask=0.40, yes_bid=0.39, no_ask=0.61)
+    assert payoff_range([(ten, "yes"), (cle, "no")], ties=True) == (0.0, 2.0)
+    assert kalshi_ladders([ten, cle]) == [] and _no_bad_middles(kalshi_middles([ten, cle], 0.5))
+
+
+def test_rec233_spreads_never_read_as_a_total(mk):
+    ev = "KXNCAAFSPREAD-26OCT25LIBKENN"
+    lo = mk(f"{ev}-LIB14", ev, "spread", "LIB", line=13.5, yes_ask=0.30)
+    hi = mk(f"{ev}-KENN28", ev, "spread", "KENN", line=27.5, yes_ask=0.10, yes_bid=0.09, no_ask=0.62)
+    assert payoff_range([(lo, "yes"), (hi, "no")], ties=False)[0] == 0.0
+    assert kalshi_ladders([lo, hi]) == []
+    assert "total" not in contract_text("spread", None, 13.5, "LIB", "KENN")
+
+
+def test_mixed_team_spreads_never_ladder(mk):
+    ms = [mk("E2-PHI7", "E2", "spread", "PHI", line=6.5, yes_ask=0.20),
+          mk("E2-DAL8", "E2", "spread", "DAL", line=7.5, yes_ask=0.40, yes_bid=0.39, no_ask=0.50)]
+    assert kalshi_ladders(ms) == [] and _no_bad_middles(kalshi_middles(ms, 0.5))
+
+
+def test_ladders_are_per_team(mk):
+    ms = [mk("E2-PHI3", "E2", "spread", "PHI", line=2.5, yes_ask=0.40, no_ask=0.65),
+          mk("E2-PHI5", "E2", "spread", "PHI", line=4.5, yes_ask=0.70, no_ask=0.45),
+          mk("E2-DAL3", "E2", "spread", "DAL", line=2.5, yes_ask=0.40, no_ask=0.65),
+          mk("E2-DAL5", "E2", "spread", "DAL", line=4.5, yes_ask=0.70, no_ask=0.45)]
+    arbs = kalshi_ladders(ms)
+    assert sorted((a.legs[0].ticker, a.legs[1].ticker) for a in arbs) == [("E2-DAL3", "E2-DAL5"),
+                                                                          ("E2-PHI3", "E2-PHI5")]
+    assert all(a.payout_min == a.qty and a.payout_max == 2 * a.qty for a in arbs)
+
+
+def test_payoff_range_valid_structures(mk):
+    lo = mk("E2-PHI3", "E2", "spread", "PHI", line=2.5)
+    hi = mk("E2-PHI5", "E2", "spread", "PHI", line=4.5)
+    assert payoff_range([(lo, "yes"), (hi, "no")], ties=True) == (1.0, 2.0)
+    tlo = mk("KXNFLTOTAL-X-42", "E3", "total", None, line=41.5)
+    thi = mk("KXNFLTOTAL-X-45", "E3", "total", None, line=44.5)
+    assert payoff_range([(tlo, "yes"), (thi, "no")], ties=True) == (1.0, 2.0)
+    a = mk("E2-PHI4", "E2", "spread", "PHI", line=3.5)
+    b = mk("E2-DAL3", "E2", "spread", "DAL", line=2.5)
+    assert payoff_range([(a, "no"), (b, "no")], ties=True) == (1.0, 2.0)
+
+
+def test_payoff_range_moneylines(mk):
+    sea, chi = mk("E1-SEA", "E1", "ml", "SEA"), mk("E1-CHI", "E1", "ml", "CHI")
+    split = [replace(m, rules_secondary=TIE_RULES) for m in (sea, chi)]
+    assert payoff_range([(split[0], "yes"), (split[1], "yes")], ties=True) == (1.0, 1.0)
+    assert payoff_range([(sea, "yes"), (chi, "yes")], ties=True) == (0.0, 1.0)
+    assert payoff_range([(sea, "no"), (chi, "no")], ties=True) == (1.0, 2.0)
+    assert payoff_range([(sea, "yes"), (chi, "yes")], ties=False) == (1.0, 1.0)  # CFB: no ties
+    assert payoff_range([(sea, "yes"), (mk("E1-X", "E1", "ml", None), "yes")], ties=True) is None
+
+
+def test_nfl_ml_pair_without_tie_clause_rejected(mk):
+    ms = [mk("E1-SEA", "E1", "ml", "SEA", yes_ask=0.45), mk("E1-CHI", "E1", "ml", "CHI", yes_ask=0.45)]
+    assert kalshi_ml_pairs(ms, lambda m: "nfl") == []
+    assert len(kalshi_ml_pairs(ms, lambda m: "cfb")) == 1
+
+
+def test_tie_clause_in_rules_secondary(mk):
+    from gridiron_edge.strategy.arb import ml_tie_risk
+    sec = ("If the game ends in a tie, the market will resolve to $0.50 for each team.")
+    m = replace(mk("E1-SEA", "E1", "ml", "SEA"), rules_secondary=sec)
+    assert not ml_tie_risk(m, "nfl")
+    ms = [m, replace(mk("E1-CHI", "E1", "ml", "CHI", yes_ask=0.45), rules_secondary=sec)]
+    ms[0] = replace(ms[0], yes_ask=0.45)
+    (a,) = kalshi_ml_pairs(ms, lambda m: "nfl")
+    assert not a.tie_risk
+
+
+def test_ml_groups_need_two_different_teams(mk):
+    ms = [mk("E1-SEA", "E1", "ml", "SEA", yes_ask=0.40), mk("E1-SEA2", "E1", "ml", "SEA", yes_ask=0.40)]
+    assert kalshi_ml_pairs(ms, lambda m: "cfb") == [] and kalshi_ml_no_pairs(ms) == []
+
+
+def test_contract_text_spread_without_team_is_blank():
+    assert contract_text("spread", None, 13.5, "LIB", "KENN") == ""

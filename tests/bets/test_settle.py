@@ -290,3 +290,16 @@ def test_pp_exact_hit_on_whole_number_line_is_a_push_not_an_under():
     assert grade_pp_entry(legs, (3, "power"), stats) == ("won", 3.0)  # 2 hits on a 2-pick power after the push
     stats = {("P0", "rec_yds"): 50, ("P1", "rec_yds"): 50.0, ("P2", "rec_yds"): 30.0}
     assert grade_pp_entry(legs, (3, "power"), stats) == ("refund", 1.0)  # one pick left: the entry is refunded
+
+
+def test_spread_leg_without_team_is_never_graded_as_a_total():
+    """Rec 146's NO leg was stored with team=None: grade it from the ticker suffix, not as a total."""
+    ev = "KXNCAAFSPREAD-26OCT24AKRKENT"
+    g = Game("cfb:20261024:AKR@KENT", "cfb", 2026, 9, KICK, "KENT", "AKR", status="final",
+             home_pts=20, away_pts=17)
+    no_kent = Leg("kalshi", "x", "no", 0.62, 0.5, g.game_id, ticker=f"{ev}-KENT7", line=6.5)
+    yes_akr = Leg("kalshi", "x", "yes", 0.28, 0.5, g.game_id, ticker=f"{ev}-AKR6", line=5.5)
+    assert grade_kalshi_leg(no_kent, None, g, NOW) == "won"  # Kent by 3: not by more than 6.5
+    assert grade_kalshi_leg(yes_akr, None, g, NOW) == "lost"
+    odd = Leg("kalshi", "x", "no", 0.62, 0.5, g.game_id, ticker=f"{ev}-ZZZ7", line=6.5)
+    assert grade_kalshi_leg(odd, None, g, NOW) == "pending"  # unknown team: wait for Kalshi's result

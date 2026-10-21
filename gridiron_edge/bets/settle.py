@@ -8,7 +8,8 @@ from typing import Literal
 
 from gridiron_edge.bets.clv import clv
 from gridiron_edge.bets.lifecycle import Lifecycle, LifecycleError
-from gridiron_edge.matching import GameRegistry
+from gridiron_edge.clients.kalshi import series_type
+from gridiron_edge.matching import GameRegistry, kalshi_ticker_team
 from gridiron_edge.strategy.kalshi_pricing import taker_fee
 from gridiron_edge.strategy.prizepicks import PAYOUTS, revert
 from gridiron_edge.types import Game, KalshiMarket, Leg
@@ -22,9 +23,12 @@ def _yes_from_score(leg: Leg, market: KalshiMarket | None, game: Game) -> bool |
     """Did the leg's YES condition hold? None if it cannot be graded from the score."""
     if game.home_pts is None or game.away_pts is None:
         return None
-    mtype = market.market_type if market else (
+    kind = series_type(leg.ticker)  # a spread leg with no team must never be graded as a total
+    mtype = market.market_type if market else kind if kind in ("spread", "total") else (
         "prop" if leg.player else "ml" if leg.line is None else "total" if leg.team is None else "spread")
     team = leg.team or (market.team if market else None)
+    if team is None and mtype in ("ml", "spread"):
+        team = kalshi_ticker_team(leg.ticker or "", game.away, game.home)
     line = leg.line if leg.line is not None else (market.line if market else None)
     if mtype == "total" and line is not None:
         return game.home_pts + game.away_pts > line

@@ -214,9 +214,22 @@ def parse_kalshi_event(event_ticker: str,
     return d, away, home
 
 
+_WINS_BY = re.compile(r"\s+wins by over .*$", re.IGNORECASE)
+
+
+def kalshi_ticker_team(ticker: str, away: str, home: str) -> str | None:
+    """Team code a market ticker's suffix names ("...DALPHI-PHI8" -> "PHI"); None for totals
+    (digits only) or anything else. The longest code wins when one is a prefix of the other."""
+    sfx = ticker.rsplit("-", 1)[-1]
+    hits = [c for c in (away, home) if c and (sfx == c or (sfx.startswith(c) and sfx[len(c):].isdigit()))]
+    return max(hits, key=len) if hits else None
+
+
 def kalshi_resolver(registry: GameRegistry,
                     teams: TeamResolver) -> Callable[[dict], tuple[str | None, str | None]]:
-    """Returns f(market dict with event_ticker, yes_sub_title) -> (game_id, canonical team)."""
+    """Returns f(market dict with event_ticker, ticker, yes_sub_title) -> (game_id, canonical team).
+    The team comes from the ticker suffix ("-PHI8"); a spread's yes_sub_title is a whole sentence
+    ("Philadelphia wins by over 7.5 points"), so it is only a fallback. Totals never get a team."""
     def resolve(market: dict) -> tuple[str | None, str | None]:
         ticker = market.get("event_ticker") or ""
         league = "cfb" if ticker.startswith("KXNCAAF") else "nfl"
@@ -230,7 +243,13 @@ def kalshi_resolver(registry: GameRegistry,
         game_id = registry.resolve(league, home, away, kickoff)
         if game_id is None:
             return None, None
-        team = teams.canonical(league, market.get("yes_sub_title") or "")
+        code = kalshi_ticker_team(market.get("ticker") or "", away, home)
+        if code is not None:
+            team = teams.canonical(league, code)
+        elif "TOTAL" in ticker.split("-")[0]:
+            team = None
+        else:
+            team = teams.canonical(league, _WINS_BY.sub("", market.get("yes_sub_title") or ""))
         game = registry.get(game_id)
         if team is not None and game is not None and team not in (game.home, game.away):
             team = None

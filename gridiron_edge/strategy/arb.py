@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Literal
 
 from gridiron_edge import describe as d
+from gridiron_edge.clients.kalshi import series_type
 from gridiron_edge.strategy.kalshi_pricing import effective_price
 from gridiron_edge.types import KalshiMarket, Leg
 
@@ -31,6 +32,14 @@ class Arb:
     roi: float
     tie_risk: bool
     fetched_at: datetime | None = None  # oldest quote among the legs
+    payout_min: float | None = None  # guaranteed payout over every final score (defaults to payout)
+    payout_max: float | None = None  # best case (a middle's "$2 if ...")
+
+    def __post_init__(self) -> None:
+        if self.payout_min is None:
+            self.payout_min = self.payout
+        if self.payout_max is None:
+            self.payout_max = self.payout
 
 
 def team_label(team: str | None, league: str | None = "nfl", names: d.Names = d.DEFAULT_NAMES) -> str:
@@ -40,13 +49,16 @@ def team_label(team: str | None, league: str | None = "nfl", names: d.Names = d.
 
 def contract_text(market_type: str, team: str | None, line: float | None, away: str, home: str,
                   league: str | None = "nfl", names: d.Names = d.DEFAULT_NAMES) -> str:
-    """Plain-English outcome a Kalshi contract's "Yes" pays on ("Eagles win by 4 or more points")."""
+    """Plain-English outcome a Kalshi contract's "Yes" pays on ("Eagles win by 4 or more points").
+    A spread with no known team is "" (never a total): callers drop it."""
     t = team_label(team, league, names)
     if market_type == "ml" or line is None:
         return f"{t} win"
-    if market_type == "total" or team is None:
+    if market_type == "total":
         over = f"over {line:g} points" if line % 1 else f"{math.floor(line) + 1} or more points"
         return f"{team_label(away, league, names)} vs {team_label(home, league, names)} total {over}"
+    if not team:
+        return ""
     return d.margin_text(t, line)
 
 
@@ -64,7 +76,7 @@ def middle_window(legs: list[Leg], names: d.Names = d.DEFAULT_NAMES) -> str:
     if yes and legs[0].line is not None and legs[1].line is not None:  # ladder: YES low + NO high
         lo, hi = yes[0], next(leg for leg in legs if leg is not yes[0])
         a, b = math.floor(lo.line) + 1, math.floor(hi.line)
-        if lo.team is None:
+        if series_type(lo.ticker) == "total":
             return f"the total lands on exactly {points(a)}" if a == b else f"the total lands between {a} and {b} points"
         if a >= 1:
             return f"{name(lo.team)} win by {points(a)}" if a == b else f"{name(lo.team)} win by {a} to {b} points"
@@ -89,8 +101,80 @@ def has_tie_split(rules: str) -> bool:
 
 
 def ml_tie_risk(m: KalshiMarket, league: str) -> bool:
-    """An NFL moneyline can lose on a tie unless its rules split ties 50/50."""
-    return league == "nfl" and not has_tie_split(m.rules_primary)
+    """An NFL moneyline can lose on a tie unless its rules split ties 50/50 (the clause is often
+    in rules_secondary)."""
+    return league == "nfl" and not has_tie_split(_rules(m))
+
+
+def _rules(m: KalshiMarket) -> str:
+    return f"{m.rules_primary} {m.rules_secondary}".strip()
+
+
+_MAX_MARGIN, _MAX_TOTAL = 80, 150
+
+
+def _ties_possible(m: KalshiMarket) -> bool:
+    """NFL games can end tied; college games (overtime until decided) cannot."""
+    return not m.event_ticker.startswith("KXNCAAF")
+
+
+def payoff_range(legs: list[tuple[KalshiMarket, str]], ties: bool) -> tuple[float, float] | None:
+    """Min and max payout per pair (in $) over every final score; None if a leg can't be evaluated
+    (a prop, a moneyline or spread with no team, a strike with no line, more than two teams)."""
+    teams: list[str] = []
+    for m, _ in legs:
+        if m.market_type == "prop":
+            return None
+        if m.market_type in ("ml", "spread"):
+            if not m.team:
+                return None
+            if m.team not in teams:
+                teams.append(m.team)
+        if m.market_type in ("spread", "total") and m.line is None:
+            return None
+    if len(teams) > 2:
+        return None
+    first = teams[0] if teams else None
+    # payouts only change at the strikes, so check the margins next to each strike (both parities,
+    # closest to zero gives the widest choice of totals) plus around zero and the extremes
+    cand = {-_MAX_MARGIN, _MAX_MARGIN, *range(-2, 3)}
+    for m, _ in legs:
+        if m.market_type == "spread":
+            b = math.floor(m.line)
+            for k in (b, b + 1):
+                cand.update(x for j in range(-2, 3) for x in (k + j, -(k + j)))
+    margins = sorted(x for x in cand if -_MAX_MARGIN <= x <= _MAX_MARGIN and (ties or x != 0))
+    tcand = {0, 1, _MAX_TOTAL - 1, _MAX_TOTAL}  # likewise for the totals: next to each total strike
+    for m, _ in legs:
+        if m.market_type == "total":
+            b = math.floor(m.line)
+            tcand.update(range(b - 2, b + 4))
+    splits = [has_tie_split(_rules(m)) if m.market_type == "ml" else False for m, _ in legs]
+
+    def yes(m: KalshiMarket, split: bool, margin: int, total: int) -> float:
+        if m.market_type == "total":
+            return 1.0 if total > m.line else 0.0
+        mine = margin if m.team == first else -margin
+        if m.market_type == "spread":
+            return 1.0 if mine > m.line else 0.0
+        if mine == 0:
+            return 0.5 if split else 0.0
+        return 1.0 if mine > 0 else 0.0
+
+    lo, hi = math.inf, -math.inf
+    for margin in margins:
+        low = abs(margin)
+        totals = {t for t in tcand if low <= t <= _MAX_TOTAL and (t - low) % 2 == 0} | {low, low + 2}
+        for total in totals:
+            pay = 0.0
+            for (m, side), split in zip(legs, splits):
+                y = yes(m, split, margin, total)
+                if m.market_type == "ml" and margin == 0 and split:
+                    pay += 0.5
+                else:
+                    pay += y if side == "yes" else 1.0 - y
+            lo, hi = min(lo, pay), max(hi, pay)
+    return (lo, hi) if lo <= hi else None
 
 
 def _leg(m: KalshiMarket, side: str, price: float) -> Leg:
@@ -102,9 +186,10 @@ def _ask(m: KalshiMarket, side: str) -> tuple[float, float]:
     return (m.yes_ask, m.yes_ask_size) if side == "yes" else (m.no_ask, m.no_ask_size)
 
 
-def _pair(kind: ArbKind, a: KalshiMarket, sa: str, b: KalshiMarket, sb: str, tie_risk: bool = False
-          ) -> Arb | None:
-    """Two legs that together always pay at least $1: cost at the shared depth, fees per order."""
+def _pair(kind: ArbKind, a: KalshiMarket, sa: str, b: KalshiMarket, sb: str, tie_risk: bool = False,
+          ties: bool | None = None) -> Arb | None:
+    """Two legs that together always pay at least $1 (checked over every final score): cost at the
+    shared depth, fees per order. ties: can the game end tied (default: not a college game)."""
     (pa, da), (pb, db) = _ask(a, sa), _ask(b, sb)
     if pa <= 0 or pb <= 0:  # a zero ask is a missing quote, not a free contract
         return None
@@ -114,8 +199,11 @@ def _pair(kind: ArbKind, a: KalshiMarket, sa: str, b: KalshiMarket, sb: str, tie
     cost = (effective_price(pa, qty, a.fee_multiplier) + effective_price(pb, qty, b.fee_multiplier)) * qty
     if cost <= 0:
         return None
-    return Arb(kind, a.game_id, [_leg(a, sa, pa), _leg(b, sb, pb)], qty, cost, float(qty), qty / cost - 1,
-               tie_risk, min(a.fetched_at, b.fetched_at))
+    rng = payoff_range([(a, sa), (b, sb)], _ties_possible(a) if ties is None else ties)
+    if rng is None or rng[0] < 1 - 1e-9:
+        return None
+    return Arb(kind, a.game_id, [_leg(a, sa, pa), _leg(b, sb, pb)], qty, cost, qty * rng[0], qty / cost - 1,
+               tie_risk, min(a.fetched_at, b.fetched_at), qty * rng[0], qty * rng[1])
 
 
 def _ml_groups(markets: list[KalshiMarket]) -> list[list[KalshiMarket]]:
@@ -123,7 +211,8 @@ def _ml_groups(markets: list[KalshiMarket]) -> list[list[KalshiMarket]]:
     for m in markets:
         if m.market_type == "ml" and m.status == "active":
             groups[m.event_ticker].append(m)
-    return [ms for ms in groups.values() if len(ms) == 2]
+    return [ms for ms in groups.values()
+            if len(ms) == 2 and not (ms[0].team and ms[1].team and ms[0].team == ms[1].team)]
 
 
 def kalshi_ml_pairs(markets: list[KalshiMarket], league_of: Callable[[KalshiMarket], str]) -> list[Arb]:
@@ -131,7 +220,7 @@ def kalshi_ml_pairs(markets: list[KalshiMarket], league_of: Callable[[KalshiMark
     out = []
     for a, b in _ml_groups(markets):
         tie = ml_tie_risk(a, league_of(a)) or ml_tie_risk(b, league_of(b))
-        arb = _pair("kalshi_ml_pair", a, "yes", b, "yes", tie)
+        arb = _pair("kalshi_ml_pair", a, "yes", b, "yes", tie, ties=league_of(a) == "nfl")
         if arb is not None and arb.roi > 0:
             out.append(arb)
     return out
@@ -151,7 +240,9 @@ def _ladders(markets: list[KalshiMarket]) -> list[list[KalshiMarket]]:
     groups: dict[tuple, list[KalshiMarket]] = defaultdict(list)
     for m in markets:
         if m.market_type in ("spread", "total") and m.line is not None and m.status == "active":
-            groups[(m.event_ticker, m.market_type, m.team)].append(m)
+            if m.market_type == "spread" and not m.team:
+                continue  # an unknown team's spread can't be laddered (mixing teams can lose it all)
+            groups[(m.event_ticker, m.market_type, m.team if m.market_type == "spread" else None)].append(m)
     return [sorted(ms, key=lambda m: m.line) for ms in groups.values()]
 
 

@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 
+from gridiron_edge.clients.kalshi import series_type
 from gridiron_edge.config import Settings
 from gridiron_edge.matching import normalize_name
 from gridiron_edge.models import Prediction
@@ -25,6 +26,7 @@ from gridiron_edge.strategy.arb import (
     kalshi_ml_no_pairs,
     kalshi_ml_pairs,
     ml_tie_risk,
+    payoff_range,
 )
 from gridiron_edge.strategy.devig import devig_worst
 from gridiron_edge.strategy.distributions import (
@@ -113,6 +115,11 @@ def slate_window(g: Game) -> str:
 
 
 def _leg_type(leg: Leg) -> str:
+    """The leg's market type; a known spread/total series wins over guessing from team/line, so a
+    spread leg with no team is never read as a total."""
+    kind = series_type(leg.ticker)
+    if kind in ("spread", "total"):
+        return kind
     return "prop" if leg.player else "ml" if leg.line is None else "total" if leg.team is None else "spread"
 
 
@@ -845,8 +852,20 @@ def pp_entry_candidates(snap: Snapshot, s: Settings, projector: Projector,
 def _plain_legs(legs: list[Leg], snap: Snapshot, g: Game) -> list[Leg]:
     """Describe each Kalshi leg as the outcome its "Yes" pays on, not by ticker."""
     mtype = {m.ticker: m.market_type for m in snap.kalshi}
-    return [replace(leg, description=contract_text(mtype.get(leg.ticker or "", "spread"), leg.team, leg.line,
-                                                   g.away, g.home, g.league)) for leg in legs]
+    return [replace(leg, description=contract_text(mtype.get(leg.ticker or "") or _leg_type(leg), leg.team,
+                                                   leg.line, g.away, g.home, g.league)) for leg in legs]
+
+
+def _pays_at_least_one(a: Arb, snap: Snapshot) -> bool:
+    """Re-check a pair's payoff from the snapshot's markets: >= $1 per pair in every final score."""
+    by_ticker = {m.ticker: m for m in snap.kalshi}
+    ms = [by_ticker.get(leg.ticker or "") for leg in a.legs]
+    if any(m is None for m in ms):
+        return False
+    g = snap.games.get(a.game_id or "")
+    ties = g.league == "nfl" if g is not None else not ms[0].event_ticker.startswith("KXNCAAF")
+    rng = payoff_range([(m, leg.side) for m, leg in zip(ms, a.legs)], ties)
+    return rng is not None and rng[0] >= 1 - 1e-9
 
 
 def _middle_legging(legs: list[Leg], qty: int, p_mid: float, depth: dict[tuple[str, str], float]) -> list[Leg]:
@@ -889,7 +908,7 @@ def arb_candidates(snap: Snapshot, s: Settings, league_of: Callable[[KalshiMarke
     out = []
     for a in filter_arbs(arbs, s.arb_max_roi, s.arb_min_roi):
         g = _upcoming(snap, a.game_id)
-        if g is None or a.qty < 1 or a.cost <= 0:
+        if g is None or a.qty < 1 or a.cost <= 0 or not _pays_at_least_one(a, snap):
             continue
         if any((snap.now - fetched[leg.ticker]).total_seconds() > s.arb_stale_seconds for leg in a.legs):
             continue  # an old quote is probably gone
@@ -903,7 +922,10 @@ def arb_candidates(snap: Snapshot, s: Settings, league_of: Callable[[KalshiMarke
         roi = qty / cost - 1
         if roi <= 0 or roi < s.arb_min_roi:
             continue
-        rec = Recommendation(None, "arb", _plain_legs(_legging(a.legs, qty, depth), snap, g), round(cost * 100),
+        legs = _plain_legs(_legging(a.legs, qty, depth), snap, g)
+        if not all(leg.description for leg in legs):  # a leg we can't describe (spread, no team)
+            continue
+        rec = Recommendation(None, "arb", legs, round(cost * 100),
                              qty, roi, 1.0,
                              a.kind, snap.now, g.kickoff, tie_risk=a.tie_risk)
         if rec.leg_key in snap.open_leg_keys:  # this arb is already placed
@@ -918,9 +940,11 @@ def _empirical(model: MarginModel | None) -> bool:
 
 def _middle_rec(a: Arb, snap: Snapshot, s: Settings) -> Recommendation | None:
     g = _upcoming(snap, a.game_id)
-    if g is None:
+    if g is None or not _pays_at_least_one(a, snap):
         return None
-    mtype = "total" if a.legs[0].team is None else "spread"
+    mtype = next((m.market_type for m in snap.kalshi if m.ticker == a.legs[0].ticker), None)
+    if mtype not in ("spread", "total") or (mtype == "spread" and not all(leg.team for leg in a.legs)):
+        return None
     model = snap.margin_models.get(_MODEL_KEY[g.league][mtype])
     if not _empirical(model):  # a normal fallback understates key-number mass
         return None
@@ -939,6 +963,8 @@ def _middle_rec(a: Arb, snap: Snapshot, s: Settings) -> Recommendation | None:
     if ev < s.kalshi_min_ev:
         return None
     legs = _plain_legs([replace(leg, p_fair=p) for leg, p in zip(a.legs, ps)], snap, g)
+    if not all(leg.description for leg in legs):
+        return None
     observe = not s.middles_live or snap.gates.get((g.league, mtype), False)
     return Recommendation(None, "middle", legs, 0, a.qty, ev, p_mid, a.kind, snap.now, g.kickoff,
                           observe_only=observe)
