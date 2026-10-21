@@ -37,6 +37,12 @@ class Settings:
     kalshi_price_lo: float = 0.10
     kalshi_price_hi: float = 0.90
     cfb_min_disagree: float = 2.5
+    # model vs market gaps beyond these (pts) are treated as missing information: market only.
+    # Fallbacks for the backtest's 95th percentile of |model - closing line|.
+    nfl_max_disagree: float = 5.0
+    cfb_max_disagree: float = 9.0
+    qb_veto: bool = True  # NFL: no model weight when the depth-chart QB1 is not last game's starter
+    market_only_live: bool = False  # a gated league's market-only (no model) edges are texted, not observe-only
     pp_margin_market: float = 0.02
     pp_margin_model: float = 0.035
     arb_fraction: float = 0.10

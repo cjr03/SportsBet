@@ -28,7 +28,7 @@ from gridiron_edge.matching import GameRegistry, TeamResolver, kalshi_resolver
 from gridiron_edge.models import Prediction
 from gridiron_edge.models import cfb as cfb_models
 from gridiron_edge.models import nfl as nfl_models
-from gridiron_edge.models.blend import BlendFit, walkforward_ats
+from gridiron_edge.models.blend import BlendFit, walkforward_ats, walkforward_totals
 from gridiron_edge.models.cfb import CfbRatings, cfb_prior, games_played
 from gridiron_edge.models.nfl import NflRatings, is_neutral
 from gridiron_edge.models.props import STAT_COLUMNS, PropProjector
@@ -49,6 +49,8 @@ register_schema("CREATE TABLE IF NOT EXISTS scheduler_state (key TEXT PRIMARY KE
 STATE_TTL = timedelta(days=14)
 UPCOMING_WINDOW = timedelta(days=8)
 GATE_REFIT = timedelta(days=7)
+GATE_RECENT = timedelta(days=1)  # refits closer together than this don't count as another pass
+GATE_PASSES = 2  # consecutive passing refits before a market goes live
 QUOTE_TTL = timedelta(days=2)
 LINES_HORIZON = timedelta(hours=48)
 # sportsbook quotes and prop lines, written through to api_cache so a restart keeps them
@@ -184,6 +186,28 @@ def _nfl_history(sched: pl.DataFrame, before: date) -> list[dict]:
     return out
 
 
+# where the model hyperparameters came from (recorded with each gate fit)
+HYPERPARAMS = {
+    "nfl": f"lambda={nfl_models.LAMBDA}, half-life={nfl_models.HALF_LIFE_DAYS:g}d, "
+           f"pts/epa/market={nfl_models.W_PTS}/{nfl_models.W_EPA}/{nfl_models.W_MKT}: hand-set from brief1 §5, not tuned",
+    "cfb": f"margin cap={cfb_models.MARGIN_CAP:g}, weekly decay={cfb_models.WEEKLY_DECAY}, lambda=max(2, 20-2*week), "
+           f"prior 0.6/0.25/0.15, market share={cfb_models.W_MARKET}: hand-set from brief1 §5, not tuned",
+    "sigma": "Normal 13 (NFL) / 15.75 (CFB); NFL uses the empirical close-residual model once >= 500 residuals",
+}
+
+
+def _gate_detail(r: dict) -> str:
+    """A plain summary of a gate fit: simulated ROI, early/late season, why it is not live."""
+    parts = []
+    if "sim_roi" in r:
+        parts.append(f"sim ROI {r['sim_roi']:+.1%} on {r.get('sim_bets', 0)} bets after fees")
+    if "early" in r and "late" in r:
+        parts.append(f"ATS early {r['early']['ats_pct']:.1%} / late {r['late']['ats_pct']:.1%}")
+    if r.get("passed") and r.get("gated"):
+        parts.append(f"passed {r.get('streak', 0)} of {GATE_PASSES} refits needed")
+    return f" ({'; '.join(parts)})" if parts else ""
+
+
 @dataclass
 class Services:
     settings: Settings
@@ -206,6 +230,8 @@ class Services:
     cfb_model: CfbRatings | None = None
     gates: dict[tuple[str, str], bool] = field(default_factory=dict)
     gates_complete: bool = False  # last fit_gates backtested every league
+    blend_fits: dict[tuple[str, str], tuple[float, float]] = field(default_factory=dict)
+    disagree_caps: dict[str, float] = field(default_factory=dict)
     margin_models: dict = field(default_factory=_default_margin_models)
     latest: dict = field(default_factory=lambda: {"quotes": [], "props": [], "kalshi": [], "stats": None})
     player_teams: dict[str, str] = field(default_factory=dict)
@@ -437,18 +463,24 @@ class Services:
         return [("info", f"cfb model: {len(model.ratings)} teams, hfa {model.hfa:+.1f}")]
 
     # -- gates and backtests ---------------------------------------------
-    async def _nfl_inputs(self, years: list[int], before: date):
+    async def _nfl_sched(self, years: list[int]) -> pl.DataFrame:
+        """Schedules for `years` plus one unscored burn-in season, so week 1 has history like live."""
+        want = [years[0] - 1, *years]
         sched = self.history.get("nfl")
-        if sched is None or not set(years) <= set(sched["season"].unique().to_list()):
-            sched = _dated(await asyncio.to_thread(self.nflverse.schedules, years))
-        sched = sched.filter(pl.col("season").is_in(years))
+        if sched is None or not set(want) <= set(sched["season"].unique().to_list()):
+            sched = _dated(await asyncio.to_thread(self.nflverse.schedules, want))
+        return sched.filter(pl.col("season").is_in(want))
+
+    async def _nfl_inputs(self, years: list[int], before: date):
+        sched = await self._nfl_sched(years)
         epa = self.history.get("nfl_epa")
 
         def predict_asof(d: date):
             model = NflRatings.fit(sched, epa, d)
             return lambda g: model.predict(g["home"], g["away"], g.get("neutral", False))
 
-        return _nfl_history(sched, before), predict_asof
+        games = [g for g in _nfl_history(sched, before) if g["season"] in years]  # burn-in not scored
+        return games, predict_asof
 
     async def _cfb_inputs(self, years: list[int], before: date):
         if self.cfbd is None:
@@ -490,16 +522,60 @@ class Services:
         return games, predict_asof
 
     async def backtest(self, league: str, start: int, end: int, now: datetime) -> tuple[BlendFit, dict]:
-        """Walk-forward ATS over seasons start..end; the model fits run in a thread."""
+        """Walk-forward ATS over seasons start..end; the model fits run in a thread.
+
+        NFL uses the production spread margin model (empirical once enough residuals exist).
+        """
         years = list(range(start, end + 1))
         inputs = self._nfl_inputs if league == "nfl" else self._cfb_inputs
         games, predict = await inputs(years, now.date())
         if not games:
             raise ValueError(f"no {league} history with lines for {start}-{end}")
-        return await asyncio.to_thread(walkforward_ats, league, games, predict)
+        mm = self.margin_models.get("nfl_spread") if league == "nfl" else self.margin_models.get("cfb")
+        return await asyncio.to_thread(walkforward_ats, league, games, predict, mm)
+
+    async def backtest_totals(self, start: int, end: int, now: datetime) -> tuple[BlendFit, dict]:
+        """Walk-forward NFL over/under against the closing total (nflverse total_line)."""
+        years = list(range(start, end + 1))
+        sched = await self._nfl_sched(years)
+        epa = self.history.get("nfl_epa")
+        games = []
+        for r in sched.drop_nulls(["total_line", "home_score", "away_score", "gameday"]).iter_rows(named=True):
+            d = _as_date(r["gameday"])
+            if d < now.date() and r["season"] in years:
+                games.append({"date": d, "season": r["season"], "home": r["home_team"], "away": r["away_team"],
+                              "total_line": float(r["total_line"]),
+                              "total": float(r["home_score"] + r["away_score"])})
+        if not games:
+            raise ValueError(f"no nfl totals history for {start}-{end}")
+
+        def predict_asof(d: date):
+            model = NflRatings.fit(sched, epa, d)
+
+            def predict(g):
+                t = model.predict_total(g["home"], g["away"])
+                return g["total_line"] if t is None else t  # unknown team: no opinion
+            return predict
+
+        return await asyncio.to_thread(walkforward_totals, games, predict_asof, self.margin_models.get("nfl_total"))
+
+    @staticmethod
+    def _gate_result(fit: BlendFit, metrics: dict, prev: dict | None, recent: bool) -> dict:
+        """One market's gate with hysteresis: live only after 2 consecutive passing refits.
+
+        A pass also needs b_model > 0 in every scored season that has its own fit. A failure
+        gates at once (the safe direction). A refit within a day of the last one (forced, e.g.
+        when a model first appears) does not count as a second pass.
+        """
+        seasons = metrics.get("by_season") or {}
+        passed = not fit.gated and all(v.get("b_model", 1.0) > 0 for v in seasons.values())
+        streak = int((prev or {}).get("streak", 0))
+        streak = (max(streak, 1) if recent else streak + 1) if passed else 0
+        return {**metrics, "gated": not passed or streak < GATE_PASSES, "passed": passed, "streak": streak,
+                "b_model": fit.b_model, "se": fit.b_model_se, "n": fit.n, "params": HYPERPARAMS}
 
     async def fit_gates(self, now: datetime, force: bool = False) -> list[tuple[str, str]]:
-        """Auto-gate per league from a walk-forward backtest; refit at most weekly unless forced.
+        """Auto-gate per league (and NFL totals) from walk-forward backtests; refit at most weekly.
 
         Fails closed: a league whose backtest errors, or that has a fitted model but no backtest
         history, is gated (observe-only). Only a result with every league backtested is cached.
@@ -512,6 +588,8 @@ class Services:
             out = [("info", f"gates: cached from {stored['fitted_at'][:10]}")]
             closed: set[str] = set()
         else:
+            prev = (stored or {}).get("leagues", {})
+            recent = bool(stored) and now - datetime.fromisoformat(stored["fitted_at"]) < GATE_RECENT
             results, out, closed = {}, [], set()
             for league, (start, end) in spans.items():
                 try:
@@ -527,16 +605,36 @@ class Services:
                     closed.add(league)
                     out.append(("error", f"gate {league}: backtest failed ({e}) - observe-only"))
                     continue
-                results[league] = {"gated": fit.gated, "b_model": fit.b_model, "se": fit.b_model_se, **metrics}
+                results[league] = self._gate_result(fit, metrics, prev.get(league), recent)
+                if league == "nfl":
+                    try:
+                        tfit, tm = await self.backtest_totals(start, end, now)
+                        results[league]["total"] = self._gate_result(
+                            tfit, tm, prev.get(league, {}).get("total"), recent)
+                    except Exception as e:  # noqa: BLE001 - totals stay market-only and gated
+                        out.append(("info", f"gate nfl totals: {e} - totals use the market only"))
             if set(results) >= set(spans):
                 self._put("gates", json.dumps({"fitted_at": now.isoformat(), "leagues": results}))
         self.gates_complete = set(results) >= set(spans)
-        gates = {(lg, m): bool(r["gated"]) for lg, r in results.items() for m in ("ml", "spread", "total")}
+        gates, fits, caps = {}, {}, {}
+        for lg, r in results.items():
+            for m in ("ml", "spread"):
+                gates[(lg, m)] = bool(r["gated"])
+                fits[(lg, m)] = (float(r["b_model"]), float(r["se"]))
+            tot = r.get("total")
+            if lg == "nfl":  # NFL totals have their own model and gate
+                gates[(lg, "total")] = True if tot is None else bool(tot["gated"])
+                if tot is not None:
+                    fits[(lg, "total")] = (float(tot["b_model"]), float(tot["se"]))
+            else:
+                gates[(lg, "total")] = bool(r["gated"])
+            if r.get("disagree_p95") is not None:
+                caps[lg] = float(r["disagree_p95"])
         gates.update({(lg, m): True for lg in closed for m in ("ml", "spread", "total")})
-        self.gates = gates
+        self.gates, self.blend_fits, self.disagree_caps = gates, fits, caps
         for lg, r in results.items():
             out.append(("info", f"gate {lg}: n={r['n']} b_model={r['b_model']:.2f}±{r['se']:.2f} "
-                                f"-> {'observe-only' if r['gated'] else 'live'}"))
+                                f"-> {'observe-only' if r['gated'] else 'live'}{_gate_detail(r)}"))
         return out
 
     @staticmethod
@@ -710,7 +808,7 @@ class Services:
     def _record_clv(self, now: datetime) -> list[tuple[str, str]]:
         """CLV for open single-leg Kalshi game bets kicking off soon, from the closing market fair."""
         markets = {m.ticker: m for m in self.latest["kalshi"]}
-        snap = replace(self.snapshot(now), predictions={})
+        snap = self.snapshot(now)
         out = []
         for bet in self.lifecycle.open_bets():
             if bet["kind"] != "kalshi_game":
@@ -719,7 +817,7 @@ class Services:
             g, m = self.registry.get(leg.game_id or ""), markets.get(leg.ticker or "")
             if g is None or m is None or not now <= g.kickoff <= now + timedelta(minutes=30):
                 continue
-            p_yes = pipeline._game_p_yes(m, g, snap, self.settings)
+            p_yes = pipeline.market_p_yes(m, g, snap, self.settings)  # devigged close, no model, any league
             if p_yes is None:
                 continue
             value = self.settler.record_clv(bet["id"], p_yes if leg.side == "yes" else 1 - p_yes)
@@ -758,7 +856,7 @@ class Services:
             margin_models=self.margin_models, player_teams={**self.player_teams, **self.manual_teams},
             open_game_ids={leg["game_id"] for leg in game_legs if leg.get("game_id")},
             open_players={leg["player"].lower() for leg in prop_legs if leg.get("player")},
-            open_leg_keys=open_keys)
+            open_leg_keys=open_keys, blend_fits=dict(self.blend_fits), disagree_caps=dict(self.disagree_caps))
 
     def _wanted(self, rec: Recommendation, what: str) -> bool:
         venue = "prizepicks" if rec.kind == "pp_entry" else "kalshi"

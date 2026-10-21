@@ -12,6 +12,7 @@ LAMBDA = 8.0
 HALF_LIFE_DAYS = 120.0
 EPA_SCALE = 65.0
 W_PTS, W_EPA = 0.6, 0.4
+W_MKT = 0.0  # market-implied component; set below once implemented
 
 
 def _weight(age_days: np.ndarray) -> np.ndarray:

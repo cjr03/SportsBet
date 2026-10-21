@@ -67,3 +67,27 @@ async def test_cfbd_postseason_neutral_in_december(services_mocked):
     svc.registry.upsert(g)
     await svc._fit_cfb(now)
     assert svc.registry.get(g.game_id).neutral
+
+
+def test_cfb_clv_recorded_from_market(services_mocked, mk):
+    from gridiron_edge.models.cfb import CfbRatings
+    from gridiron_edge.types import Leg, Quote, Recommendation
+
+    svc = services_mocked()
+    ko = NOW + timedelta(minutes=20)
+    g = _game("cfb", "UGA", "FLA", ko)
+    svc.registry.upsert(g)
+    svc.cfb_model = CfbRatings({"UGA": 10.0, "FLA": 7.0}, 0.0)  # agrees with the line
+    m = mk("T-UGA", "E", "ml", "UGA", yes_ask=0.55, game_id=g.game_id)
+    svc.latest["kalshi"] = [m]
+    svc.latest["quotes"] = [Quote("odds_api", "pinnacle", g.game_id, "h2h", "home", None, 1.60, NOW),
+                            Quote("odds_api", "pinnacle", g.game_id, "h2h", "away", None, 2.50, NOW),
+                            Quote("odds_api", "pinnacle", g.game_id, "spreads", "home", -3.0, 1.95, NOW),
+                            Quote("odds_api", "pinnacle", g.game_id, "spreads", "away", 3.0, 1.95, NOW)]
+    leg = Leg("kalshi", "UGA ML", "yes", 0.55, 0.6, g.game_id, ticker="T-UGA", team="UGA")
+    rec, _ = svc.lifecycle.upsert_recommendation(
+        Recommendation(None, "kalshi_game", [leg], 0, 10, 0.05, 0.6, None, NOW, ko), NOW)
+    svc.ledger.deposit(100_00)
+    bet = svc.lifecycle.confirm(rec.id, NOW)
+    out = svc._record_clv(NOW)
+    assert any(f"clv bet {bet}" in msg for _, msg in out), out
