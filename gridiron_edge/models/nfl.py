@@ -5,14 +5,15 @@ import numpy as np
 import polars as pl
 
 from gridiron_edge.models import Prediction  # noqa: F401  (shared with cfb)
-from gridiron_edge.models.ridge import weighted_ridge
+from gridiron_edge.models.ridge import implied_ratings, weighted_ridge
 
 MODEL_VERSION = "nfl-ridge-v1"
 LAMBDA = 8.0
 HALF_LIFE_DAYS = 120.0
 EPA_SCALE = 65.0
-W_PTS, W_EPA = 0.6, 0.4
-W_MKT = 0.0  # market-implied component; set below once implemented
+# points / EPA / market-implied (closing spreads of past games) shares, renormalised over the
+# components available; without lines this is the original 0.6/0.4 points/EPA blend
+W_PTS, W_EPA, W_MKT = 0.45, 0.30, 0.25
 
 
 def _weight(age_days: np.ndarray) -> np.ndarray:
@@ -62,10 +63,9 @@ class NflRatings:
         hfa = float(beta[n])
 
         r_epa = cls._epa_ratings(schedules, team_epa, asof, idx)
-        if r_epa is None:
-            blended = r_pts
-        else:
-            blended = W_PTS * r_pts + W_EPA * r_epa
+        r_mkt = cls._market_ratings(rows, w, idx)
+        parts = [(W_PTS, r_pts)] + [(wt, r) for wt, r in ((W_EPA, r_epa), (W_MKT, r_mkt)) if r is not None]
+        blended = sum(wt * r for wt, r in parts) / sum(wt for wt, _ in parts)
 
         pf, pa = {}, {}
         for t in teams:
@@ -82,6 +82,18 @@ class NflRatings:
                 pas += w[k] * a
             pf[t], pa[t] = ps / ws, pas / ws
         return cls({t: float(blended[idx[t]]) for t in teams}, hfa, pf, pa)
+
+    @staticmethod
+    def _market_ratings(rows: list[dict], w: np.ndarray, idx: dict[str, int]) -> np.ndarray | None:
+        """Ratings implied by past games' closing spreads (nflverse spread_line: + = home favoured)."""
+        lined = [(r["home_team"], r["away_team"], is_neutral(r), float(r["spread_line"]), float(w[k]))
+                 for k, r in enumerate(rows) if r.get("spread_line") is not None]
+        if not lined:
+            return None
+        ratings, _ = implied_ratings(lined, LAMBDA)
+        r = np.array([ratings.get(t, 0.0) for t in idx])
+        seen = np.array([t in ratings for t in idx])
+        return r - r[seen].mean()
 
     @staticmethod
     def _epa_ratings(schedules, team_epa, asof, idx) -> np.ndarray | None:

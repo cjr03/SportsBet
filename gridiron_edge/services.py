@@ -32,6 +32,7 @@ from gridiron_edge.models.blend import BlendFit, walkforward_ats, walkforward_to
 from gridiron_edge.models.cfb import CfbRatings, cfb_prior, games_played
 from gridiron_edge.models.nfl import NflRatings, is_neutral
 from gridiron_edge.models.props import STAT_COLUMNS, PropProjector
+from gridiron_edge.models.ridge import implied_ratings
 from gridiron_edge.notify.chain import NotifyChain
 from gridiron_edge.notify.console import ConsoleNotifier
 from gridiron_edge.notify.format import PT, format_message
@@ -106,6 +107,10 @@ class _NoProjector:
 
 def _season(kickoff: datetime) -> int:
     return kickoff.year if kickoff.month >= 7 else kickoff.year - 1
+
+
+def _season_of_date(d: date) -> int:
+    return d.year if d.month >= 7 else d.year - 1
 
 
 def _as_date(v) -> date:
@@ -443,17 +448,8 @@ class Services:
             cur += [g for g in post if g.get("startDate")]
         self._assign_cfb_neutral(cur, now)
         prev = self._cfb_games(await self.cfbd.games(year - 1))
-        canon = lambda n: self.teams.canonical("cfb", n) or n  # noqa: E731
-        returning = {canon(r["team"]): float(r["percentPPA"]) for r in await self.cfbd.returning(year)
-                     if r.get("team") and r.get("percentPPA") is not None}
-        talent = {canon(r.get("team") or r.get("school")): float(r["talent"]) for r in await self.cfbd.talent(year)
-                  if (r.get("team") or r.get("school")) and r.get("talent") is not None}
-        priors: dict[str, float] = {}
-        hfa = 0.0
+        priors, hfa = await self._cfb_season_prior(year, prev, await self._cfb_market_games(year - 1))
         try:
-            if prev:
-                last = CfbRatings.fit(prev, {}, date(year, 3, 1))
-                priors, hfa = cfb_prior(last.ratings, returning, talent, games_played(prev)), last.hfa
             model = CfbRatings.fit(cur, priors, now.date())
         except np.linalg.LinAlgError:  # no completed games yet: ratings are the priors alone
             model = CfbRatings(priors, hfa) if priors else None
@@ -482,12 +478,8 @@ class Services:
         games = [g for g in _nfl_history(sched, before) if g["season"] in years]  # burn-in not scored
         return games, predict_asof
 
-    async def _cfb_inputs(self, years: list[int], before: date):
-        if self.cfbd is None:
-            return [], None
-        rows = []
-        for y in years:
-            rows += await self.cfbd.lines(y, None)  # whole season in one call; past seasons cache forever
+    def _cfb_line_rows(self, rows: list[dict], before: date) -> tuple[list[dict], list[dict]]:
+        """CFBD /lines rows -> (CfbRatings fit games, walk-forward games with the median closing spread)."""
         fit_games, games = [], []
         for r in rows:
             if r.get("homeScore") is None or r.get("awayScore") is None or not r.get("startDate"):
@@ -508,15 +500,57 @@ class Services:
                 except (KeyError, TypeError, ValueError):
                     continue
             if spreads:
-                games.append({"date": d, "home": home, "away": away, "neutral": neutral,
-                              "home_line": float(np.median(spreads)),
+                games.append({"date": d, "season": r.get("season") or _season_of_date(d), "home": home,
+                              "away": away, "neutral": neutral, "home_line": float(np.median(spreads)),
                               "margin": float(r["homeScore"] - r["awayScore"])})
+        return fit_games, games
+
+    async def _cfb_market_games(self, year: int) -> list[dict]:
+        """A past season's games with closing spreads (one /lines call, cached forever once past)."""
+        if self.cfbd is None:
+            return []
+        return self._cfb_line_rows(await self.cfbd.lines(year, None), date.max)[1]
+
+    async def _cfb_season_prior(self, year: int, prev_games: list[dict],
+                                prev_lines: list[dict]) -> tuple[dict[str, float], float]:
+        """Season `year`'s CFB prior and HFA, as live: last season's fit, its closing-line
+        (market-implied) ratings, and this season's returning production and talent."""
+        if not prev_games:
+            return {}, 0.0
+        canon = lambda n: self.teams.canonical("cfb", n) or n  # noqa: E731
+        returning = {canon(r["team"]): float(r["percentPPA"]) for r in await self.cfbd.returning(year)
+                     if r.get("team") and r.get("percentPPA") is not None}
+        talent = {canon(r.get("team") or r.get("school")): float(r["talent"]) for r in await self.cfbd.talent(year)
+                  if (r.get("team") or r.get("school")) and r.get("talent") is not None}
+        try:
+            last = CfbRatings.fit(prev_games, {}, date(year, 3, 1))
+        except np.linalg.LinAlgError:
+            return {}, 0.0
+        end = max((g["date"] for g in prev_lines), default=None)
+        market = implied_ratings([(g["home"], g["away"], g["neutral"], -g["home_line"],
+                                   cfb_models.WEEKLY_DECAY ** ((end - g["date"]).days / 7.0))
+                                  for g in prev_lines])[0] if prev_lines else None
+        return cfb_prior(last.ratings, returning, talent, games_played(prev_games), market), last.hfa
+
+    async def _cfb_inputs(self, years: list[int], before: date):
+        """Walk-forward CFB games over `years`, each season fit from its own prior like the live model."""
+        if self.cfbd is None:
+            return [], None
+        by_year = {}
+        for y in [years[0] - 1, *years]:  # whole seasons, one call each; past seasons cache forever
+            by_year[y] = self._cfb_line_rows(await self.cfbd.lines(y, None), before)
+        priors = {y: await self._cfb_season_prior(y, *by_year[y - 1]) for y in years}
+        games = [{**g, "season": y} for y in years for g in by_year[y][1]]
 
         def predict_asof(d: date):
+            y = _season_of_date(d)
+            prior, hfa = priors.get(y, ({}, 0.0))
             try:
-                model = CfbRatings.fit(fit_games, {}, d)
-            except np.linalg.LinAlgError:  # nothing played before d yet
-                return lambda g: 0.0
+                model = CfbRatings.fit(by_year.get(y, ([], []))[0], prior, d)
+            except np.linalg.LinAlgError:  # nothing played this season yet: the prior alone
+                if not prior:
+                    return lambda g: 0.0
+                model = CfbRatings(prior, hfa)
             return lambda g: model.predict(g["home"], g["away"], g["neutral"])
 
         return games, predict_asof
@@ -640,7 +674,7 @@ class Services:
     @staticmethod
     def _gate_spans(now: datetime) -> dict[str, tuple[int, int]]:
         cur = _season(now)
-        return {"nfl": (cur - NFL_SEASONS + 1, cur), "cfb": (cur - 1, cur - 1)}
+        return {"nfl": (cur - NFL_SEASONS + 1, cur), "cfb": (cur - 2, cur - 1)}
 
     def _league_model(self, league: str):
         return self.nfl_model if league == "nfl" else self.cfb_model

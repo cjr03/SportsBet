@@ -91,3 +91,36 @@ def test_cfb_clv_recorded_from_market(services_mocked, mk):
     bet = svc.lifecycle.confirm(rec.id, NOW)
     out = svc._record_clv(NOW)
     assert any(f"clv bet {bet}" in msg for _, msg in out), out
+
+
+def _line_rows(year, strong="Georgia", weak="Akron", n=8):
+    rows = []
+    for k in range(n):
+        d = datetime(year, 9, 1, 23, tzinfo=UTC) + timedelta(days=7 * k)
+        home, away = (strong, weak) if k % 2 == 0 else (weak, strong)
+        hs, as_ = (42, 10) if home == strong else (10, 42)
+        rows.append({"homeTeam": home, "awayTeam": away, "homeScore": hs, "awayScore": as_, "week": k + 1,
+                     "startDate": d.isoformat().replace("+00:00", "Z"), "neutralSite": False,
+                     "lines": [{"spread": -24.0 if home == strong else 24.0}]})
+    return rows
+
+
+def test_cfb_gate_span_is_two_seasons():
+    from gridiron_edge.services import Services
+
+    assert Services._gate_spans(NOW)["cfb"] == (2024, 2025)
+
+
+async def test_cfb_backtest_uses_last_season_prior(services_mocked):
+    import re
+
+    def lines(request):
+        year = int(re.search(r"year=(\d+)", str(request.url)).group(1))
+        return httpx.Response(200, json=_line_rows(year) if year in (2023, 2024) else [])
+
+    services_mocked.router.get(url__regex=r"collegefootballdata\.com/lines").mock(side_effect=lines)
+    svc = services_mocked()
+    games, predict_asof = await svc._cfb_inputs([2024, 2025], NOW.date())
+    assert {g["season"] for g in games} == {2024}
+    early = predict_asof(date(2024, 8, 26))  # before any 2024 game: the 2023-based prior alone
+    assert early({"home": "Georgia", "away": "Akron", "neutral": True}) > 5.0
