@@ -168,7 +168,8 @@ def clear_text(n_clear: int, n: int) -> str:
 def best_picks(view: PPView, n: int = 3) -> list[PPLine]:
     """The n picks with the highest chance above what they need (lines that reach it only)."""
     best = best_structure(view.settings)
-    usable = [ln for ln in view.lines if ln.game_id in view.games and _clears(ln, view.settings, best)]
+    usable = [ln for ln in view.lines if ln.game_id in view.games and ln.team is not None
+              and _clears(ln, view.settings, best)]
 
     def room(ln: PPLine) -> float:
         need = needed_chance(ln, view.settings, best)
@@ -267,14 +268,18 @@ def pick_words(ln: PPLine) -> str:
 
 
 def pickable(view: PPView) -> dict[PickKey, PPLine]:
-    """Lines you can put in an entry: on a listed game, with our chance worked out."""
+    """Lines you can put in an entry: on a listed game, with our chance worked out and a known team."""
     return {pick_key(ln): ln for ln in view.lines
-            if ln.game_id in view.games and ln.p is not None and ln.side is not None}
+            if ln.game_id in view.games and ln.p is not None and ln.side is not None and ln.team is not None}
 
 
 def reconcile(keys: list[PickKey], view: PPView) -> tuple[list[PickKey], list[PickKey]]:
-    """(kept, dropped): chosen picks whose line is still loaded and priced, and those that are not."""
+    """(kept, dropped): chosen picks whose line is still loaded and priced, and those that are not.
+    While no line at all is priced (startup, or a refresh before player lines load) every pick is
+    kept, so a short gap never empties your entry."""
     live = pickable(view)
+    if not live:
+        return list(keys), []
     return [k for k in keys if k in live], [k for k in keys if k not in live]
 
 
@@ -302,7 +307,7 @@ def add_problem(chosen: list[PPLine], ln: PPLine, view: PPView, names: d.Names =
         g = view.games.get(ln.game_id)
         where = _matchup(g, names) if g is not None else "that game"
         return (f"Your entry already has {same} pick{'s' * (same != 1)} from {where}; we allow at most {cap} "
-                f"from one game (type: set pp_max_per_game 3 to allow more).")
+                "from one game.")
     return None
 
 
@@ -396,14 +401,15 @@ def evaluate_entry(picks: list[PPLine], view: PPView, names: d.Names = d.DEFAULT
         _, out.ev, out.structure = best
         out.table = dict(table[out.structure])
         out.dist = worst_distribution(out.legs, out.structure, table, s.copula_rho)
-    need_be = breakeven(out.structure, table) if out.structure else (best_structure(s) or (None, None))[1]
+    ref = (out.structure, breakeven(out.structure, table)) if out.structure else best_structure(s)
     for ln in picks:
-        if need_be is not None:
-            need = need_be + (s.pp_margin_market if ln.anchored else s.pp_margin_model)
+        if ref is not None:
+            need = ref[1] + (s.pp_margin_market if ln.anchored else s.pp_margin_model)
+            what = _structure_words(*ref[0])
             if ln.p < need:
-                out.warnings.append(f"{ln.player} is just under the {need:.1%} chance it needs."
+                out.warnings.append(f"{ln.player} is just under the {need:.1%} a {what} needs."
                                     if f"{ln.p:.1%}" == f"{need:.1%}" else
-                                    f"{ln.player} is below the chance it needs ({ln.p:.1%}, needs {need:.1%}).")
+                                    f"{ln.player} is below the {need:.1%} a {what} needs (our chance {ln.p:.1%}).")
         if not ln.anchored:
             out.warnings.append(f"{ln.player}'s chance is from our model only, not backed by sportsbooks.")
     held = sorted({view.games[ln.game_id].league for ln in picks if ln.game_id in view.games
@@ -452,8 +458,15 @@ def outcome_texts(ev: EntryEval) -> list[str]:
     return out
 
 
-def entry_lines(ev: EntryEval, view: PPView, names: d.Names = d.DEFAULT_NAMES) -> list[str]:
-    """The YOUR ENTRY box, line by line, in plain English."""
+def entry_lines(ev: EntryEval, view: PPView, names: d.Names = d.DEFAULT_NAMES, waiting: int = 0) -> list[str]:
+    """The YOUR ENTRY box, line by line, in plain English; the last line names the keys. `waiting` is
+    how many chosen picks are kept while their lines aren't loaded."""
+    if not ev.picks and waiting:
+        kept = (f"Your {waiting} picks are kept, but their lines aren't loaded right now; the entry is worked "
+                "out again when they come back." if waiting != 1 else
+                "Your 1 pick is kept, but its line isn't loaded right now; the entry is worked out again when "
+                "it comes back.")
+        return [kept, "x clears it. We never place bets for you."]
     if not ev.picks:
         return [f"No picks yet. Highlight a line below and press Enter to add it ({MIN_PICKS} to {MAX_PICKS} "
                 "picks, at least 2 teams)."]
@@ -469,7 +482,7 @@ def entry_lines(ev: EntryEval, view: PPView, names: d.Names = d.DEFAULT_NAMES) -
         n, kind = ev.structure
         rule = "every pick must hit" if kind == "power" else "it still pays with a miss"
         out.append(f"Best entry type for these {n} picks: {_structure_words(n, kind)} ({rule}).")
-        out.append(" | ".join(outcome_texts(ev)) + ".")
+        out += outcome_texts(ev)
         out.append(f"Chance of getting any money back: {ev.p_paid:.1%}. Chance of a profit: {ev.p_profit:.1%}.")
         if ev.linked:
             out.append("Picks from the same game are treated as linked: we count whichever way hurts this "
@@ -483,9 +496,52 @@ def entry_lines(ev: EntryEval, view: PPView, names: d.Names = d.DEFAULT_NAMES) -
             out.append(f"Suggested amount: none. {ev.stake_note}{per_dollar}")
     for msg in ev.warnings:
         out.append(f"Heads up: {msg}")
+    note = _list_type_note(ev, s)
+    if note:
+        out.append(note)
     tail = "Press c after you place it on PrizePicks to record it" if ev.ready else "Fix the above to record it"
-    out.append(f"{tail}; x clears the entry. We never place bets for you.")
+    out.append(f"{tail}; x clears it. We never place bets for you.")
     return out
+
+
+def _list_type_note(ev: EntryEval, s: Settings) -> str | None:
+    """When the lists' 'needs' numbers are for a different entry type than this entry, say so."""
+    best = best_structure(s)
+    if ev.structure is None or ev.problems or best is None or best[0] == ev.structure:
+        return None
+    try:
+        be = breakeven(ev.structure, payout_table(s))
+    except ValueError:
+        return None
+    return (f"The needed chances in the lists are for a {_structure_words(*best[0])}; this "
+            f"{_structure_words(*ev.structure)} needs {be + s.pp_margin_market:.1%} per pick "
+            f"({be + s.pp_margin_model:.1%} for model-only picks).")
+
+
+# -- what tab 5 writes to the log ---------------------------------------------------------------
+CANT_PICK = "That line can't be picked right now."
+EMPTY_ENTRY = "Your PrizePicks entry is empty: pick 2 to 6 lines with Enter first."
+WAIT_FOR_LINES = "Your picks' lines aren't loaded right now; wait for them to come back before recording."
+CLEARED = "Cleared your PrizePicks entry."
+ALREADY_EMPTY = "Your PrizePicks entry is already empty."
+NOT_RECORDED = "PrizePicks entry not recorded."
+ONLY_PP_OPENS = "Only PrizePicks entries can be opened on the PrizePicks tab."
+
+
+def added_text(ln: PPLine, n: int) -> str:
+    return f"Added {pick_words(ln)} to your PrizePicks entry ({n} pick{'s' * (n != 1)})."
+
+
+def removed_text(words: str) -> str:
+    return f"Took {words} out of your PrizePicks entry."
+
+
+def same_picks_text(rec_id: int) -> str:
+    return f"Same picks as PrizePicks idea #{rec_id} in PLACE NOW."
+
+
+def opened_text(rec_id: int) -> str:
+    return f"Opened PrizePicks idea #{rec_id} in YOUR ENTRY on tab 5."
 
 
 @dataclass(frozen=True)
@@ -521,6 +577,9 @@ def best_rows(view: PPView, chosen: set[PickKey], names: d.Names = d.DEFAULT_NAM
     return rows
 
 
+NO_TEAM = "team unknown, can't be picked yet"
+
+
 def all_rows(view: PPView, chosen: set[PickKey], now: datetime, names: d.Names = d.DEFAULT_NAMES
              ) -> list[PickRow]:
     """ALL LINES as rows: a heading per game, then each line (lines we can't price are not pickable)."""
@@ -534,6 +593,9 @@ def all_rows(view: PPView, chosen: set[PickKey], now: datetime, names: d.Names =
         for ln in lines:
             if ln.p is None or ln.side is None:
                 rows.append(PickRow(f"    {line_text(ln, gated)}"))
+                continue
+            if ln.team is None:
+                rows.append(PickRow(f"    {pick_row_text(ln, view, best, gated)} - {NO_TEAM}"))
                 continue
             key = pick_key(ln)
             rows.append(PickRow(_mark(key in chosen) + pick_row_text(ln, view, best, gated), key, key in chosen))

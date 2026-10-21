@@ -193,7 +193,7 @@ def test_entry_warnings_below_needed_and_model_only():
     picks[1] = replace(picks[1], anchored=False)
     ev = ppv.evaluate_entry(picks, v)
     assert ev.ready  # warnings never block
-    assert "Caleb Williams is below the chance it needs (55.0%, needs 57.0%)." in ev.warnings
+    assert "Caleb Williams is below the 57.0% a 3-pick Power Play needs (our chance 55.0%)." in ev.warnings
     assert "Drake Maye's chance is from our model only, not backed by sportsbooks." in ev.warnings
     held = ppv.evaluate_entry(entry(*THREE), sized([], watch_only={"nfl": True}))
     assert any("watch-only or paused" in w for w in held.warnings)
@@ -216,8 +216,8 @@ def test_add_problem_and_reconcile():
     picked = entry(*THREE[:2])
     assert ppv.add_problem(picked, line("Caleb Williams", 0.6, stat="rush_yds"), v) == \
         "Caleb Williams is already in your entry; PrizePicks allows one pick per player."
-    assert ppv.add_problem(picked, line("New", 0.6), v).startswith(
-        "Your entry already has 2 picks from Patriots at Bears; we allow at most 2 from one game")
+    assert ppv.add_problem(picked, line("New", 0.6), v) == \
+        "Your entry already has 2 picks from Patriots at Bears; we allow at most 2 from one game."
     assert "no chance worked out" in ppv.add_problem([], line("X", None), v)
     assert "don't know X's team" in ppv.add_problem([], line("X", 0.6, team=None), v)
     full = [line(f"P{i}", 0.6, game=DAL_PHI if i % 2 else NE_CHI) for i in range(6)]
@@ -268,4 +268,53 @@ def test_below_needed_warning_never_shows_two_equal_numbers():
     picks = entry(*THREE)
     picks[0] = replace(picks[0], p=0.5699)  # 3-pick Power Play needs 57.0% for a sportsbook-backed pick
     ev = ppv.evaluate_entry(picks, sized([]))
-    assert "Caleb Williams is just under the 57.0% chance it needs." in ev.warnings
+    assert "Caleb Williams is just under the 57.0% a 3-pick Power Play needs." in ev.warnings
+
+
+def test_lines_with_unknown_team_show_but_cannot_be_picked():
+    lines = [line("A", 0.61), line("NoTeam", 0.66, team=None), line("D", 0.59, game=DAL_PHI, team="PHI")]
+    v = view(lines)
+    assert ppv.pick_key(lines[1]) not in ppv.pickable(v)
+    row = next(r for r in ppv.all_rows(v, set(), NOW) if "NoTeam" in r.text)
+    assert row.key is None and not row.heading and row.text.endswith("team unknown, can't be picked yet")
+    assert all(r.key is not None for r in ppv.best_rows(v, set()))
+    assert "NoTeam" not in " ".join(r.text for r in ppv.best_rows(v, set()))
+
+
+def test_reconcile_keeps_picks_while_no_lines_are_priced():
+    """A short gap (startup, or a refresh before props load) never empties YOUR ENTRY."""
+    keys = [("A", "pass_yds", 249.5, "over")]
+    assert ppv.reconcile(keys, view([])) == (keys, [])
+    assert ppv.reconcile(keys, view([line("A", None)])) == (keys, [])
+    assert ppv.reconcile(keys, view([line("B", 0.6)])) == ([], keys)  # lines are back: A is really gone
+    text = ppv.entry_lines(ppv.evaluate_entry([], sized([])), sized([]), waiting=2)
+    assert text[0] == ("Your 2 picks are kept, but their lines aren't loaded right now; the entry is worked "
+                       "out again when they come back.")
+
+
+def test_entry_outcomes_each_on_their_own_line_and_short_key_line():
+    v = sized([])
+    ev = ppv.evaluate_entry(entry(*THREE), v)
+    text = ppv.entry_lines(ev, v)
+    assert not any(" | " in t for t in text)
+    outs = ppv.outcome_texts(ev)
+    assert all(o in text for o in outs)
+    assert text[-1] == "Press c after you place it on PrizePicks to record it; x clears it. We never place bets for you."
+    assert len(text[-1]) <= 96  # one row at 100 columns
+
+
+def test_entry_says_which_entry_type_the_list_numbers_are_for():
+    v = sized([])
+    ev = ppv.evaluate_entry(entry(*THREE), v)  # a 3-pick Power Play; the lists use a 6-pick Flex Play
+    text = ppv.entry_lines(ev, v)
+    assert ("The needed chances in the lists are for a 6-pick Flex Play; this 3-pick Power Play needs "
+            "57.0% per pick (58.5% for model-only picks).") in text
+
+
+def test_pick_log_messages_are_sentences():
+    ln = line("Caleb Williams", 0.6)
+    assert ppv.added_text(ln, 1) == "Added Caleb Williams MORE than 249.5 passing yards to your PrizePicks entry (1 pick)."
+    assert ppv.removed_text("Caleb Williams MORE than 249.5 passing yards") == \
+        "Took Caleb Williams MORE than 249.5 passing yards out of your PrizePicks entry."
+    assert ppv.same_picks_text(7) == "Same picks as PrizePicks idea #7 in PLACE NOW."
+    assert ppv.opened_text(7) == "Opened PrizePicks idea #7 in YOUR ENTRY on tab 5."

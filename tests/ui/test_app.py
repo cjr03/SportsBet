@@ -411,7 +411,10 @@ async def test_prizepicks_tab_and_home_status_line(services_mocked):
         titles = [app.query_one(f"#{i}").border_title
                   for i in ("pp-summary-box", "pp-best-box", "pp-entry-box", "pp-scroll")]
         assert titles == ["PRIZEPICKS", "BEST PICKS NOW", "YOUR ENTRY", "ALL LINES"]
-        assert isinstance(app.focused, PickList)  # tab 5 lands in the picks
+        assert app.focused is app.query_one("#cmd")  # the command bar keeps typing letters
+        await pilot.press("down")
+        await pilot.pause()
+        assert isinstance(app.focused, PickList)  # Down goes into the picks on tab 5
 
 
 def _pp_dump(app) -> str:
@@ -448,7 +451,7 @@ async def test_prizepicks_pick_two_lines_and_record_entry(services_mocked):
                           if g.home == "SEA"))
         app.refresh_views()
         await pilot.pause()
-        await pilot.press("5")
+        await pilot.press("5", "down")
         await pilot.pause()
         best = app.query_one("#pp-best", PickList)
         assert app.focused is best, _pp_dump(app)
@@ -497,7 +500,7 @@ async def test_prizepicks_why_and_clear_keys(services_mocked):
         seed_pp(svc, next(g.game_id for g in svc.registry.all_since(NOW - timedelta(days=1)) if g.home == "SEA"))
         app.refresh_views()
         await pilot.pause()
-        await pilot.press("5", "enter")
+        await pilot.press("5", "down", "enter")
         await pilot.pause()
         assert len(app._pp_selected) == 1
         await pilot.press("d")
@@ -546,6 +549,7 @@ async def test_place_now_e_opens_prizepicks_idea_and_c_reuses_its_id(services_mo
         await pilot.press("e")
         await pilot.pause()
         assert app.query_one("#tabs", TabbedContent).active == "prizepicks"
+        assert isinstance(app.focused, PickList)  # from a list (not the command bar): straight into the picks
         assert [k[0] for k in app._pp_selected] == ["Geno Smith", "Caleb Williams"]
         entry = str(app.query_one("#pp-entry", Static).render())
         assert f"Same picks as PrizePicks idea #{saved.id} in PLACE NOW." in entry, entry
@@ -592,3 +596,86 @@ async def test_set_message_uses_plain_words(services_mocked):
         await app.workers.wait_for_complete()
         await submit(app, pilot, "set kelly_fraction 0.2")
         assert log_lines(app)[-1].endswith("Setting changed: bet size (share of the ideal amount) is now 0.2.")
+
+
+async def test_tab5_from_command_bar_keeps_letters_typing(services_mocked):
+    """Pressing 5 in the empty command bar must not turn the next letters into PrizePicks keys."""
+    svc = services_mocked()
+    svc.ledger.deposit(100_000)
+    app = GridironApp(svc, clock=lambda: NOW)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await app.workers.wait_for_complete()
+        seed_pp(svc, next(g.game_id for g in svc.registry.all_since(NOW - timedelta(days=1)) if g.home == "SEA"))
+        app.refresh_views()
+        await pilot.pause()
+        cmd = app.query_one("#cmd", Input)
+        await pilot.press("5")
+        await pilot.pause()
+        assert app.query_one("#tabs", TabbedContent).active == "prizepicks" and app.focused is cmd
+        await pilot.press("c", "o", "n", "f", "i", "r", "m", "space", "1", "3", "x", "d")
+        await pilot.pause()
+        assert cmd.value == "confirm 13xd" and not isinstance(app.screen, (ConfirmScreen, WhyScreen))
+        assert app._pp_selected == [] and app.query_one("#tabs", TabbedContent).active == "prizepicks"
+        cmd.value = ""
+        await pilot.press("down")
+        await pilot.pause()
+        assert app.query_one("#tabs", TabbedContent).active == "prizepicks"
+        assert isinstance(app.focused, PickList) and app.focused.id == "pp-best"
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.focused is cmd
+
+
+def seed_pp6(svc, sea_game) -> None:
+    """Six sportsbook-backed lines over two games (three per game, both teams), for a full 6-pick entry."""
+    from dataclasses import replace as _replace
+
+    from gridiron_edge.types import PropQuote
+    phi = _replace(sea_game, game_id="nfl:20261102:DAL@PHI", home="PHI", away="DAL")
+    svc.registry.upsert(phi)
+    seen = NOW - timedelta(minutes=5)
+    out = []
+    for i, (gid, player, team, stat, line) in enumerate((
+            (sea_game.game_id, "Geno Smith", "SEA", "pass_yds", 229.5),
+            (sea_game.game_id, "Caleb Williams", "CHI", "pass_yds", 219.5),
+            (sea_game.game_id, "Kenneth Walker", "SEA", "rush_yds", 64.5),
+            (phi.game_id, "Jalen Hurts", "PHI", "pass_yds", 239.5),
+            (phi.game_id, "Dak Prescott", "DAL", "pass_yds", 249.5),
+            (phi.game_id, "Saquon Barkley", "PHI", "rush_yds", 84.5))):
+        over = 1.52 + 0.01 * i
+        out.append(PropQuote("odds_api", "prizepicks", gid, player, stat, "over", line, None, seen, fetched_at=seen))
+        under = round(1 / (1.045 - 1 / over), 3)
+        for book in ("draftkings", "fanduel"):
+            out += [PropQuote("odds_api", book, gid, player, stat, side, line, dec, seen, fetched_at=seen)
+                    for side, dec in (("over", over), ("under", under))]
+        svc.player_teams[player] = team
+    svc.latest["props"] = out
+
+
+async def test_prizepicks_tab_fits_at_100_by_30_with_six_picks(services_mocked):
+    """ALL LINES and the 'Press c' line stay on screen with a full entry on a small terminal."""
+    svc = services_mocked(pp_max_per_game=3)
+    svc.ledger.deposit(100_000)
+    app = GridironApp(svc, clock=lambda: NOW)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await app.workers.wait_for_complete()
+        seed_pp6(svc, next(g for g in svc.registry.all_since(NOW - timedelta(days=1)) if g.home == "SEA"))
+        app.refresh_views()
+        await pilot.pause()
+        await pilot.press("5")
+        await pilot.pause()
+        board = app.query_one("#pp-board", PickList)
+        board.focus()
+        await pilot.pause()
+        for _ in range(20):
+            if len(app._pp_selected) >= 6:
+                break
+            await pilot.press("down", "enter")
+            await pilot.pause()
+        assert len(app._pp_selected) == 6, log_lines(app)[-3:]
+        pane = app.query_one("#prizepicks").region
+        keys = app.query_one("#pp-entry-keys", Static)
+        assert "Press c after you place it on PrizePicks" in str(keys.render())
+        for w in (keys, board, app.query_one("#pp-entry-box"), app.query_one("#pp-scroll")):
+            assert w.region.height > 0 and pane.contains_region(w.region), (w.id, w.region, pane)
+        assert board.region.height >= 4 and app.focused is board

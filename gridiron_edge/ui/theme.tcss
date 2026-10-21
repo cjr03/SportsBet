@@ -85,14 +85,19 @@ WatchList > .option-list--option { padding: 0 1; }
     border-title-style: bold;
 }
 #pp-best-box { border: round $profit 40%; border-title-color: $profit; }
-#pp-entry-box { border: round $pending 40%; border-title-color: $pending; max-height: 18; }
+#pp-entry-box { border: round $pending 40%; border-title-color: $pending; }
+#pp-entry-scroll { height: auto; max-height: 35vh; }
+#prizepicks.-short #pp-entry-scroll { max-height: 25vh; }
+#pp-entry-keys { height: auto; padding: 0 1; color: $pending; }
 #pp-scroll:focus-within { border: round $accent; }
 #pp-best-box:focus-within { border: round $profit; }
+#pp-entry-box:focus-within { border: round $pending; }
 #pp-summary, #pp-entry { padding: 0 1; }
 #pp-best-empty { padding: 0 1; }
 PickList { background: $surface; border: none; padding: 0; }
 PickList:focus { border: none; }
-#pp-best { height: auto; max-height: 8; }
+#pp-best { height: auto; max-height: 6; }
+#prizepicks.-short #pp-best { max-height: 4; }
 #pp-board { height: 1fr; }
 PickList > .option-list--option { padding: 0 1; }
 PickList > .option-list--option-disabled { padding: 0 1; }
@@ -157,6 +162,7 @@ ConfirmScreen {
 }
 
 #confirm-box Input { margin-bottom: 1; }
+#confirm-title { width: 1fr; height: auto; }
 #error { color: $loss; height: auto; }
 #buttons { height: auto; align-horizontal: right; }
 

@@ -196,3 +196,22 @@ def test_add_manual_pp_entry_is_never_blocked_by_an_old_skipped_idea(lc):
     bet_id = lc.confirm(mine.id, NOW + timedelta(minutes=2), stake_cents=700)
     row = lc.conn.execute("SELECT * FROM bets WHERE id=?", (bet_id,)).fetchone()
     assert row["stake_cents"] == 700 and row["kind"] == "pp_entry" and lc.ledger.balance() == 9300
+
+
+def test_record_manual_saves_idea_and_bet_together_or_not_at_all(lc):
+    """Tab 5's c: the self-built idea and its bet go in one transaction, so a failed record never
+    leaves a stray idea behind in PLACE NOW."""
+    leg = Leg("prizepicks", "x over 50.5", "over", 0.0, 0.6, "g", player="X", stat="rec_yds", line=50.5)
+    rec = Recommendation(None, "pp_entry", [leg], 500, None, 0.1, 0.3, "3-power", NOW, NOW + timedelta(hours=3))
+    count = "SELECT COUNT(*) FROM recommendations"
+    with pytest.raises(InsufficientFunds):
+        lc.record_manual(rec, NOW, stake_cents=50_000)  # more than the $100 bankroll
+    assert lc.conn.execute(count).fetchone()[0] == 0 and lc.ledger.balance() == 10000
+    assert not lc.conn.in_transaction
+    with pytest.raises(LifecycleError, match="expired"):
+        lc.record_manual(rec, rec.expires_at, stake_cents=500)
+    assert lc.conn.execute(count).fetchone()[0] == 0 and not lc.conn.in_transaction
+    rec_id, bet_id = lc.record_manual(rec, NOW, stake_cents=700)
+    assert lc.get_rec(rec_id).state == "PLACED" and lc.ledger.balance() == 9300
+    row = lc.conn.execute("SELECT * FROM bets WHERE id=?", (bet_id,)).fetchone()
+    assert row["rec_id"] == rec_id and row["stake_cents"] == 700 and not lc.conn.in_transaction

@@ -114,7 +114,7 @@ async def test_confirm_modal_prizepicks_has_no_price_or_contracts():
         app.push_screen(ConfirmScreen(pp), lambda r: setattr(app, "result", r))
         await pilot.pause(0.3)
         assert not app.screen.query("#price") and not app.screen.query("#qty")
-        title = str(app.screen.query(Label).first().render())
+        title = str(app.screen.query_one("#confirm-title").render())
         assert title == "Did you place PrizePicks entry #42 ($10.00, 5-pick Flex Play)?"
         assert app.screen.query_one("#stake", Input).value == "10.00"
         await pilot.click("#ok")
@@ -131,7 +131,7 @@ async def test_confirm_modal_prizepicks_stake_is_editable_and_checked():
     async with app.run_test() as pilot:
         app.push_screen(ConfirmScreen(pp), lambda r: setattr(app, "result", r))
         await pilot.pause(0.3)
-        title = str(app.screen.query(Label).first().render())
+        title = str(app.screen.query_one("#confirm-title").render())
         assert title == "Did you place this PrizePicks entry (3-pick Power Play)?"
         await pilot.click("#ok")  # no suggested amount: you must type one
         await pilot.pause(0.3)

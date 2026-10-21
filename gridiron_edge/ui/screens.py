@@ -26,12 +26,13 @@ class ConfirmScreen(ModalScreen[tuple[float | None, int | None, int | None] | No
             if r.kind == "pp_entry":  # no price or contracts on PrizePicks: the amount you put in
                 which = f"PrizePicks entry #{r.id}" if r.id is not None else "this PrizePicks entry"
                 amount = f"{d.money(r.stake_cents)}, " if r.stake_cents > 0 else ""
-                yield Label(f"Did you place {which} ({amount}{d.structure_text(r.structure)})?")
+                yield Static(f"Did you place {which} ({amount}{d.structure_text(r.structure)})?", id="confirm-title")
                 yield Static(Text(d.bet_text(r, self.names)), id="legs")
                 yield Label("Amount you put in, in dollars (e.g. 10)")
                 yield Input(value=f"{r.stake_cents / 100:.2f}" if r.stake_cents > 0 else "", id="stake")
             else:
-                yield Label(f"Did you place bet idea #{r.id}?  Bet {d.money(r.stake_cents)} at {d.price_text(r)}")
+                yield Static(f"Did you place bet idea #{r.id}?  Bet {d.money(r.stake_cents)} at {d.price_text(r)}",
+                             id="confirm-title")
                 yield Static(Text(d.bet_text(r, self.names)), id="legs")
                 yield Label("Price you got, in dollars (e.g. 0.47)")
                 yield Input(value=f"{r.legs[0].price:.2f}", id="price")

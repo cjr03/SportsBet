@@ -155,6 +155,23 @@ class Lifecycle:
                 self.conn.execute("UPDATE recommendations SET state='EXPIRED' WHERE id=?", (i,))
         return due
 
+    def record_manual(self, rec: Recommendation, now: datetime, stake_cents: int | None = None) -> tuple[int, int]:
+        """Save a bet idea you put together yourself and record it as placed, in one transaction:
+        if recording fails, the idea is not saved either (so it never shows up in PLACE NOW).
+        Returns (idea id, bet id)."""
+        key = hashlib.sha1(f"{rec.dedupe_key}|manual|{now.isoformat()}".encode()).hexdigest()
+        with self.conn:
+            self.conn.execute("SAVEPOINT record_manual")
+            try:
+                rec_id = self._insert(rec, now, key, "RECOMMENDED")
+                bet_id = self._place(self.get_rec(rec_id), now, None, None, stake_cents)
+            except BaseException:
+                self.conn.execute("ROLLBACK TO record_manual")
+                self.conn.execute("RELEASE record_manual")
+                raise
+            self.conn.execute("RELEASE record_manual")
+        return rec_id, bet_id
+
     def confirm(self, rec_id: int, now: datetime, price: float | None = None,
                 qty: int | None = None, stake_cents: int | None = None) -> int:
         rec = self.get_rec(rec_id)
@@ -163,6 +180,21 @@ class Lifecycle:
         if rec.state == "EXPIRED":
             # a price tick re-issues the rec under a new id; the id in the text should still work
             rec = self._live_successor(rec, now) or rec
+        with self.conn:
+            self.conn.execute("SAVEPOINT confirm_bet")
+            try:
+                bet_id = self._place(rec, now, price, qty, stake_cents)
+            except BaseException:
+                self.conn.execute("ROLLBACK TO confirm_bet")
+                self.conn.execute("RELEASE confirm_bet")
+                raise
+            self.conn.execute("RELEASE confirm_bet")
+        return bet_id
+
+    def _place(self, rec: Recommendation, now: datetime, price: float | None, qty: int | None,
+               stake_cents: int | None) -> int:
+        """Write the bet, take its cost from the bankroll and mark the idea placed. The caller holds
+        the transaction."""
         if rec.state not in ("RECOMMENDED", "PENDING"):
             raise LifecycleError("not pending")
         if now >= rec.expires_at:
@@ -183,22 +215,13 @@ class Lifecycle:
             fee = round(taker_fee(bet_qty, bet_price, rec.legs[0].fee_multiplier) * 100)
 
         legs_json = json.dumps([asdict(g) for g in rec.legs])
-        with self.conn:
-            self.conn.execute("SAVEPOINT confirm_bet")
-            try:
-                cur = self.conn.execute(
-                    "INSERT INTO bets (rec_id, kind, legs_json, price, qty, stake_cents, fee_cents,"
-                    " structure, placed_at, state) VALUES (?,?,?,?,?,?,?,?,?,'PLACED')",
-                    (rec.id, rec.kind, legs_json, bet_price, bet_qty, cost, fee, rec.structure,
-                     now.isoformat()))
-                bet_id = cur.lastrowid
-                self.ledger.post("stake", -(cost + fee), bet_id=bet_id, note=f"rec {rec.id}")
-                self.conn.execute("UPDATE recommendations SET state='PLACED' WHERE id=?", (rec.id,))
-            except BaseException:
-                self.conn.execute("ROLLBACK TO confirm_bet")
-                self.conn.execute("RELEASE confirm_bet")
-                raise
-            self.conn.execute("RELEASE confirm_bet")
+        cur = self.conn.execute(
+            "INSERT INTO bets (rec_id, kind, legs_json, price, qty, stake_cents, fee_cents,"
+            " structure, placed_at, state) VALUES (?,?,?,?,?,?,?,?,?,'PLACED')",
+            (rec.id, rec.kind, legs_json, bet_price, bet_qty, cost, fee, rec.structure, now.isoformat()))
+        bet_id = cur.lastrowid
+        self.ledger.post("stake", -(cost + fee), bet_id=bet_id, note=f"rec {rec.id}")
+        self.conn.execute("UPDATE recommendations SET state='PLACED' WHERE id=?", (rec.id,))
         return bet_id
 
     def _live_successor(self, rec: Recommendation, now: datetime) -> Recommendation | None:

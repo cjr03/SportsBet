@@ -395,3 +395,54 @@ def test_prizepicks_entry_rows_and_why_are_plain():
         if problem:
             sentence(problem)
     sentence(ppv.dropped_text(ppv.pick_key(lines[0])))
+
+
+SETTING_NAME = re.compile(r"\b[a-z]+_[a-z_]+\b")
+
+
+def test_prizepicks_tab_log_messages_are_plain():
+    """What tab 5 writes to the log and status line: picks in and out, clearing, opening and recording."""
+    ln = PPLine(GID, "Jalen Hurts", "PHI", "rush_yds", 34.5, "over", 0.55, True, NOW, True)
+    view = ppv.PPView([ln], {GID: GAME}, None, 0, Settings(), {"nfl": True})
+    msgs = [ppv.added_text(ln, 1), ppv.added_text(ln, 3), ppv.removed_text(ppv.pick_words(ln)),
+            ppv.same_picks_text(12), ppv.opened_text(12), ppv.CANT_PICK, ppv.EMPTY_ENTRY, ppv.CLEARED,
+            ppv.ALREADY_EMPTY, ppv.NOT_RECORDED, ppv.ONLY_PP_OPENS, ppv.WAIT_FOR_LINES,
+            ppv.dropped_text(ppv.pick_key(ln))]
+    crowded = [PPLine(GID, f"P{i}", "PHI", "rush_yds", 34.5, "over", 0.6, True, NOW, True) for i in range(2)]
+    msgs.append(ppv.add_problem(crowded, ln, view, NAMES))
+    for msg in msgs:
+        sentence(msg)
+        assert not SETTING_NAME.search(msg), msg
+    assert "(1 pick)" in msgs[0] and "(3 picks)" in msgs[1]
+
+
+@pytest.mark.parametrize("typed", ["", "abc", "0", "-3"])
+async def test_confirm_screen_amount_errors_are_plain(typed):
+    from textual.widgets import Input, Static
+
+    from gridiron_edge.ui.screens import ConfirmScreen
+    rec = _rec("pp_entry", [_pp(i) for i in range(3)], stake_cents=0, qty=None, structure="3-power", id=None)
+
+    class Host(App):
+        def on_mount(self):
+            self.push_screen(ConfirmScreen(rec, NAMES))
+
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.screen.query_one("#stake", Input).value = typed
+        await pilot.click("#ok")
+        await pilot.pause()
+        err = app.screen.query_one("#error", Static)
+        assert err.display
+        sentence(str(err.render()))
+        title = app.screen.query_one("#confirm-title", Static)
+        assert title.region.height >= 1 and "3-pick Power Play" in str(title.render())
+
+
+def test_keys_help_names_the_prizepicks_and_place_now_keys():
+    keys = dict(HELP)["keys"]
+    clean(keys)
+    for part in ("e opens a PrizePicks idea on tab 5", "Enter or space adds or removes a pick",
+                 "x clears your entry", "c records an entry you placed"):
+        assert part in keys
