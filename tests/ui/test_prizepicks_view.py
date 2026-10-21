@@ -116,3 +116,156 @@ def test_best_picks_and_needed_chance():
     assert ppv.clear_text(1, 1) == "1 of 1 line clears the needed chance"
     assert ppv.best_picks(view([line("C", None)])) == []
     assert "Best picks now:" not in ppv.board_lines(view([line("C", None)]), NOW)
+
+
+# -- YOUR ENTRY: picking lines yourself --------------------------------------------------------------
+def sized(lines, **kw):
+    """A view with bankroll headroom, like Services.pp_view builds: $1,000 bankroll, nothing open."""
+    from gridiron_edge.pipeline import Budget, Snapshot
+    games = {g.game_id: g for g in (NE_CHI, DAL_PHI)}
+    snap = Snapshot(now=NOW, games=games, quotes=[], props=[], kalshi=[], predictions={}, gates={},
+                    bankroll_cents=100_000, open_exposure_cents=0, pp_staked_today_cents=0, margin_models={})
+    return view(lines, budget=Budget.from_snap(snap, Settings()), daily_left=10_000, **kw)
+
+
+def entry(*specs):
+    return [line(p, chance, game=g, team=t, stat=st) for p, chance, g, t, st in specs]
+
+
+THREE = (("Caleb Williams", 0.62, NE_CHI, "CHI", "pass_yds"), ("Drake Maye", 0.63, NE_CHI, "NE", "pass_tds"),
+         ("Jalen Hurts", 0.64, DAL_PHI, "PHI", "rush_yds"))
+
+
+def test_evaluate_entry_three_picks_power_play_with_stake_and_outcomes():
+    v = sized([])
+    ev = ppv.evaluate_entry(entry(*THREE), v)
+    assert ev.ready and ev.structure == (3, "power") and not ev.problems and not ev.warnings
+    assert ev.linked  # two picks share Patriots at Bears
+    assert ev.ev > 0 and ev.stake_cents >= 100 and ev.expected_profit_cents == round(ev.ev * ev.stake_cents)
+    assert ev.stake_cents <= 0.02 * 100_000  # the one-bet limit
+    assert sum(ev.dist) == pytest.approx(1.0) and ev.p_paid == pytest.approx(ev.dist[3])
+    outs = ppv.outcome_texts(ev)
+    assert outs[0].startswith(f"All 3 hit: pays back ${ev.stake_cents * 6 / 100:,.2f} - chance ")
+    assert outs[-1].startswith("Fewer hit: you lose what you put in - chance ")
+    text = ppv.entry_lines(ev, v)
+    assert text[0] == "1. Caleb Williams MORE than 249.5 passing yards - our chance 62.0% (Patriots at Bears)"
+    assert "Best entry type for these 3 picks: 3-pick Power Play (every pick must hit)." in text
+    assert any(t.startswith("Suggested amount: $") and "Expected profit: about $" in t for t in text)
+    assert text[-1].startswith("Press c after you place it on PrizePicks")
+
+
+def test_evaluate_entry_matches_the_builder_on_the_same_picks():
+    """Same correlation scoring as build_best_entry: our EV equals the builder's for its own legs."""
+    from gridiron_edge.strategy.prizepicks import build_best_entry, payout_table
+    picks = entry(*THREE)
+    ev = ppv.evaluate_entry(picks, sized([]))
+    s = Settings()
+    built = build_best_entry(ev.legs, replace(s, pp_structures=("3-power",)), [(3, "power")],
+                             payouts=payout_table(s))
+    assert built is not None and built[1] == ev.structure and built[2] == pytest.approx(ev.ev)
+
+
+def test_entry_rules_give_plain_messages_not_errors():
+    v = sized([])
+    one = ppv.evaluate_entry(entry(THREE[0]), v)
+    assert not one.ready and one.problems == ["Pick at least 2 lines; a PrizePicks entry needs 2 to 6 picks."]
+    same_team = ppv.evaluate_entry(entry(("A", 0.62, NE_CHI, "CHI", "pass_yds"),
+                                         ("B", 0.62, DAL_PHI, "CHI", "rush_yds")), v)
+    assert "All your picks are on one team (Bears); PrizePicks needs picks from at least 2 different teams." \
+        in same_team.problems
+    two = ppv.evaluate_entry(entry(THREE[0], THREE[2]), v)  # only 3- to 6-pick entries are allowed
+    assert two.problems == ["None of the entry types we use has 2 picks (we use entries of 3, 4, 5, 6 picks)."]
+    crowded = ppv.evaluate_entry(entry(("A", 0.62, NE_CHI, "CHI", "pass_yds"), ("B", 0.62, NE_CHI, "NE", "pass_tds"),
+                                       ("C", 0.62, NE_CHI, "CHI", "rush_yds")), v)
+    assert "3 picks from Patriots at Bears; we allow at most 2 from one game." in crowded.problems
+    twice = ppv.evaluate_entry(entry(("A", 0.62, NE_CHI, "CHI", "pass_yds"), ("A", 0.62, NE_CHI, "CHI", "rush_yds"),
+                                     ("C", 0.62, DAL_PHI, "PHI", "rush_yds")), v)
+    assert "A is in your entry twice; PrizePicks allows one pick per player." in twice.problems
+    for ev in (one, same_team, two, crowded, twice):
+        assert any(t.startswith("Can't record yet: ") for t in ppv.entry_lines(ev, v))
+        assert ppv.entry_lines(ev, v)[-1].startswith("Fix the above to record it")
+
+
+def test_entry_warnings_below_needed_and_model_only():
+    v = sized([])
+    picks = entry(*THREE)
+    picks[0] = replace(picks[0], p=0.55)
+    picks[1] = replace(picks[1], anchored=False)
+    ev = ppv.evaluate_entry(picks, v)
+    assert ev.ready  # warnings never block
+    assert "Caleb Williams is below the chance it needs (55.0%, needs 57.0%)." in ev.warnings
+    assert "Drake Maye's chance is from our model only, not backed by sportsbooks." in ev.warnings
+    held = ppv.evaluate_entry(entry(*THREE), sized([], watch_only={"nfl": True}))
+    assert any("watch-only or paused" in w for w in held.warnings)
+
+
+def test_entry_with_no_profit_suggests_nothing():
+    low = [("A", 0.52, NE_CHI, "CHI", "pass_yds"), ("B", 0.52, NE_CHI, "NE", "pass_tds"),
+           ("C", 0.52, DAL_PHI, "PHI", "rush_yds")]
+    v = sized([])
+    ev = ppv.evaluate_entry(entry(*low), v)
+    assert ev.ready and ev.ev < 0 and ev.stake_cents == 0
+    text = " ".join(ppv.entry_lines(ev, v))
+    assert "Suggested amount: none. We suggest not playing it" in text and "loses about" in text
+    capped = ppv.evaluate_entry(entry(*THREE), replace(sized([]), daily_left=0))
+    assert capped.stake_cents == 0 and capped.stake_note.startswith("Today's PrizePicks limit is used up")
+
+
+def test_add_problem_and_reconcile():
+    v = view([])
+    picked = entry(*THREE[:2])
+    assert ppv.add_problem(picked, line("Caleb Williams", 0.6, stat="rush_yds"), v) == \
+        "Caleb Williams is already in your entry; PrizePicks allows one pick per player."
+    assert ppv.add_problem(picked, line("New", 0.6), v).startswith(
+        "Your entry already has 2 picks from Patriots at Bears; we allow at most 2 from one game")
+    assert "no chance worked out" in ppv.add_problem([], line("X", None), v)
+    assert "don't know X's team" in ppv.add_problem([], line("X", 0.6, team=None), v)
+    full = [line(f"P{i}", 0.6, game=DAL_PHI if i % 2 else NE_CHI) for i in range(6)]
+    assert ppv.add_problem(full, line("Q", 0.6), view([])).startswith("An entry holds at most 6 picks")
+    assert ppv.add_problem([], line("Y", 0.6), v) is None
+    lines = [line("A", 0.6), line("B", None)]
+    keys = [("A", "pass_yds", 249.5, "over"), ("B", "pass_yds", 249.5, "over"), ("A", "pass_yds", 249.5, "under")]
+    kept, dropped = ppv.reconcile(keys, view(lines))
+    assert kept == keys[:1] and dropped == keys[1:]
+    assert ppv.dropped_text(keys[2]).startswith("Removed A LESS than 249.5 passing yards from your PrizePicks entry")
+
+
+def test_pick_rows_mark_chosen_and_headings_are_not_pickable():
+    lines = [line("A", 0.52), line("B", 0.61), line("C", None), line("D", 0.59, game=DAL_PHI, team="PHI")]
+    v = view(lines)
+    chosen = {ppv.pick_key(lines[1])}
+    rows = ppv.all_rows(v, chosen, NOW)
+    assert rows[0].heading and rows[0].key is None and rows[0].text.startswith("Cowboys at Eagles - kickoff")
+    assert rows[1].text == "[ ] D MORE than 249.5 passing yards - our chance 59.0%, needs 56.2% (sportsbooks)"
+    b = next(r for r in rows if r.key == ppv.pick_key(lines[1]))
+    assert b.chosen and b.text.startswith("[x] B MORE")
+    c = next(r for r in rows if "C 249.5" in r.text)
+    assert c.key is None and not c.heading and c.text.endswith("no estimate yet")
+    best = ppv.best_rows(v, chosen)
+    assert [r.text[:7] for r in best] == ["[x] 1. ", "[ ] 2. "]
+    assert best[0].text.endswith("(sportsbooks) - Patriots at Bears")
+
+
+def test_pick_why_lines():
+    from gridiron_edge.types import PropQuote
+    ln = line("Caleb Williams", 0.6, point=249.5)
+    quotes = [PropQuote("odds_api", "draftkings", NE_CHI.game_id, "Caleb Williams", "pass_yds", side, 244.5, dec,
+                        NOW, fetched_at=NOW) for side, dec in (("over", 1.80), ("under", 2.02))]
+    v = view([ln], props=quotes)
+    out = ppv.pick_why_lines(ln, v, NOW + timedelta(minutes=12))
+    assert out[0] == "The pick: Caleb Williams MORE than 249.5 passing yards (Patriots at Bears, kickoff 1:02 PM PT)."
+    assert "  DraftKings, line 244.5: MORE $1.80, LESS $2.02" in out
+    assert any("moved from their line of 244.5 to PrizePicks' 249.5" in t for t in out)
+    assert any(t.startswith("Our chance: 60.0%. Needed chance: 56.2% (break-even 54.2%") for t in out)
+    assert out[-2] == "PrizePicks line pulled at 8:02 AM PT (12 min ago)."
+    assert out[-1].startswith("[details] ")
+    model = ppv.pick_why_lines(line("X", 0.6, anchored=False), view([]), NOW)
+    assert "No sportsbook has a price for this player and stat." in model
+    assert any("our own model's projection" in t for t in model)
+
+
+def test_below_needed_warning_never_shows_two_equal_numbers():
+    picks = entry(*THREE)
+    picks[0] = replace(picks[0], p=0.5699)  # 3-pick Power Play needs 57.0% for a sportsbook-backed pick
+    ev = ppv.evaluate_entry(picks, sized([]))
+    assert "Caleb Williams is just under the 57.0% chance it needs." in ev.warnings

@@ -360,3 +360,38 @@ async def test_texts_not_set_up_line_has_no_setting_names(services_mocked):
     text = "\n".join(m for _, m in lines)
     assert "bet ideas show up in this log only" in text
     assert "NOTIFY_PHONE" not in text and "NTFY_TOPIC" not in text and ".env" not in text
+
+
+def test_prizepicks_entry_rows_and_why_are_plain():
+    """Tab 5's pick lists, YOUR ENTRY box, rule messages and 'Why this pick?' panel."""
+    from gridiron_edge.pipeline import Budget, Snapshot
+    from gridiron_edge.types import PropQuote
+    ne_chi = Game("nfl:20261025:NE@CHI", "nfl", 2026, 8, NOW + timedelta(hours=5), "CHI", "NE")
+    games = {ne_chi.game_id: ne_chi, GID: GAME}
+    lines = [PPLine(ne_chi.game_id, "Caleb Williams", "CHI", "pass_yds", 249.5, "over", 0.62, True, NOW, True),
+             PPLine(ne_chi.game_id, "Drake Maye", "NE", "pass_tds", 1.5, "under", 0.60, False, NOW, True),
+             PPLine(GID, "Jalen Hurts", "PHI", "rush_yds", 34.5, "over", 0.55, True, NOW, True),
+             PPLine(GID, "Dak Prescott", None, "pass_yds", 254.5, None, None, False, NOW, True)]
+    snap = Snapshot(now=NOW, games=games, quotes=[], props=[], kalshi=[], predictions={}, gates={},
+                    bankroll_cents=100_000, open_exposure_cents=0, pp_staked_today_cents=0, margin_models={})
+    props = [PropQuote("odds_api", "draftkings", ne_chi.game_id, "Caleb Williams", "pass_yds", side, 244.5, dec,
+                       NOW) for side, dec in (("over", 1.8), ("under", 2.0))]
+    view = ppv.PPView(lines, games, None, 0, Settings(), {"nfl": True}, props=props,
+                      budget=Budget.from_snap(snap, Settings()), daily_left=10_000, watch_only={"nfl": True})
+    chosen = {ppv.pick_key(lines[0])}
+    for row in ppv.all_rows(view, chosen, NOW, NAMES) + ppv.best_rows(view, chosen, NAMES):
+        clean(row.text)
+        assert " PT " in row.text or not row.heading
+    for picks in ([], lines[:1], lines[:3], [lines[0], lines[0]], [lines[0], lines[2]]):
+        ev = ppv.evaluate_entry(picks, view, NAMES)
+        for text in ppv.entry_lines(ev, view, NAMES):
+            sentence(text)
+    for ln in lines:
+        why = ppv.pick_why_lines(ln, view, NOW + timedelta(minutes=5), NAMES)
+        for text in why[:-1]:
+            sentence(text.strip())
+        assert " PT " in why[-2]
+        problem = ppv.add_problem(lines[:2], ln, view, NAMES)
+        if problem:
+            sentence(problem)
+    sentence(ppv.dropped_text(ppv.pick_key(lines[0])))

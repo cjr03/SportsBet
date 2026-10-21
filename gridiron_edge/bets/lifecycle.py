@@ -1,4 +1,5 @@
 """Recommendation and bet lifecycle: dedupe, atomic confirm, expiry (integer cents)."""
+import hashlib
 import json
 import sqlite3
 from dataclasses import asdict
@@ -107,18 +108,31 @@ class Lifecycle:
             self.conn.execute(
                 "UPDATE recommendations SET state='EXPIRED' "
                 "WHERE leg_key=? AND state IN ('RECOMMENDED','PENDING')", (rec.leg_key,))
-            cur = self.conn.execute(
-                "INSERT INTO recommendations (kind, dedupe_key, leg_key, legs_json, stake_cents, qty,"
-                " ev, p_win, structure, snapshot_ts, expires_at, state, observe_only, tie_risk,"
-                " created_at, p_mkt) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (rec.kind, rec.dedupe_key, rec.leg_key, json.dumps([asdict(g) for g in rec.legs]),
-                 rec.stake_cents, rec.qty, rec.ev, rec.p_win, rec.structure,
-                 rec.snapshot_ts.isoformat(), rec.expires_at.isoformat(), state,
-                 int(rec.observe_only), int(rec.tie_risk), now.isoformat(), rec.p_mkt))
-            if rec.why is not None:
-                self.conn.execute("UPDATE recommendations SET why_json=? WHERE id=?",
-                                  (json.dumps(rec.why), cur.lastrowid))
-        return self.get_rec(cur.lastrowid), True
+            rec_id = self._insert(rec, now, rec.dedupe_key, state)
+        return self.get_rec(rec_id), True
+
+    def add_manual(self, rec: Recommendation, now: datetime) -> Recommendation:
+        """A bet idea you put together yourself (e.g. a PrizePicks entry picked on tab 5), saved as
+        RECOMMENDED so confirm can record it. Its own dedupe key, so an earlier skipped or expired
+        idea with the same picks never blocks it; other live ideas are left alone."""
+        key = hashlib.sha1(f"{rec.dedupe_key}|manual|{now.isoformat()}".encode()).hexdigest()
+        with self.conn:
+            rec_id = self._insert(rec, now, key, "RECOMMENDED")
+        return self.get_rec(rec_id)
+
+    def _insert(self, rec: Recommendation, now: datetime, dedupe_key: str, state: str) -> int:
+        cur = self.conn.execute(
+            "INSERT INTO recommendations (kind, dedupe_key, leg_key, legs_json, stake_cents, qty,"
+            " ev, p_win, structure, snapshot_ts, expires_at, state, observe_only, tie_risk,"
+            " created_at, p_mkt) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (rec.kind, dedupe_key, rec.leg_key, json.dumps([asdict(g) for g in rec.legs]),
+             rec.stake_cents, rec.qty, rec.ev, rec.p_win, rec.structure,
+             rec.snapshot_ts.isoformat(), rec.expires_at.isoformat(), state,
+             int(rec.observe_only), int(rec.tie_risk), now.isoformat(), rec.p_mkt))
+        if rec.why is not None:
+            self.conn.execute("UPDATE recommendations SET why_json=? WHERE id=?",
+                              (json.dumps(rec.why), cur.lastrowid))
+        return cur.lastrowid
 
     def get_rec(self, rec_id: int) -> Recommendation | None:
         r = self.conn.execute("SELECT * FROM recommendations WHERE id=?", (rec_id,)).fetchone()

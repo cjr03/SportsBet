@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import math
 import sqlite3
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, replace
@@ -1357,8 +1358,15 @@ class Services:
         lines = pipeline.pp_lines(snap, self.settings, self.projector)
         blocker = pipeline.pp_blocker(snap, self.settings, self.projector) if lines else ("no_lines", {})
         gated = {lg: pipeline._model_gated(snap, lg) for lg in LEAGUES}
-        return PPView(lines, snap.games, blocker, 0, self.settings, gated,
-                      self._next_props_load(now) if self.odds is not None else None)
+        st = self.settings
+        held = {lg: any(snap.gates.get((lg, k)) or snap.paused.get((lg, k)) for k in ("prop", "pp"))
+                for lg in LEAGUES}
+        return PPView(lines, snap.games, blocker, 0, st, gated,
+                      self._next_props_load(now) if self.odds is not None else None,
+                      props=[q for q in snap.props if q.book != "prizepicks"],
+                      budget=pipeline.Budget.from_snap(snap, st),
+                      daily_left=math.floor(st.cap_pp_daily * snap.bankroll_cents) - snap.pp_staked_today_cents,
+                      watch_only=held)
 
     def _pp_refresh_games(self, now: datetime) -> list[Game]:
         """Upcoming games in the next 24 h the odds service lists (so a props pull can run)."""

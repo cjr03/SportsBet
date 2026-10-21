@@ -180,3 +180,19 @@ def test_placed_today_filters_by_day_and_skips_cancelled(lc):
     lc.conn.execute("UPDATE bets SET state='CANCELLED' WHERE id=?", (other,))
     assert lc.placed_today_cents(NOW, pt) == stake
     assert lc.placed_today_cents(NOW + timedelta(days=1), pt) == 0
+
+
+def test_add_manual_pp_entry_is_never_blocked_by_an_old_skipped_idea(lc):
+    """An entry you pick yourself on tab 5 gets its own idea even when the same picks were skipped."""
+    leg = Leg("prizepicks", "x over 50.5", "over", 0.0, 0.6, "g", player="X", stat="rec_yds", line=50.5)
+    rec = Recommendation(None, "pp_entry", [leg], 500, None, 0.1, 0.3, "3-power", NOW, NOW + timedelta(hours=3))
+    old, _ = lc.upsert_recommendation(rec, NOW)
+    lc.skip(old.id)
+    again, new = lc.upsert_recommendation(rec, NOW)
+    assert not new and again.state == "SKIPPED"  # the dedupe would hand back the skipped idea
+    mine = lc.add_manual(rec, NOW + timedelta(minutes=1))
+    assert mine.id != old.id and mine.state == "RECOMMENDED" and mine.leg_key == old.leg_key
+    assert lc.get_rec(old.id).state == "SKIPPED"
+    bet_id = lc.confirm(mine.id, NOW + timedelta(minutes=2), stake_cents=700)
+    row = lc.conn.execute("SELECT * FROM bets WHERE id=?", (bet_id,)).fetchone()
+    assert row["stake_cents"] == 700 and row["kind"] == "pp_entry" and lc.ledger.balance() == 9300

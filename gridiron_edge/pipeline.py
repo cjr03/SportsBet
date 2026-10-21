@@ -905,6 +905,25 @@ def pp_blocker(snap: Snapshot, s: Settings, projector: Projector) -> tuple[str, 
 
 def _pp_rec(legs: list[Pick], st: tuple, ev: float, stake: int, observe: bool, table: dict,
             snap: Snapshot, rho: float = 0.0) -> Recommendation:
+    return pp_entry_rec(legs, st, ev, stake, observe, table, snap.now, snap.games, rho)
+
+
+def pp_stake(legs: list[Pick], st: tuple, table: dict, s: Settings, budget: "Budget", daily_left: int) -> int:
+    """Cents to put on one PrizePicks entry: robust Kelly on the available bankroll, shrunk per pick
+    source (and while the payout table is unverified), capped by the bet, daily PrizePicks and
+    game/slate limits. Never negative."""
+    f, _ = robust_kelly(legs, st, table, s.copula_rho)
+    mult = s.kelly_fraction * min(s.shrink_prop_anchored if pk.anchored else s.shrink_prop_model for pk in legs)
+    if not s.pp_payouts_verified:
+        mult *= s.pp_unverified_mult
+    avail = budget.available
+    cap = min(s.cap_bet * avail, daily_left, budget.cap_for(pk.game_id for pk in legs))
+    return max(0, math.floor(min(f * mult * avail, cap)))
+
+
+def pp_entry_rec(legs: list[Pick], st: tuple, ev: float, stake: int, observe: bool, table: dict,
+                 now: datetime, games: Mapping[str, Game], rho: float = 0.0) -> Recommendation:
+    """The pp_entry recommendation for these picks (built entries and ones you put together yourself)."""
     dist = worst_distribution(legs, st, table, rho)  # same-game picks: the correlation we fear most
     p_win = sum(dist[k] for k, mult in table[st].items() if mult > 1)
     out_legs = [Leg("prizepicks", f"{pk.player} {pk.side} {pk.line} {pk.stat}", pk.side, 0.0, pk.p,
@@ -913,7 +932,7 @@ def _pp_rec(legs: list[Pick], st: tuple, ev: float, stake: int, observe: bool, t
                 for pk in legs]
     p_mkt = p_win if all(pk.anchored for pk in legs) else None  # all-anchored legs: p_win is market-only
     return Recommendation(None, "pp_entry", out_legs, stake, None, ev, p_win, f"{st[0]}-{st[1]}",
-                          snap.now, min(snap.games[pk.game_id].kickoff for pk in legs), observe_only=observe,
+                          now, min(games[pk.game_id].kickoff for pk in legs), observe_only=observe,
                           p_mkt=p_mkt)
 
 
@@ -945,14 +964,7 @@ def pp_entry_candidates(snap: Snapshot, s: Settings, projector: Projector,
                       for g in games)
         stake = 0
         if not observe:
-            f, _ = robust_kelly(legs, st, table, s.copula_rho)
-            mult = s.kelly_fraction * min(s.shrink_prop_anchored if pk.anchored else s.shrink_prop_model
-                                          for pk in legs)
-            if not s.pp_payouts_verified:
-                mult *= s.pp_unverified_mult
-            avail = budget.available
-            cap = min(s.cap_bet * avail, daily_left, budget.cap_for(pk.game_id for pk in legs))
-            stake = math.floor(min(f * mult * avail, cap))
+            stake = pp_stake(legs, st, table, s, budget, daily_left)
             if stake < max(s.min_stake_cents, 1):
                 break
             daily_left -= stake

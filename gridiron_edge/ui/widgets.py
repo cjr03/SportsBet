@@ -17,6 +17,7 @@ from gridiron_edge import describe as d
 from gridiron_edge.types import Recommendation
 from gridiron_edge.ui.home import OpenBetView, pack, place_now_cells
 from gridiron_edge.ui import performance as perf
+from gridiron_edge.ui.prizepicks import PickKey, PickRow
 from gridiron_edge.ui.scores import ScoreRow
 
 PROFIT, LOSS, PENDING, ACCENT = "#22c55e", "#ef4444", "#f59e0b", "#22d3ee"
@@ -429,7 +430,8 @@ class PlaceNowList(OptionList):
     """Recs that can be placed right now, two lines each; Enter confirm, s skip, d why."""
 
     BINDINGS = [Binding("s", "skip", "Skip"), Binding("d", "why", "Why this bet?"),
-                Binding("enter", "select", "Confirm", show=True)]
+                Binding("enter", "select", "Confirm", show=True),
+                Binding("e", "load_entry", "Open in PrizePicks tab")]
     FLASH_S = 1.5
 
     class ConfirmRequested(Message):
@@ -441,6 +443,9 @@ class PlaceNowList(OptionList):
         pass
 
     class WhyRequested(ConfirmRequested):
+        pass
+
+    class LoadEntryRequested(ConfirmRequested):
         pass
 
     def __init__(self, **kw):
@@ -512,6 +517,83 @@ class PlaceNowList(OptionList):
     def action_why(self) -> None:
         if (i := self._current()) is not None:
             self.post_message(self.WhyRequested(i))
+
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if action == "load_entry":  # only PrizePicks entries can be opened on tab 5
+            i = self._current()
+            return any(r.id == i and r.kind == "pp_entry" for r in self.recs)
+        return True
+
+    def on_option_list_option_highlighted(self, _event: OptionList.OptionHighlighted) -> None:
+        self.refresh_bindings()
+
+    def action_load_entry(self) -> None:
+        if (i := self._current()) is not None:
+            self.post_message(self.LoadEntryRequested(i))
+
+
+class PickList(OptionList):
+    """A PrizePicks pick list (BEST PICKS NOW, ALL LINES): game headings are disabled rows; Enter or
+    space adds/removes the highlighted line in YOUR ENTRY, d explains it."""
+
+    BINDINGS = [Binding("enter", "select", "Add/remove pick"), Binding("space", "select", "Add/remove pick",
+                                                                       show=False),
+                Binding("d", "why", "Why this pick?")]
+
+    class ToggleRequested(Message):
+        def __init__(self, key: PickKey):
+            super().__init__()
+            self.key = key
+
+    class WhyRequested(ToggleRequested):
+        pass
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.rows: list[PickRow] = []
+
+    def set_rows(self, rows: list[PickRow]) -> None:
+        if rows == self.rows:
+            return
+        cur = self._current()
+        keep = self.highlighted
+        self.rows = list(rows)
+        opts = []
+        for i, r in enumerate(self.rows):
+            t = Text(r.text)
+            if r.heading:
+                t.stylize(f"bold {ACCENT}")
+            elif r.key is None:
+                t.stylize("#64748b")
+            elif r.chosen:
+                t.stylize(f"bold {PROFIT}", 0, 4)
+            opts.append(Option(t, id=f"r{i}", disabled=r.key is None))
+        self.set_options(opts)
+        keys = [r.key for r in self.rows]
+        if cur is not None and cur in keys:
+            self.highlighted = keys.index(cur)
+        elif any(k is not None for k in keys):
+            start = min(keep or 0, len(keys) - 1)
+            nxt = [i for i in range(start, len(keys)) if keys[i] is not None] or \
+                [i for i in range(len(keys)) if keys[i] is not None]
+            self.highlighted = nxt[0]
+
+    @property
+    def selectable(self) -> bool:
+        return any(r.key is not None for r in self.rows)
+
+    def _current(self) -> PickKey | None:
+        i = self.highlighted
+        return self.rows[i].key if i is not None and 0 <= i < len(self.rows) else None
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        event.stop()
+        if (k := self._current()) is not None:
+            self.post_message(self.ToggleRequested(k))
+
+    def action_why(self) -> None:
+        if (k := self._current()) is not None:
+            self.post_message(self.WhyRequested(k))
 
 
 class OpenBetsList(OptionList):

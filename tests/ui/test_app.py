@@ -6,7 +6,7 @@ from textual.widgets import Input, Static, TabbedContent
 from gridiron_edge.app import GridironApp
 from gridiron_edge.scheduler import Job
 from gridiron_edge.ui.screens import ConfirmScreen, WhyScreen
-from gridiron_edge.ui.widgets import BankrollHeader, EventLog, InfoLine, OpenBetsList, PlaceNowList
+from gridiron_edge.ui.widgets import BankrollHeader, EventLog, InfoLine, OpenBetsList, PickList, PlaceNowList
 
 # Five minutes after the fixtures' odds were pulled; Sunday's SEA game is ~31 h away.
 NOW = datetime(2026, 10, 31, 18, 5, tzinfo=UTC)
@@ -405,11 +405,158 @@ async def test_prizepicks_tab_and_home_status_line(services_mocked):
         await pilot.press("5")
         await pilot.pause()
         summary = str(app.query_one("#pp-summary", Static).render())
-        board = str(app.query_one("#pp-board", Static).render())
+        board = "\n".join(r.text for r in app.query_one("#pp-board", PickList).rows)
         assert "Lines as of" in summary and "Bears at Seahawks - kickoff" in board
         assert "needs about" in summary and "per pick" in summary
-        titles = [app.query_one(f"#{i}").border_title for i in ("pp-summary-box", "pp-best-box", "pp-scroll")]
-        assert titles == ["PRIZEPICKS", "BEST PICKS NOW", "ALL LINES"]
+        titles = [app.query_one(f"#{i}").border_title
+                  for i in ("pp-summary-box", "pp-best-box", "pp-entry-box", "pp-scroll")]
+        assert titles == ["PRIZEPICKS", "BEST PICKS NOW", "YOUR ENTRY", "ALL LINES"]
+        assert isinstance(app.focused, PickList)  # tab 5 lands in the picks
+
+
+def _pp_dump(app) -> str:
+    rows = [r.text for r in app.query_one("#pp-board", PickList).rows]
+    return "\n".join(rows) + "\n---\n" + str(app.query_one("#pp-entry", Static).render())
+
+
+def seed_pp(svc, game_id: str) -> None:
+    """Sportsbook-backed PrizePicks lines on the fixture game: two Seahawks and one Bears player."""
+    from gridiron_edge.types import PropQuote
+    seen = NOW - timedelta(minutes=5)
+    out = []
+    for player, team, stat, line, over in (("Geno Smith", "SEA", "pass_yds", 229.5, 1.52),
+                                           ("Kenneth Walker", "SEA", "rush_yds", 64.5, 1.56),
+                                           ("Caleb Williams", "CHI", "pass_yds", 219.5, 1.54)):
+        out.append(PropQuote("odds_api", "prizepicks", game_id, player, stat, "over", line, None, seen,
+                             fetched_at=seen))
+        under = round(1 / (1.045 - 1 / over), 3)
+        for book in ("draftkings", "fanduel"):
+            out += [PropQuote("odds_api", book, game_id, player, stat, side, line, dec, seen, fetched_at=seen)
+                    for side, dec in (("over", over), ("under", under))]
+        svc.player_teams[player] = team
+    svc.latest["props"] = out
+
+
+async def test_prizepicks_pick_two_lines_and_record_entry(services_mocked):
+    """Press 5, move, Enter on two picks from different teams, see YOUR ENTRY, c records the bet."""
+    svc = services_mocked(pp_structures=("2-power", "3-power", "4-flex", "5-flex", "6-flex"))
+    svc.ledger.deposit(100_000)
+    app = GridironApp(svc, clock=lambda: NOW)
+    async with app.run_test(size=(140, 60)) as pilot:
+        await app.workers.wait_for_complete()
+        seed_pp(svc, next(g.game_id for g in svc.registry.all_since(NOW - timedelta(days=1))
+                          if g.home == "SEA"))
+        app.refresh_views()
+        await pilot.pause()
+        await pilot.press("5")
+        await pilot.pause()
+        best = app.query_one("#pp-best", PickList)
+        assert app.focused is best, _pp_dump(app)
+        rows = best.rows
+        assert [r.key[0] for r in rows] == ["Geno Smith", "Caleb Williams", "Kenneth Walker"], _pp_dump(app)
+        await pilot.press("enter")  # Geno Smith
+        await pilot.pause()
+        assert best.rows[0].text.startswith("[x] 1. Geno Smith MORE than 229.5 passing yards - our chance ")
+        await pilot.press("down", "down", "enter")  # Kenneth Walker: same team, so not ready yet
+        await pilot.pause()
+        entry = str(app.query_one("#pp-entry", Static).render())
+        assert "Can't record yet: All your picks are on one team (Seahawks)" in entry, entry
+        await pilot.press("c")
+        await pilot.pause()
+        assert not isinstance(app.screen, ConfirmScreen) and "one team" in log_lines(app)[-1]
+        await pilot.press("space", "up", "enter")  # out with Walker, in with Caleb Williams (Bears)
+        await pilot.pause()
+        assert app._pp_selected == [("Geno Smith", "pass_yds", 229.5, "over"),
+                                    ("Caleb Williams", "pass_yds", 219.5, "over")]
+        entry = str(app.query_one("#pp-entry", Static).render())
+        assert "Best entry type for these 2 picks: 2-pick Power Play (every pick must hit)." in entry, entry
+        assert "All 2 hit: pays back $" in entry and "Expected profit: about $" in entry, entry
+        assert "linked" in entry  # same game: scored as linked picks
+        assert app.query_one("#pp-entry-box").border_title == "YOUR ENTRY (2 picks)"
+        stake = app._pp_eval.stake_cents
+        assert stake > 0
+        await pilot.press("c")
+        await pilot.pause()
+        assert isinstance(app.screen, ConfirmScreen)
+        assert app.screen.query_one("#stake", Input).value == f"{stake / 100:.2f}"
+        app.screen.query_one("#stake", Input).value = "5"
+        await pilot.click("#ok")
+        await pilot.pause()
+        (bet,) = svc.lifecycle.open_bets()
+        assert bet["kind"] == "pp_entry" and bet["stake_cents"] == 500 and bet["structure"] == "2-power"
+        assert svc.lifecycle.get_rec(bet["rec_id"]).state == "PLACED"
+        assert svc.ledger.balance() == 100_000 - 500
+        assert app._pp_selected == [] and "recorded from idea #" in "\n".join(log_lines(app))
+
+
+async def test_prizepicks_why_and_clear_keys(services_mocked):
+    svc = services_mocked()
+    app = GridironApp(svc, clock=lambda: NOW)
+    async with app.run_test(size=(140, 60)) as pilot:
+        await app.workers.wait_for_complete()
+        seed_pp(svc, next(g.game_id for g in svc.registry.all_since(NOW - timedelta(days=1)) if g.home == "SEA"))
+        app.refresh_views()
+        await pilot.pause()
+        await pilot.press("5", "enter")
+        await pilot.pause()
+        assert len(app._pp_selected) == 1
+        await pilot.press("d")
+        await pilot.pause()
+        assert isinstance(app.screen, WhyScreen)
+        text = app.screen.text
+        assert "Why this pick?" in str(app.screen.query_one("#why-title").render())
+        assert "DraftKings, line 229.5: MORE $1.52, LESS $2.58" in text and "Needed chance:" in text and "line pulled at" in text
+        await pilot.press("escape")
+        await pilot.pause()
+        app.query_one("#pp-best", PickList).focus()
+        await pilot.press("x")
+        await pilot.pause()
+        assert app._pp_selected == [] and "Cleared your PrizePicks entry." in log_lines(app)[-1]
+        await pilot.press("enter")
+        svc.latest["props"] = [q for q in svc.latest["props"] if q.player != "Geno Smith"]
+        app.refresh_views()
+        await pilot.pause()
+        assert app._pp_selected == [] and "Removed Geno Smith MORE than 229.5" in log_lines(app)[-1]
+
+
+async def test_place_now_e_opens_prizepicks_idea_and_c_reuses_its_id(services_mocked):
+    from gridiron_edge.pipeline import pp_entry_rec
+    from gridiron_edge.strategy.prizepicks import Pick, payout_table
+    svc = services_mocked(pp_structures=("2-power", "3-power"))
+    svc.ledger.deposit(100_000)
+    app = GridironApp(svc, clock=lambda: NOW)
+    async with app.run_test(size=(140, 60)) as pilot:
+        await app.workers.wait_for_complete()
+        game = next(g for g in svc.registry.all_since(NOW - timedelta(days=1)) if g.home == "SEA")
+        seed_pp(svc, game.game_id)
+        app.refresh_views()
+        await pilot.pause()
+        live = {ln.player: ln for ln in app._pp_view.lines}
+        legs = [Pick(ln.player, ln.team, ln.game_id, ln.stat, ln.line, ln.side, ln.p, ln.anchored)
+                for ln in (live["Geno Smith"], live["Caleb Williams"])]
+        rec = pp_entry_rec(legs, (2, "power"), 0.05, 1200, False, payout_table(svc.settings), NOW,
+                           {game.game_id: game})
+        saved, _ = svc.lifecycle.upsert_recommendation(rec, NOW)
+        app.refresh_views()
+        await pilot.pause()
+        place = app.query_one("#place-now", PlaceNowList)
+        assert [r.id for r in place.recs] == [saved.id]
+        place.focus()
+        await pilot.pause()
+        await pilot.press("e")
+        await pilot.pause()
+        assert app.query_one("#tabs", TabbedContent).active == "prizepicks"
+        assert [k[0] for k in app._pp_selected] == ["Geno Smith", "Caleb Williams"]
+        entry = str(app.query_one("#pp-entry", Static).render())
+        assert f"Same picks as PrizePicks idea #{saved.id} in PLACE NOW." in entry, entry
+        await pilot.press("c")
+        await pilot.pause()
+        assert isinstance(app.screen, ConfirmScreen) and app.screen.rec.id == saved.id
+        await pilot.click("#ok")
+        await pilot.pause()
+        (bet,) = svc.lifecycle.open_bets()
+        assert bet["rec_id"] == saved.id and bet["stake_cents"] == 1200
+        assert svc.conn.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0] == 1
 
 
 async def test_pp_refresh_asks_first_then_loads(services_mocked):

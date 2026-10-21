@@ -101,7 +101,7 @@ async def test_confirm_modal_returns_values():
             await pilot.press(*text)
         await pilot.click("#ok")
         await pilot.pause(0.3)
-        assert app.result == (0.47, 30)
+        assert app.result == (0.47, 30, None)
 
 
 async def test_confirm_modal_prizepicks_has_no_price_or_contracts():
@@ -116,9 +116,35 @@ async def test_confirm_modal_prizepicks_has_no_price_or_contracts():
         assert not app.screen.query("#price") and not app.screen.query("#qty")
         title = str(app.screen.query(Label).first().render())
         assert title == "Did you place PrizePicks entry #42 ($10.00, 5-pick Flex Play)?"
+        assert app.screen.query_one("#stake", Input).value == "10.00"
         await pilot.click("#ok")
         await pilot.pause(0.3)
-        assert app.result == (None, None)
+        assert app.result == (None, None, 1000)
+
+
+async def test_confirm_modal_prizepicks_stake_is_editable_and_checked():
+    leg = Leg(venue="prizepicks", description="x", side="over", price=0.0, p_fair=0.6, game_id="g",
+              player="Jalen Hurts", stat="pass_tds", line=1.5, team="PHI")
+    pp = Recommendation(id=None, kind="pp_entry", legs=[leg] * 3, stake_cents=0, qty=None, ev=-0.02,
+                        p_win=0.2, structure="3-power", snapshot_ts=T0, expires_at=T0 + timedelta(hours=1))
+    app = Harness()
+    async with app.run_test() as pilot:
+        app.push_screen(ConfirmScreen(pp), lambda r: setattr(app, "result", r))
+        await pilot.pause(0.3)
+        title = str(app.screen.query(Label).first().render())
+        assert title == "Did you place this PrizePicks entry (3-pick Power Play)?"
+        await pilot.click("#ok")  # no suggested amount: you must type one
+        await pilot.pause(0.3)
+        assert app.result == "unset" and app.screen.query_one("#error").display
+        for bad in ("abc", "0"):
+            app.screen.query_one("#stake", Input).value = bad
+            await pilot.click("#ok")
+            await pilot.pause(0.3)
+            assert app.result == "unset"
+        app.screen.query_one("#stake", Input).value = "$12.50"
+        await pilot.click("#ok")
+        await pilot.pause(0.3)
+        assert app.result == (None, None, 1250)
 
 
 async def test_confirm_modal_rejects_bad_price():

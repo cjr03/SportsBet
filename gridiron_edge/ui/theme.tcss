@@ -76,17 +76,26 @@ WatchList > .option-list--option { padding: 0 1; }
     color: #94a3b8;
 }
 #prizepicks { layout: vertical; }
-#pp-summary-box, #pp-best-box { height: auto; }
-#pp-scroll { height: 1fr; }
-#pp-summary-box, #pp-best-box, #pp-scroll {
+#pp-summary-box, #pp-best-box, #pp-entry-box { height: auto; }
+#pp-scroll { height: 1fr; min-height: 6; }
+#pp-summary-box, #pp-best-box, #pp-entry-box, #pp-scroll {
     background: $surface;
     border: round $accent 40%;
     border-title-color: $accent;
     border-title-style: bold;
 }
-#pp-scroll:focus-within { border: round $accent; }
 #pp-best-box { border: round $profit 40%; border-title-color: $profit; }
-#pp-summary, #pp-best, #pp-board { padding: 0 1; }
+#pp-entry-box { border: round $pending 40%; border-title-color: $pending; max-height: 18; }
+#pp-scroll:focus-within { border: round $accent; }
+#pp-best-box:focus-within { border: round $profit; }
+#pp-summary, #pp-entry { padding: 0 1; }
+#pp-best-empty { padding: 0 1; }
+PickList { background: $surface; border: none; padding: 0; }
+PickList:focus { border: none; }
+#pp-best { height: auto; max-height: 8; }
+#pp-board { height: 1fr; }
+PickList > .option-list--option { padding: 0 1; }
+PickList > .option-list--option-disabled { padding: 0 1; }
 
 #performance { layout: vertical; }
 #perf-top { height: 16; }

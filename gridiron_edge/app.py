@@ -26,10 +26,11 @@ from gridiron_edge.ui import prizepicks as pp_ui
 from gridiron_edge.ui.commands import COMMAND_WORDS, HELP, Command, CommandError, parse_command
 from gridiron_edge.ui.screens import ConfirmScreen, WhyScreen
 from gridiron_edge.ui.widgets import (
-    BalanceChart, BankrollHeader, EventLog, InfoLine, KpiTiles, OpenBetsList, PerfMoney, PerfTables, PlaceNowList,
-    QuotaBar, ScoresPanel, Section, WatchList,
+    BalanceChart, BankrollHeader, EventLog, InfoLine, KpiTiles, OpenBetsList, PerfMoney, PerfTables, PickList,
+    PlaceNowList, QuotaBar, ScoresPanel, Section, WatchList,
 )
 from gridiron_edge.ui import scores as scores_ui
+from gridiron_edge.pipeline import pp_entry_rec
 from gridiron_edge.strategy.prizepicks import payout_table
 
 _LEAGUE = {"nfl": "NFL", "cfb": "college football"}
@@ -54,6 +55,13 @@ TABS = ("home", "performance", "scores", "log", "prizepicks")
 
 def _money(cents: int) -> str:
     return d.money(cents)
+
+
+class PrizePicksPane(TabPane):
+    """Tab 5. Keys while a pick list has focus: Enter/space add or remove a pick, d explains it,
+    x clears YOUR ENTRY, c records an entry you placed on PrizePicks yourself."""
+
+    BINDINGS = [Binding("x", "app.pp_clear", "Clear entry"), Binding("c", "app.pp_confirm", "I placed this entry")]
 
 
 class CommandInput(Input):
@@ -120,6 +128,8 @@ class GridironApp(App):
         services.clock = clock  # the scheduler's view of "upcoming" follows the app clock
         self._active_jobs: set[tuple] = set()
         self._pp_view: pp_ui.PPView | None = None  # rebuilt with the other views, not every tick
+        self._pp_selected: list[pp_ui.PickKey] = []  # YOUR ENTRY on tab 5, in the order picked
+        self._pp_eval: pp_ui.EntryEval | None = None
 
     def compose(self) -> ComposeResult:
         yield BankrollHeader()
@@ -144,16 +154,20 @@ class GridironApp(App):
                 yield ScoresPanel()
             with TabPane("4 Log", id="log"):
                 yield EventLog()
-            with TabPane("5 PrizePicks", id="prizepicks"):
+            with PrizePicksPane("5 PrizePicks", id="prizepicks"):
                 with Vertical(id="pp-summary-box") as box:
                     box.border_title = "PRIZEPICKS"
                     yield Static("", id="pp-summary")
                 with Vertical(id="pp-best-box") as box:
                     box.border_title = "BEST PICKS NOW"
-                    yield Static("", id="pp-best")
-                with VerticalScroll(id="pp-scroll") as box:
+                    yield Static("No pick clears its needed chance yet.", id="pp-best-empty", classes="empty")
+                    yield PickList(id="pp-best")
+                with Vertical(id="pp-entry-box") as box:
+                    box.border_title = "YOUR ENTRY"
+                    yield Static("", id="pp-entry")
+                with Vertical(id="pp-scroll") as box:
                     box.border_title = "ALL LINES"
-                    yield Static("", id="pp-board")
+                    yield PickList(id="pp-board")
         yield Static("", id="status")
         with Horizontal(id="command-bar"):
             yield CommandInput(id="cmd", placeholder="Type a command (try: help). Keys 1-5 switch tabs.",
@@ -163,6 +177,13 @@ class GridironApp(App):
     # -- navigation -----------------------------------------------------------
     def action_show_tab(self, tab: str) -> None:
         self.query_one("#tabs", TabbedContent).active = tab
+        if tab == "prizepicks":  # straight into the picks, so Enter/d/x/c work at once
+            for lst in self.query(PickList):
+                if lst.display and lst.parent.display and lst.selectable:
+                    lst.focus()
+                    break
+        elif isinstance(self.focused, PickList):
+            self.action_focus_command()
 
     def action_focus_command(self) -> None:
         self.query_one("#cmd", Input).focus()
@@ -290,12 +311,137 @@ class GridironApp(App):
             return
         view.active = active
         self.query_one("#pp-status", Static).update(Text(pp_ui.status_line(view, now, self.names)))
-        summary, best, lines = pp_ui.board_sections(view, now, self.names)
+        summary, _, lines = pp_ui.board_sections(view, now, self.names)
         self.query_one("#pp-summary", Static).update(Text("\n".join(summary)))
-        self.query_one("#pp-best", Static).update(Text("\n".join(best) or "No pick clears its needed chance yet."))
-        self.query_one("#pp-best-box").display = bool(lines)
-        self.query_one("#pp-scroll").display = bool(lines)
-        self.query_one("#pp-board", Static).update(Text("\n".join(lines)))
+        kept, dropped = pp_ui.reconcile(self._pp_selected, view)
+        self._pp_selected = kept
+        for key in dropped:
+            self.log_event("warn", pp_ui.dropped_text(key))
+        chosen = set(kept)
+        best = pp_ui.best_rows(view, chosen, self.names)
+        self.query_one("#pp-best", PickList).set_rows(best)
+        self.query_one("#pp-best", PickList).display = bool(best)
+        self.query_one("#pp-best-empty").display = not best
+        self.query_one("#pp-board", PickList).set_rows(pp_ui.all_rows(view, chosen, now, self.names))
+        for box in ("#pp-best-box", "#pp-entry-box", "#pp-scroll"):
+            self.query_one(box).display = bool(lines)
+        self._show_pp_entry(view)
+
+    def _pp_picks(self, view: pp_ui.PPView) -> list:
+        live = pp_ui.pickable(view)
+        return [live[k] for k in self._pp_selected if k in live]
+
+    def _pp_match(self) -> Recommendation | None:
+        """A live built PrizePicks idea with exactly the picks in YOUR ENTRY (its id is reused)."""
+        keys, now = set(self._pp_selected), self.clock()
+        return next((r for r in self.services.lifecycle.pending()
+                     if r.kind == "pp_entry" and not r.observe_only and now < r.expires_at
+                     and {pp_ui.leg_pick_key(leg) for leg in r.legs} == keys), None)
+
+    def _show_pp_entry(self, view: pp_ui.PPView) -> None:
+        ev = pp_ui.evaluate_entry(self._pp_picks(view), view, self.names)
+        self._pp_eval = ev
+        out = pp_ui.entry_lines(ev, view, self.names)
+        match = self._pp_match() if ev.picks else None
+        if match is not None:
+            out.insert(len(ev.picks), f"Same picks as PrizePicks idea #{match.id} in PLACE NOW.")
+        box = self.query_one("#pp-entry-box")
+        box.border_title = f"YOUR ENTRY ({len(ev.picks)} pick{'s' * (len(ev.picks) != 1)})" if ev.picks \
+            else "YOUR ENTRY"
+        self.query_one("#pp-entry", Static).update(Text("\n".join(out)))
+
+    # -- PrizePicks tab keys: Enter/space toggle, d why, x clear, c record ---------------------------
+    def on_pick_list_toggle_requested(self, msg: PickList.ToggleRequested) -> None:
+        view = self._pp_view
+        if view is None:
+            return
+        live = pp_ui.pickable(view)
+        if msg.key in self._pp_selected:
+            self._pp_selected.remove(msg.key)
+            self.log_event("info", f"Took {pp_ui.pick_words(live[msg.key]) if msg.key in live else msg.key[0]} out "
+                                   "of your PrizePicks entry.")
+        elif msg.key not in live:
+            self.log_event("error", "That line can't be picked right now.")
+            return
+        else:
+            ln = live[msg.key]
+            problem = pp_ui.add_problem(self._pp_picks(view), ln, view, self.names)
+            if problem is not None:
+                self.log_event("error", problem)
+                return
+            self._pp_selected.append(msg.key)
+            self.log_event("info", f"Added {pp_ui.pick_words(ln)} to your PrizePicks entry "
+                                   f"({len(self._pp_selected)} pick{'s' * (len(self._pp_selected) != 1)}).")
+        self._show_pp(view.active, self.clock())
+
+    def on_pick_list_why_requested(self, msg: PickList.WhyRequested) -> None:
+        view = self._pp_view
+        ln = next((ln for ln in view.lines if pp_ui.pick_key(ln) == msg.key), None) if view else None
+        if ln is not None:
+            self.push_screen(WhyScreen(pp_ui.pick_why_lines(ln, view, self.clock(), self.names),
+                                       title="Why this pick?"))
+
+    def action_pp_clear(self) -> None:
+        if not self._pp_selected:
+            self.log_event("info", "Your PrizePicks entry is already empty.")
+            return
+        self._pp_selected = []
+        self.log_event("info", "Cleared your PrizePicks entry.")
+        if self._pp_view is not None:
+            self._show_pp(self._pp_view.active, self.clock())
+
+    def action_pp_confirm(self) -> None:
+        """Record a PrizePicks entry you placed yourself: the confirm modal, then a pp_entry idea and bet."""
+        view, ev = self._pp_view, self._pp_eval
+        if view is None or ev is None or not ev.picks:
+            self.log_event("error", "Your PrizePicks entry is empty: pick 2 to 6 lines with Enter first.")
+            return
+        if not ev.ready:
+            self.log_event("error", ev.problems[0] if ev.problems else "This entry can't be worked out.")
+            return
+        now, st = self.clock(), self.services.settings
+        match = self._pp_match()
+        rec = match or pp_entry_rec(ev.legs, ev.structure, ev.ev or 0.0, ev.stake_cents, False, payout_table(st),
+                                    now, view.games, st.copula_rho)
+        keys = list(self._pp_selected)
+
+        def done(result: tuple[float | None, int | None, int | None] | None) -> None:
+            if result is None:
+                self.log_event("info", "PrizePicks entry not recorded.")
+                return
+            lc, saved = self.services.lifecycle, None
+            try:
+                if match is None:
+                    saved = lc.add_manual(rec, self.clock())
+                self._confirm((match or saved).id, None, None, result[2])
+            except InsufficientFunds as e:
+                self._drop_manual(saved)
+                self.log_event("error", _funds_error(e))
+            except _USER_ERRORS as e:
+                self._drop_manual(saved)
+                self.log_event("error", error_text(e))
+            else:
+                if self._pp_selected == keys:
+                    self._pp_selected = []
+            self.refresh_views()
+
+        self.push_screen(ConfirmScreen(rec, self.names), done)
+
+    def _drop_manual(self, rec: Recommendation | None) -> None:
+        """A self-built idea whose confirm failed: skip it so it never shows up in PLACE NOW."""
+        if rec is not None and rec.id is not None:
+            self.services.lifecycle.skip(rec.id)
+
+    def on_place_now_list_load_entry_requested(self, msg: PlaceNowList.LoadEntryRequested) -> None:
+        rec = self.services.lifecycle.get_rec(msg.rec_id)
+        if rec is None or rec.kind != "pp_entry":
+            self.log_event("error", "Only PrizePicks entries can be opened on the PrizePicks tab.")
+            return
+        self._pp_selected = [pp_ui.leg_pick_key(leg) for leg in rec.legs]
+        self.log_event("info", f"Opened PrizePicks idea #{rec.id} in YOUR ENTRY on tab 5.")
+        if self._pp_view is not None:
+            self._show_pp(self._pp_view.active, self.clock())
+        self.action_show_tab("prizepicks")
 
     def _settled_today(self, now: datetime) -> list:
         day = now.astimezone(PT).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -446,8 +592,8 @@ class GridironApp(App):
                                    else f"Type: {usage}  -  {what[:1].upper() + what[1:]}")
                 self.action_show_tab("log")
 
-    def _confirm(self, rec_id: int, price: float | None, qty: int | None) -> None:
-        bet_id = self.services.lifecycle.confirm(rec_id, self.clock(), price, qty)
+    def _confirm(self, rec_id: int, price: float | None, qty: int | None, stake_cents: int | None = None) -> None:
+        bet_id = self.services.lifecycle.confirm(rec_id, self.clock(), price, qty, stake_cents)
         self.log_event("confirm", f"Bet #{bet_id} recorded from idea #{rec_id}. Bankroll is now "
                                   f"{_money(self.services.ledger.balance())}.")
 
@@ -545,7 +691,7 @@ class GridironApp(App):
         if rec is None:
             return
 
-        def done(result: tuple[float | None, int | None] | None) -> None:
+        def done(result: tuple[float | None, int | None, int | None] | None) -> None:
             if result is None:
                 self.log_event("info", f"Bet idea #{rec.id} not confirmed.")
                 return
