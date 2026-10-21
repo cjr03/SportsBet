@@ -105,8 +105,31 @@ def _at_least(line: float) -> int:
     return math.floor(line) + 1
 
 
+_STAT_PARTS = {"yds": "yards", "tds": "touchdowns", "td": "touchdown", "rec": "receiving", "reception": "receiving",
+               "pass": "passing", "rush": "rushing", "int": "interceptions", "ints": "interceptions"}
+
+
 def stat_words(stat: str | None) -> str:
-    return STAT_WORDS.get(stat or "", (stat or "").replace("_", " "))
+    """'pass_yds' -> 'passing yards'; unknown keys (e.g. 'player_kicking_pts') spelled out word by word."""
+    key = (stat or "").removeprefix("player_")
+    if key in STAT_WORDS:
+        return STAT_WORDS[key]
+    return " ".join(_STAT_PARTS.get(w, w) for w in key.split("_") if w)
+
+
+def margin_text(team: str, line: float, yes: bool = True) -> str:
+    """'<team> wins by more than <line>' in words, for any line (zero and negative lines included).
+
+    YES pays when the margin is at least k = floor(line) + 1; NO when it is k - 1 or less.
+    """
+    k = math.floor(line) + 1
+    if yes:
+        if k >= 1:
+            return f"{team} win by {k} or more points"
+        return f"{team} win or tie" if k == 0 else f"{team} win, tie, or lose by {-k} or fewer points"
+    if k >= 1:
+        return f"{team} do NOT win by {k} or more points"
+    return f"{team} lose" if k == 0 else f"{team} lose by {1 - k} or more points"
 
 
 # -- legs -------------------------------------------------------------------------
@@ -146,8 +169,7 @@ def leg_text(leg: Leg, names: Names = DEFAULT_NAMES) -> str:
     opp_code = away if leg.team == home else home if leg.team == away else None
     vs = f" vs {names.team(league, opp_code)}" if opp_code else ""
     if kind == "spread":
-        cond = f"win by {_at_least(leg.line)} or more points"
-        return f"{team} {cond if yes else 'do NOT ' + cond}{vs}"
+        return margin_text(team, leg.line, yes) + vs
     if opp_code:
         return f"{team} beat {names.team(league, opp_code)}" if yes else \
             f"{team} do NOT beat {names.team(league, opp_code)}"

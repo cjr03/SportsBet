@@ -140,8 +140,8 @@ async def test_missing_keys_app_still_starts(services_mocked):
         await app.workers.wait_for_complete()
         await pilot.pause()
         text = "\n".join(log_lines(app))
-        assert "disabled" in text
-        assert all(name in text for name in ("odds_api", "therundown", "cfbd"))
+        assert "Not set up (no key in .env)" in text
+        assert all(name in text for name in ("The Odds API", "TheRundown", "College Football Data"))
         assert "Kalshi: working" in text
         await submit(app, pilot, "deposit 5")
         assert svc.ledger.balance() == 500 and app.is_running
@@ -154,7 +154,7 @@ async def test_auth_error_logged_once(services_mocked):
     lines = []
     for _ in range(2):
         lines += await svc.run_job(EARLY, NOW)
-    assert [ln for ln in lines if ln[0] == "error"] == [("error", "odds_api: invalid key - disabled")]
+    assert [ln for ln in lines if ln[0] == "error"] == [("error", "The Odds API (sportsbook prices) rejected the key in .env, so it is turned off.")]
     assert svc.odds.disabled
 
 
@@ -163,9 +163,9 @@ async def test_first_run_checks_logged_once(services_mocked):
     lines = await svc.startup(NOW)
     info = [m for k, m in lines if k == "info"]
     assert any(m.startswith("Sportsbooks on the odds service:") and "Pinnacle" in m for m in info)
-    assert "Scores service: free plan, scores about 5 min behind" in info
-    assert "College football data: 998 calls left this month" in info and "Kalshi: working" in info
-    assert 'notify: run "notify test" to confirm your phone alerts' in info
+    assert "Scores service: free plan, scores about 5 minutes behind." in info
+    assert "College Football Data: 998 free calls left this month." in info and "Kalshi: working." in info
+    assert 'Texts: type "notify test" to check that your phone gets them.' in info
     again = [m for _, m in await svc.startup(NOW)]
     assert not any(m.startswith("Sportsbooks on the odds service:") for m in again)
 
@@ -407,7 +407,7 @@ async def test_pp_refresh_asks_first_then_loads(services_mocked):
         await app.workers.wait_for_complete()
         await submit(app, pilot, "pp refresh")
         last = log_lines(app)[-1]
-        assert "This uses about 3 credits per game x 1 game = 3 of your" in last and "Type: pp refresh yes" in last
+        assert "This uses about 3 Odds API credits (1 game) out of" in last and "Type: pp refresh yes" in last
         await submit(app, pilot, "pp refresh yes")
         await app.workers.wait_for_complete()
         await pilot.pause()

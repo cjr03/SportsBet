@@ -89,8 +89,8 @@ def test_format_pp_plain_english(rec_pp):
     assert t.startswith("Bet idea #42 (PrizePicks 3-pick Flex Play, $10.00): "
                         "1) Jalen Hurts MORE than 1.5 passing touchdowns (61%) "
                         "2) Player 1 MORE than 51.5 receiving yards (60%) ")
-    assert "Expected profit about $0.94." in t and "Check the app shows 3x / 1x payouts" in t
-    assert "Lines as of 10:05 AM." in t and t.endswith("When placed, type: confirm 42")
+    assert "Expected profit about $0.94." in t and "Check the app pays 3 times your entry for 3 right, your entry back for 2." in t
+    assert "Lines as of 10:05 AM PT." in t and t.endswith("When placed, type: confirm 42")
 
 
 def test_format_pp_long_entry_fits(rec_pp):
@@ -269,3 +269,8 @@ def test_every_rec_kind_formats_in_plain_english(rec_kalshi, rec_pp, rec_arb):
     assert '"Jalen Hurts 2 or more passing touchdowns" (you win if it does NOT happen)' in format_message(prop)
     assert format_message(middle).startswith('Not risk-free #44 (Kalshi): Buy 20 "Yes" on "Eagles win by 3 or '
                                              'more points vs Cowboys" AND 20 "No" on')
+
+
+def test_format_pp_uses_the_payout_table_in_use(rec_pp):
+    t = format_message(rec_pp, payouts={(3, "flex"): {3: 2.25, 2: 1.25}})
+    assert "pays 2.25 times your entry for 3 right, 1.25 times for 2" in t

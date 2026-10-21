@@ -10,6 +10,10 @@ MODEL_VERSION = "cfb-ridge-v1"
 MARGIN_CAP = 28.0
 WEEKLY_DECAY = 0.97
 UNKNOWN_PRIOR = -20.0
+# home-field edge is fit without a penalty, so a handful of games can push it to the margin cap;
+# real college home edges are a few points, so the fit is held to this range
+HFA_CAP = 7.0
+MIN_HFA_GAMES = 50  # fewer completed games than this: the home edge is too noisy to report
 CENTRE_MIN_GAMES = 6
 # share of the market-implied (closing-spread) rating in last season's P; a heuristic, not fitted
 W_MARKET = 0.5
@@ -27,9 +31,10 @@ def _game_date(g: dict) -> date:
 
 
 class CfbRatings:
-    def __init__(self, ratings: dict[str, float], hfa: float):
+    def __init__(self, ratings: dict[str, float], hfa: float, n_games: int = 0):
         self.ratings = ratings
         self.hfa = hfa
+        self.n_games = n_games  # completed games in the fit (0: ratings from priors alone)
 
     @classmethod
     def fit(cls, games: list[dict], priors: dict[str, float], asof: date,
@@ -55,7 +60,7 @@ class CfbRatings:
         prior = np.array([priors.get(t, UNKNOWN_PRIOR) for t in teams] + [0.0])
         penalty = np.concatenate([np.full(n, lam), [0.0]])
         beta = weighted_ridge(X, y, w, penalty, prior)
-        return cls({t: float(beta[idx[t]]) for t in teams}, float(beta[n]))
+        return cls({t: float(beta[idx[t]]) for t in teams}, float(np.clip(beta[n], -HFA_CAP, HFA_CAP)), len(used))
 
     def predict(self, home: str, away: str, neutral: bool) -> float:
         return (self.ratings.get(home, UNKNOWN_PRIOR) - self.ratings.get(away, UNKNOWN_PRIOR)

@@ -28,6 +28,7 @@ class NotifyChain:
         self.enabled = enabled
         self.tz = tz
         self.names = DEFAULT_NAMES  # build_services swaps in one that knows CFB school names
+        self.payouts = None  # PrizePicks payout table in use (None: the built-in tables); set by Services
 
     def _quiet(self, now: datetime) -> bool:
         start, end = self.quiet_hours
@@ -65,7 +66,10 @@ class NotifyChain:
         if not force and (self._already_sent(rec.dedupe_key)
                           or (rec.kind != "arb" and (self._quiet(now) or self._cooling_down(rec.leg_key, now)))):
             return None
-        return self._send(format_message(rec, self.tz, self.names), now, rec, only_first_ok=rec.kind != "arb")
+        return self._send(self.format(rec), now, rec, only_first_ok=rec.kind != "arb")
+
+    def format(self, rec: Recommendation) -> str:
+        return format_message(rec, self.tz, self.names, self.payouts)
 
     def send_text(self, text: str, now: datetime) -> NotifyResult:
         """For `notify test`: ignores dedupe and quiet hours."""

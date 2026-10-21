@@ -847,7 +847,7 @@ def _plain_legs(legs: list[Leg], snap: Snapshot, g: Game) -> list[Leg]:
     """Describe each Kalshi leg as the outcome its "Yes" pays on, not by ticker."""
     mtype = {m.ticker: m.market_type for m in snap.kalshi}
     return [replace(leg, description=contract_text(mtype.get(leg.ticker or "", "spread"), leg.team, leg.line,
-                                                   g.away, g.home)) for leg in legs]
+                                                   g.away, g.home, g.league)) for leg in legs]
 
 
 def _middle_legging(legs: list[Leg], qty: int, p_mid: float, depth: dict[tuple[str, str], float]) -> list[Leg]:

@@ -163,3 +163,20 @@ def test_open_positions_and_placed_today(lc):
     assert pos[0][2][0].ticker == "KXNFLGAME-26OCT25DALPHI-DAL"
     pt = ZoneInfo("America/Los_Angeles")
     assert lc.placed_today_cents(NOW, pt) == round(40 * 0.46 * 100)
+
+
+def test_placed_today_filters_by_day_and_skips_cancelled(lc):
+    from zoneinfo import ZoneInfo
+    pt = ZoneInfo("America/Los_Angeles")
+    a, _ = lc.upsert_recommendation(kalshi_rec(), NOW)
+    lc.confirm(a.id, NOW)
+    b, _ = lc.upsert_recommendation(kalshi_rec(ticker="OTHER"), NOW)
+    other = lc.confirm(b.id, NOW)
+    stake = round(40 * 0.46 * 100)
+    assert lc.placed_today_cents(NOW, pt) == 2 * stake
+    # a bet stamped in another timezone on the same PT day still counts once
+    lc.conn.execute("UPDATE bets SET placed_at=? WHERE id=?", (NOW.astimezone(pt).isoformat(), other))
+    assert lc.placed_today_cents(NOW, pt) == 2 * stake
+    lc.conn.execute("UPDATE bets SET state='CANCELLED' WHERE id=?", (other,))
+    assert lc.placed_today_cents(NOW, pt) == stake
+    assert lc.placed_today_cents(NOW + timedelta(days=1), pt) == 0

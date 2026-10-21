@@ -66,6 +66,10 @@ class LifecycleError(Exception):
     pass
 
 
+# bets taken back (an undo) or cancelled before they counted: not part of today's placed total
+CANCELLED_STATES = ("CANCELLED", "UNDONE")
+
+
 def _dt(s: str) -> datetime:
     return datetime.fromisoformat(s)
 
@@ -217,16 +221,20 @@ class Lifecycle:
         return [(r["kind"], r["stake_cents"], [Leg(**d) for d in json.loads(r["legs_json"])])
                 for r in self.open_bets()]
 
+    def _staked_since(self, now: datetime, tz: tzinfo, where: str, params: tuple = ()) -> int:
+        """Stakes placed on the local calendar day of `now`, filtered in SQL. julianday() reads the
+        ISO offsets, so bets stamped in any timezone compare correctly; cancelled bets never count."""
+        start = now.astimezone(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+        end = start + timedelta(days=1)
+        return self.conn.execute(
+            "SELECT COALESCE(SUM(stake_cents), 0) FROM bets WHERE julianday(placed_at) >= julianday(?) "
+            f"AND julianday(placed_at) < julianday(?) AND state NOT IN {CANCELLED_STATES!r} AND {where}",
+            (start.isoformat(), end.isoformat(), *params)).fetchone()[0]
+
     def placed_today_cents(self, now: datetime, tz: tzinfo, exclude: tuple[str, ...] = ("arb", "middle")) -> int:
         """Stakes placed on the local calendar day of `now` (hedged kinds excluded)."""
-        start = now.astimezone(tz).replace(hour=0, minute=0, second=0, microsecond=0)
-        end = start + timedelta(days=1)
-        return sum(r["stake_cents"] for r in self.conn.execute("SELECT kind, stake_cents, placed_at FROM bets")
-                   if r["kind"] not in exclude and start <= _dt(r["placed_at"]) < end)
+        marks = ",".join("?" * len(exclude)) or "''"
+        return self._staked_since(now, tz, f"kind NOT IN ({marks})", tuple(exclude))
 
     def pp_staked_today_cents(self, now: datetime, tz: tzinfo) -> int:
-        start = now.astimezone(tz).replace(hour=0, minute=0, second=0, microsecond=0)
-        end = start + timedelta(days=1)
-        return sum(r["stake_cents"] for r in self.conn.execute(
-            "SELECT stake_cents, placed_at FROM bets WHERE kind='pp_entry'")
-            if start <= _dt(r["placed_at"]) < end)
+        return self._staked_since(now, tz, "kind='pp_entry'")

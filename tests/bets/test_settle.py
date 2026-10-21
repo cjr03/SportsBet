@@ -280,3 +280,13 @@ def test_middle_with_one_leg_paying_is_lost(env):
     bet_id = place(lc, [lo, hi], kind="middle", qty=10, stake=1020)
     done = st.settle_ready(KICK + timedelta(hours=4), lambda t: None, no_stat)
     assert done == [(bet_id, "lost", 1000)]  # $1 a pair back on $1.02 a pair: a loss, payout kept
+
+
+def test_pp_exact_hit_on_whole_number_line_is_a_push_not_an_under():
+    # PrizePicks treats a stat landing exactly on the line as a push: the pick is dropped (refund),
+    # never graded as a win for LESS
+    legs = [pleg(f"P{i}", line=50.0, side="under", team=f"T{i}", game_id=f"g{i}") for i in range(3)]
+    stats = {("P0", "rec_yds"): 50, ("P1", "rec_yds"): 40.0, ("P2", "rec_yds"): 30.0}
+    assert grade_pp_entry(legs, (3, "power"), stats) == ("won", 3.0)  # 2 hits on a 2-pick power after the push
+    stats = {("P0", "rec_yds"): 50, ("P1", "rec_yds"): 50.0, ("P2", "rec_yds"): 30.0}
+    assert grade_pp_entry(legs, (3, "power"), stats) == ("refund", 1.0)  # one pick left: the entry is refunded

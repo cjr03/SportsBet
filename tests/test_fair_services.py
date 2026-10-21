@@ -41,7 +41,7 @@ def test_cfb_margin_model_from_cached_lines_only(services_mocked):
     svc = services_mocked()
     out = svc._fit_cfb_margin(NOW)
     assert CFB_MARGIN_KEY not in svc.margin_models
-    assert any("bell curve" in line for _, line in out)
+    assert any("rough estimate" in line for _, line in out)
     rng = np.random.default_rng(4)
     rows = []
     for i in range(700):

@@ -140,6 +140,8 @@ _LEAGUE_WORD = {"nfl": "NFL", "cfb": "college football"}
 _TYPE_WORD = {"ml": "game-winner bets", "spread": "point-spread bets", "total": "total-points bets",
               "prop": "player-prop bets", "prizepicks": "PrizePicks entries"}
 MIN_CAL_N = 10
+CALIBRATION_WARNING = ("Warning: lately our chances have come true less often than they did when we tested "
+                       "them on past games. Bets are not paused for this; keep an eye on it.")
 
 
 def segment_label(seg: str) -> str:
@@ -363,11 +365,9 @@ def summary_lines(r: dict) -> list[str]:
         out.append(f"Biggest drop from a high point: {_money(dd['max_dd_cents'])} ({_pct(dd['max_dd_pct'], False)}). "
                    f"Now {_money(dd['current_dd_cents'])} below the high.")
     for seg in r["drift"]["segments"].values():
-        if seg["alarm"]:
-            out.append(f"Warning: {seg['label']} have been getting worse prices than the close lately "
-                       f"(last {seg['n']} averaged {_pct(seg['mean'])}). New ones are paused to watch-only.")
-    cd = r["drift"]["calibration"]
-    if cd["worse"]:
-        out.append(f"Warning: our chances have been less accurate lately ({cd['rolling_brier']:.3f}) than "
-                   f"in testing ({cd['backtest_brier']:.3f}).")
+        if seg["alarm"]:  # whether it is paused is a separate "Paused ..." line (services.report)
+            out.append(f"Warning: {seg['label']} have been getting worse prices than the closing price lately "
+                       f"(the last {seg['n']} averaged {abs(seg['mean']) * 100:.1f}% worse).")
+    if r["drift"]["calibration"]["worse"]:
+        out.append(CALIBRATION_WARNING)
     return out

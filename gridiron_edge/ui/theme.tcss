@@ -89,10 +89,6 @@ KpiTiles { height: auto; padding: 0 1; }
 QuotaBar { height: auto; padding: 0 1; }
 QuotaBar.low { color: $loss; }
 
-OpportunityTable > .flash {
-    background: $accent 30%;
-}
-
 .profit { color: $profit; }
 .loss { color: $loss; }
 .pending { color: $pending; }

@@ -90,7 +90,7 @@ def test_cfb_clv_recorded_from_market(services_mocked, mk):
     svc.ledger.deposit(100_00)
     bet = svc.lifecycle.confirm(rec.id, NOW)
     out = svc._record_clv(NOW)
-    assert any(f"bet {bet}:" in msg for _, msg in out), out
+    assert any(f"Bet #{bet}:" in msg for _, msg in out), out
 
 
 def _line_rows(year, strong="Georgia", weak="Akron", n=8):

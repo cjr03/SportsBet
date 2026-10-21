@@ -39,7 +39,7 @@ def test_cfb_bet_gets_clv(services_mocked, mk):
     out = svc._record_clv(NOW)
     clv = svc.conn.execute("SELECT clv FROM bets WHERE id=?", (bet,)).fetchone()[0]
     assert clv is not None and clv > 0  # home -7 line makes "wins by >3.5" likelier than 50 cents
-    assert any(f"bet {bet}" in msg for _, msg in out)
+    assert any(f"Bet #{bet}" in msg for _, msg in out)
 
 
 def test_observe_and_unconfirmed_recs_get_shadow_clv(services_mocked, mk):
@@ -143,8 +143,8 @@ def test_calibration_drift_logged_once(services_mocked, mk):
         bet = svc.lifecycle.confirm(rec.id, NOW)
         svc.settler.manual_settle(bet, "lost", now=NOW)
     out = svc.check_drift(NOW)
-    assert any(k == "warn" and "less accurate" in msg for k, msg in out)
-    assert not [1 for k, msg in svc.check_drift(NOW) if "less accurate" in msg]
+    assert any(k == "warn" and "come true less often" in msg for k, msg in out)
+    assert not [1 for k, msg in svc.check_drift(NOW) if "come true less often" in msg]
 
 
 def test_record_clv_skips_work_when_nothing_kicks_off_soon(services_mocked):
@@ -215,6 +215,8 @@ def test_performance_adds_report_calibration_warnings_and_pauses(services_mocked
     assert {"roi", "roi_ci", "conclusive", "record"} <= set(perf)  # the KPI tiles' own numbers
     assert any(w.startswith("Warning: NFL point-spread bets") for w in perf["warnings"])
     assert any("type: drift reset nfl spread" in w for w in perf["warnings"])
+    assert sum("drift reset nfl spread" in w for w in perf["warnings"]) == 1  # one pause line, not two
+    assert sum("paused" in w.lower() for w in perf["warnings"]) == 1
     assert any(x.startswith("Beat the closing price") for x in perf["extra"])
     for line in perf["warnings"] + perf["extra"]:
         assert line.isascii() and not any(j in line for j in ("CLV", "Brier", "ROI", "EV "))

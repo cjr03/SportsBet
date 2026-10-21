@@ -150,3 +150,24 @@ def test_middle_expected_profit_and_why():
     assert d.expected_profit_cents(mid) == round(20 * 1.18 * 100) - cost - fee
     text = "\n".join(d.why_lines(mid, NOW))
     assert "Not risk-free" in text and "18% chance" in text
+
+
+def test_leg_text_zero_and_negative_spread_lines():
+    from gridiron_edge.describe import leg_text
+    from gridiron_edge.types import Leg
+    gid = "nfl:20261025:DAL@PHI"
+    def leg(line, side="yes"):
+        return Leg("kalshi", "x", side, 0.5, 0.5, gid, ticker="KXNFLSPREAD-X", line=line, team="PHI")
+    assert leg_text(leg(-0.5)) == "Eagles win or tie vs Cowboys"
+    assert leg_text(leg(-0.5, "no")) == "Eagles lose vs Cowboys"
+    assert leg_text(leg(-3.5)) == "Eagles win, tie, or lose by 3 or fewer points vs Cowboys"
+    assert leg_text(leg(-3.5, "no")) == "Eagles lose by 4 or more points vs Cowboys"
+    assert leg_text(leg(3.5, "no")) == "Eagles do NOT win by 4 or more points vs Cowboys"
+    assert "0 or more" not in leg_text(leg(-0.5))
+
+
+def test_stat_words_spells_out_unknown_keys():
+    from gridiron_edge.describe import stat_words
+    assert stat_words("player_pass_yds") == "passing yards"
+    assert stat_words("rush_yds") == "rushing yards"
+    assert "_" not in stat_words("player_kicking_points")

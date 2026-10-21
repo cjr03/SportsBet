@@ -156,18 +156,21 @@ class OpenBetView:
 
 
 def _pp_progress(legs: list[Leg], stat_lookup: StatLookup | None) -> str:
-    hit = missed = pending = 0
+    hit = missed = pushed = pending = 0
     for leg in legs:
         v = stat_lookup(leg.game_id or "", leg.player or "", leg.stat or "") if stat_lookup else "pending"
         if v == "pending" or leg.line is None:
             pending += 1
         elif v is None:
             missed += 1  # did not play: PrizePicks reverts the entry, but the pick is dead
+        elif abs(float(v) - leg.line) < 1e-9:
+            pushed += 1  # landed exactly on the line: PrizePicks drops the pick (a push), neither side wins
         elif (float(v) > leg.line) == (leg.side == "over"):
             hit += 1
         else:
             missed += 1
-    parts = [f"{n} {w}" for n, w in ((hit, "hit"), (missed, "missed"), (pending, "pending")) if n]
+    parts = [f"{n} {w}" for n, w in ((hit, "hit"), (missed, "missed"), (pushed, "pushed (exactly on the line)"),
+                                     (pending, "pending")) if n]
     return ", ".join(parts) or "-"
 
 
@@ -190,7 +193,8 @@ def open_bet_view(bet, games: dict[str, Game], markets: dict[str, KalshiMarket],
                 total = None
                 break
             bid = _bid(m, leg.side)
-            total += round(qty * bid * 100) - (round(taker_fee(qty, bid) * 100) if 0 < bid < 1 else 0)
+            fee = round(taker_fee(qty, bid, leg.fee_multiplier) * 100) if 0 < bid < 1 else 0
+            total += round(qty * bid * 100) - fee
         if total is not None:
             pnl = total - paid
             sign = "+" if pnl >= 0 else "-"

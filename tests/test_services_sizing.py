@@ -112,7 +112,7 @@ async def test_pp_refresh_plan_stays_within_budget(services_mocked):
     svc = services_mocked()
     await svc.startup(NOW)
     games, text = svc.pp_refresh_plan(NOW + timedelta(hours=10))
-    assert len(games) == 1 and "3 credits per game x 1 game = 3 of your" in text and text.endswith("pp refresh yes")
+    assert len(games) == 1 and "3 Odds API credits (1 game) out of 480 left this month." in text and text.endswith("pp refresh yes")
     svc.odds.budget.record(52, 448, 3)  # just above the guard's 50-credit floor
     games, text = svc.pp_refresh_plan(NOW + timedelta(hours=10))
     assert games == [] and "Nothing can load now." in text

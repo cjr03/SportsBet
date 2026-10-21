@@ -109,6 +109,8 @@ async def test_nfl_totals_gated_separately(services_mocked):
 
     svc.backtest_totals = totals
     await svc.fit_gates(NOW + timedelta(days=7))
+    assert svc.gates[("nfl", "total")] is True  # one passing check is not enough yet
+    assert ("nfl", "total") not in svc.snapshot(NOW).blend_fits  # so the totals model gets no weight
     await svc.fit_gates(NOW + timedelta(days=14))
     assert svc.gates[("nfl", "total")] is False
     assert svc.snapshot(NOW).blend_fits[("nfl", "total")] == (0.5, 0.05)

@@ -9,7 +9,7 @@ from textual.binding import Binding
 from textual.containers import Vertical
 from textual.message import Message
 from textual.reactive import reactive
-from textual.widgets import DataTable, OptionList, RichLog, Static, TabbedContent, TabPane
+from textual.widgets import DataTable, OptionList, RichLog, Static
 from textual.widgets.option_list import Option
 from textual_plotext import PlotextPlot
 
@@ -70,9 +70,9 @@ class BalanceChart(PlotextPlot):
         plt.canvas_color(_SURFACE_RGB)
         plt.axes_color(_SURFACE_RGB)
         plt.ticks_color((148, 163, 184))
-        if not history:
-            self.status = "no history yet"
-            plt.title("no history yet")
+        if len(history) < 2:  # one point is not a line
+            self.status = "No bankroll history yet"
+            plt.title("No bankroll history yet - the chart starts after your first deposit and bet")
             self.refresh()
             return
         self.status = ""
@@ -89,8 +89,9 @@ class BalanceChart(PlotextPlot):
             if pts:
                 plt.scatter([p[0] for p in pts], [p[1] for p in pts], marker=glyph,
                             color=(255, 255, 255))
-        plt.xlabel("hours")
-        plt.ylabel("$")
+        plt.title("Bankroll over time")
+        plt.xlabel("hours since first deposit")
+        plt.ylabel("Bankroll ($)")
         self.refresh()
 
 
@@ -141,7 +142,9 @@ class KpiTiles(Static):
 
 
 class QuotaBar(Static):
-    CAPS = {"Odds API": 500, "College data": 1000, "Scores data": 200000}  # calls / data points left
+    # free monthly allowances: Odds API credits, college-data calls, scores-service data points
+    CAPS = {"Odds API": 500, "College data": 1000, "Scores data": 200000}
+    UNITS = {"Odds API": "credits", "College data": "calls", "Scores data": "data points"}
     BAR_W = 8
 
     def __init__(self, **kw):
@@ -163,7 +166,7 @@ class QuotaBar(Static):
             out.append(f"{name} ")
             out.append("█" * filled + "░" * (self.BAR_W - filled),
                        style=LOSS if is_low else ACCENT)
-            out.append(f" {val}  ")
+            out.append(f" {val:,} {self.UNITS[name]} left this month  ")
         out.append("Kalshi ")
         out.append("working" if kalshi_ok else "not reachable", style=PROFIT if kalshi_ok else LOSS)
         self.set_class(low, "low")
@@ -182,80 +185,6 @@ class QuotaBar(Static):
             return
         target = 0.4 if self.styles.opacity > 0.7 else 1.0
         self.styles.animate("opacity", target, duration=0.8, on_complete=self._pulse)
-
-
-class OpportunityTable(DataTable):
-    COMPONENT_CLASSES = {"flash"}
-
-    def __init__(self, **kw):
-        super().__init__(cursor_type="row", **kw)
-
-    def on_mount(self) -> None:
-        self.add_columns("id", "what", "price", "fair", "EV", "stake", "state")
-
-
-class OpportunityBoard(TabbedContent):
-    TABS = {"kalshi_game": "Kalshi Games", "kalshi_prop": "Kalshi Props",
-            "pp_entry": "PrizePicks", "arb": "Arbitrage", "middle": "Middles (not risk-free)"}
-    FLASH_S = 1.5
-
-    class ConfirmRequested(Message):
-        def __init__(self, rec_id: int):
-            super().__init__()
-            self.rec_id = rec_id
-
-    def __init__(self, **kw):
-        super().__init__(**kw)
-        for kind, title in self.TABS.items():
-            self.compose_add_child(
-                TabPane(title, OpportunityTable(id=f"tab-{kind}"), id=f"pane-{kind}"))
-        self.flash_ids: set[int] = set()
-        self._seen: set[int] = set()
-        self._recs: list[Recommendation] = []
-
-    def set_recs(self, recs: list[Recommendation]) -> None:
-        self._recs = list(recs)
-        for r in recs:
-            if r.id is not None and r.id not in self._seen:
-                self._seen.add(r.id)
-                self.flash_ids.add(r.id)
-                self.set_timer(self.FLASH_S, lambda i=r.id: self._unflash(i))
-        self._render_rows()
-
-    def _unflash(self, rec_id: int) -> None:
-        self.flash_ids.discard(rec_id)
-        self._render_rows()
-
-    def _render_rows(self) -> None:
-        for kind in self.TABS:
-            table = self.query_one(f"#tab-{kind}", OpportunityTable)
-            flash = table.get_component_rich_style("flash")
-            row = table.cursor_row
-            table.clear()
-            for r in (x for x in self._recs if x.kind == kind):
-                cells = [
-                    str(r.id),
-                    " + ".join(f"{leg.side.title()}: {leg.description}" if r.kind in ("arb", "middle")
-                               else leg.description for leg in r.legs),
-                    "/".join(f"{leg.price:.2f}" for leg in r.legs),
-                    "/".join(f"{leg.p_fair:.2f}" for leg in r.legs),
-                    f"{r.ev * 100:+.1f}%",
-                    f"${r.stake_cents / 100:,.2f}",
-                    r.state,
-                ]
-                if r.id in self.flash_ids:
-                    styled = [Text(c, style=flash) for c in cells]
-                else:
-                    styled = [Text(c, style=PENDING if i == 6 and r.state == "PENDING" else "")
-                              for i, c in enumerate(cells)]
-                table.add_row(*styled, key=str(r.id))
-            if table.row_count:
-                table.move_cursor(row=min(row, table.row_count - 1))
-
-    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
-        event.stop()
-        if event.row_key.value is not None:
-            self.post_message(self.ConfirmRequested(int(event.row_key.value)))
 
 
 class ScoresPanel(DataTable):
@@ -333,8 +262,8 @@ class BankrollHeader(Static):
 
     shown = reactive(0.0)  # cents, animated toward target_cents
     text = ""
-    SHORTER = ((" of bankroll", ""), ("/500 left", "/500"), (" left", ""), ("Odds API", "Odds"),
-               (" in open bets", " in bets"))
+    SHORTER = ((" this month", ""), (" of bankroll", ""), (" credits left", " left"), ("Odds API", "Odds"),
+               (" in open bets", " in bets"), (" of ", "/"), (" left", ""))
 
     def __init__(self, **kw):
         super().__init__(**kw)
@@ -366,7 +295,7 @@ class BankrollHeader(Static):
             parts.append(f"{d.money(self.open_cents)} in open bets ({share:.1%} of bankroll)")
         if self.odds is not None:
             left, cap = self.odds
-            parts.append(f"Odds API {'?' if left is None else left}/{cap} left")
+            parts.append(f"Odds API: {'?' if left is None else f'{left:,}'} of {cap:,} credits left this month")
         self.text = " · ".join(parts)
         for long, short in self.SHORTER:  # narrow terminal: drop words until it fits on one line
             if not self.size.width or len(self.text) <= self.size.width - 2:
@@ -473,7 +402,7 @@ class OpenBetsList(OptionList):
             t.append(f"{v.text}\n")
             t.append(f"    {v.stake} in \u00b7 {v.game} \u00b7 ")
             color = "" if v.pnl_cents is None else PROFIT if v.pnl_cents >= 0 else LOSS
-            picks = v.pnl_cents is None and any(w in v.worth for w in ("hit", "missed", "pending"))
+            picks = v.pnl_cents is None and any(w in v.worth for w in ("hit", "missed", "pushed", "pending"))
             t.append("picks: " if picks else "worth now ")
             t.append(v.worth, style=color)
             if v.close != "not yet":

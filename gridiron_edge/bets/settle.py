@@ -61,7 +61,7 @@ def grade_pp_entry(legs: list[Leg], structure: tuple, stats: dict[tuple[str, str
         v = stats[key]
         if v is None:
             dnps += 1
-        elif v == leg.line:
+        elif abs(v - leg.line) < 1e-9:  # exactly on a whole-number line: a push, the pick is dropped
             ties += 1
         else:
             teams.add(leg.team or leg.game_id or "")

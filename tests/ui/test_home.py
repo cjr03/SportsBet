@@ -95,6 +95,22 @@ def test_open_bet_pp_legs_and_scheduled():
     assert v.worth == "1 hit, 1 missed, 1 pending" and v.game == "Kickoff 1:20 PM" and v.close == "not yet"
 
 
+def test_open_bet_pp_exact_line_is_a_push():
+    legs = [asdict(leg(venue="prizepicks", side="under", player=f"P{i}", stat="rush_yds", line=50.0,
+                       ticker=None, team=None)) for i in range(2)]
+    row = bet_row(kind="pp_entry", legs_json=json.dumps(legs), structure="2-power", qty=None, fee_cents=0)
+    stats = {"P0": 50.0, "P1": 20.0}
+    v = home.open_bet_view(row, {GID: GAME}, {}, NOW, stat_lookup=lambda g, p, s: stats[p])
+    assert v.worth == "1 hit, 1 pushed (exactly on the line)"
+
+
+def test_open_bet_worth_now_uses_the_market_fee_multiplier():
+    row = bet_row(legs_json=json.dumps([asdict(leg(fee_multiplier=0.5))]))
+    v = home.open_bet_view(row, {GID: GAME}, {"KXNFLSPREAD-T": market(yes_bid=0.60)}, NOW)
+    from gridiron_edge.strategy.kalshi_pricing import taker_fee
+    assert v.pnl_cents == 2400 - round(taker_fee(40, 0.60, 0.5) * 100) - 1950
+
+
 def test_empty_reasons():
     nxt = NOW + timedelta(minutes=3)
     base = dict(odds_key=True, games=[GAME], markets=[market()], gates={("nfl", "ml"): False}, next_check=nxt)

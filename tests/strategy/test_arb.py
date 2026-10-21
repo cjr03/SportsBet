@@ -144,4 +144,25 @@ def test_middle_window_text():
     assert middle_window([th, tl]) == "the total lands between 42 and 44 points"
     a = Leg("kalshi", "x", "no", 0.5, 0.5, "g", ticker="E", line=3.5, team="PHI")
     b = Leg("kalshi", "x", "no", 0.5, 0.5, "g", ticker="F", line=6.5, team="DAL")
-    assert middle_window([a, b]) == "the final margin is between the Cowboys by 6 and the Eagles by 3 (a tie counts)"
+    assert middle_window([a, b]) == "the final margin is between the Cowboys by 6 points and the Eagles by 3 points (a tie counts)"
+
+
+def test_contract_text_handles_zero_and_negative_spreads():
+    from gridiron_edge.strategy.arb import contract_text
+    assert contract_text("spread", "PHI", -0.5, "DAL", "PHI") == "Eagles win or tie"
+    assert contract_text("spread", "PHI", -3.5, "DAL", "PHI") == "Eagles win, tie, or lose by 3 or fewer points"
+
+
+def test_middle_and_contract_text_use_cfb_school_names():
+    from gridiron_edge.describe import Names
+    from gridiron_edge.strategy.arb import contract_text, middle_window
+    from gridiron_edge.types import Leg
+    names = Names({("cfb", "ALA"): "Alabama", ("cfb", "AUB"): "Auburn"})
+    assert contract_text("spread", "ALA", 6.5, "AUB", "ALA", "cfb", names) == "Alabama win by 7 or more points"
+    gid = "cfb:20261128:AUB@ALA"
+    lo = Leg("kalshi", "x", "yes", 0.5, 0.5, gid, ticker="A", line=2.5, team="ALA")
+    hi = Leg("kalshi", "x", "no", 0.5, 0.5, gid, ticker="B", line=6.5, team="ALA")
+    assert middle_window([lo, hi], names) == "the Alabama win by 3 to 6 points"
+    a = Leg("kalshi", "x", "no", 0.5, 0.5, gid, ticker="E", line=3.5, team="ALA")
+    b = Leg("kalshi", "x", "no", 0.5, 0.5, gid, ticker="F", line=1.5, team="AUB")
+    assert "ALA" not in middle_window([a, b], names) and "Auburn by 1 point " in middle_window([a, b], names)

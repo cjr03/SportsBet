@@ -7,7 +7,7 @@ from textual.widgets import DataTable, Input
 from gridiron_edge.types import Game, Leg, Recommendation
 from gridiron_edge.ui.screens import ConfirmScreen
 from gridiron_edge.ui.widgets import (
-    BalanceChart, BankrollHeader, EventLog, KpiTiles, OpportunityBoard, QuotaBar,
+    BalanceChart, BankrollHeader, EventLog, KpiTiles, QuotaBar,
     ScoresPanel, compute_kpis,
 )
 
@@ -35,32 +35,9 @@ class Harness(App):
         if self.widget is not None:
             yield self.widget
 
-    def on_opportunity_board_confirm_requested(self, msg):
-        self.requested.append(msg.rec_id)
-
 
 class ThemedHarness(Harness):
     CSS_PATH = THEME
-
-
-async def test_board_flash_styled_then_expires():
-    app = ThemedHarness(OpportunityBoard())
-    async with app.run_test() as pilot:
-        board = app.query_one(OpportunityBoard)
-        board.set_recs([rec(1)])
-        await pilot.pause(board.FLASH_S + 0.3)
-        board.set_recs([rec(1), rec(2)])
-        await pilot.pause()
-        table = board.query_one("#tab-kalshi_game", DataTable)
-
-        assert 2 in board.flash_ids and 1 not in board.flash_ids
-        assert table.get_component_rich_style("flash").bgcolor is not None
-        flashed = str(table.get_row_at(1)[0].style)
-        assert flashed and "on " in flashed
-        assert "on " not in str(table.get_row_at(0)[0].style)
-        await pilot.pause(board.FLASH_S + 0.3)
-        assert board.flash_ids == set()
-        assert "on " not in str(table.get_row_at(1)[0].style)
 
 
 async def test_confirm_modal_width_with_theme():
@@ -69,34 +46,6 @@ async def test_confirm_modal_width_with_theme():
         app.push_screen(ConfirmScreen(rec(5)))
         await pilot.pause()
         assert app.screen.query_one("#confirm-box").region.width == 60
-
-
-async def test_board_flash_and_confirm_message():
-    app = Harness(OpportunityBoard())
-    async with app.run_test() as pilot:
-        board = app.query_one(OpportunityBoard)
-        board.set_recs([rec(1)])
-        board.set_recs([rec(1), rec(2)])
-        await pilot.pause()
-        assert 2 in board.flash_ids
-        table = board.query_one("#tab-kalshi_game", DataTable)
-        assert table.row_count == 2
-        table.focus()
-        await pilot.pause()
-        await pilot.press("enter")
-        await pilot.pause()
-        assert app.requested == [1]
-
-
-async def test_board_routes_by_kind():
-    app = Harness(OpportunityBoard())
-    async with app.run_test() as pilot:
-        board = app.query_one(OpportunityBoard)
-        board.set_recs([rec(1, "kalshi_prop"), rec(2, "pp_entry"), rec(3, "arb")])
-        await pilot.pause()
-        for kind in ("kalshi_prop", "pp_entry", "arb"):
-            assert board.query_one(f"#tab-{kind}", DataTable).row_count == 1
-        assert board.query_one("#tab-kalshi_game", DataTable).row_count == 0
 
 
 async def test_kpi_inconclusive():
@@ -193,7 +142,9 @@ async def test_chart_empty_history_ok():
         c = app.query_one(BalanceChart)
         c.update_series([], [])
         await pilot.pause()
-        assert c.status == "no history yet"
+        assert c.status == "No bankroll history yet"
+        c.update_series([(T0, 10000)], [])  # one point is not a line yet
+        assert c.status == "No bankroll history yet"
         hist = [(T0, 10000), (T0 + timedelta(days=1), 12000)]
         c.update_series(hist, [(T0, 10000, "deposit")])
         assert c.status == "" and c.line_color == "profit"
@@ -219,6 +170,8 @@ async def test_quota_low_class_and_header():
         q = app.query_one(QuotaBar)
         q.update_quota(400, 900, 150000, True)
         assert not q.has_class("low")
+        shown = str(q.render())
+        assert "150,000 data points left this month" in shown and "400 credits left this month" in shown
         q.update_quota(20, 900, None, False)
         assert q.has_class("low")
         await pilot.pause(0.5)
@@ -228,7 +181,7 @@ async def test_quota_low_class_and_header():
         await pilot.pause(1.0)
         assert q.styles.opacity == 1.0
     app = Harness(BankrollHeader())
-    async with app.run_test(size=(120, 24)) as pilot:
+    async with app.run_test(size=(140, 24)) as pilot:
         h = app.query_one(BankrollHeader)
         h.set_balance(123456, -500)
         assert h.target_cents == 123456
@@ -237,22 +190,12 @@ async def test_quota_low_class_and_header():
         h.set_balance(128450, 4210, 9600, (412, 500))
         await pilot.pause(0.9)
         assert h.text == ("Bankroll $1,284.50  \u25b2 $42.10 today \u00b7 $96.00 in open bets "
-                          "(7.5% of bankroll) \u00b7 Odds API 412/500 left")
+                          "(7.5% of bankroll) \u00b7 Odds API: 412 of 500 credits left this month")
     app = Harness(BankrollHeader())
     async with app.run_test(size=(80, 24)) as pilot:  # narrow: drops the extra words, still one line
         h = app.query_one(BankrollHeader)
         h.set_balance(128450, 4210, 9600, (412, 500))
         await pilot.pause(0.9)
-        assert h.text.endswith("in open bets (7.5%) \u00b7 Odds 412/500") and len(h.text) <= 78
+        assert h.text.endswith("(7.5%) \u00b7 Odds: 412/500") and len(h.text) <= 78
 
 
-async def test_middle_and_arb_rows_say_which_side_in_plain_english():
-    app = Harness(OpportunityBoard())
-    async with app.run_test() as pilot:
-        board = app.query_one(OpportunityBoard)
-        legs = [Leg("kalshi", "Eagles win by 3 or more points", "yes", 0.52, 0.6, "g", ticker="KXNFLSPREAD-A"),
-                Leg("kalshi", "Eagles win by 7 or more points", "no", 0.50, 0.6, "g", ticker="KXNFLSPREAD-B")]
-        board.set_recs([Recommendation(9, "middle", legs, 0, 20, 0.03, 0.18, None, T0, T0 + timedelta(hours=1))])
-        await pilot.pause()
-        what = str(board.query_one("#tab-middle", DataTable).get_row_at(0)[1])
-        assert what == "Yes: Eagles win by 3 or more points + No: Eagles win by 7 or more points"

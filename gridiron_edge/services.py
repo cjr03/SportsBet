@@ -39,7 +39,7 @@ from gridiron_edge.models.ridge import implied_ratings
 from gridiron_edge.describe import Names, bet_text, book_name, expected_profit_cents, money
 from gridiron_edge.notify.chain import NotifyChain
 from gridiron_edge.notify.console import ConsoleNotifier
-from gridiron_edge.notify.format import PT, format_message
+from gridiron_edge.notify.format import PT, TEST_TEXT, drift_message, payouts_text
 from gridiron_edge.notify.imessage import IMessageNotifier
 from gridiron_edge.notify.ntfy import NtfyNotifier
 from gridiron_edge.scheduler import LEAGUES, PROPS_COST, PROPS_SLATE_LEAD, Job, Scheduler
@@ -81,7 +81,7 @@ LOCKED_SETTINGS = {"odds_api_key", "cfbd_api_key", "therundown_api_key", "notify
                    "kalshi_base_url", "db_path"}
 SCAN_KINDS = {"games": {"kalshi_game"}, "props": {"kalshi_prop"}, "pp": {"pp_entry"}, "arb": {"arb", "middle"}}
 PP_REFRESH_HORIZON = timedelta(hours=24)  # `pp refresh` pulls props for games kicking off this soon
-NOTIFY_TEST_TEXT = "GE test - if your phone did not alert, enable ntfy (NTFY_TOPIC in .env)"
+NOTIFY_TEST_TEXT = TEST_TEXT
 
 
 class _SchedulerState(dict):
@@ -184,6 +184,16 @@ def _default_margin_models() -> dict:
             "nfl_ml": NormalModel(NFL_ML_SIGMA), "cfb": NormalModel(CFB_SIGMA)}
 
 
+LEAGUE_WORDS = {"nfl": "NFL", "cfb": "College football"}
+QUOTA_UNITS = {"odds_api": "credits", "therundown": "data points", "cfbd": "calls"}
+CHANNEL_WORDS = {"imessage": "iMessage", "ntfy": "ntfy phone alert", "console": "this log (no phone channel worked)"}
+
+
+def _settled_text(bet_id: int, result: str, payout_cents: int) -> str:
+    what = {"won": "won", "lost": "lost", "refund": "was refunded"}.get(result, result)
+    return f"Bet #{bet_id} {what}: {money(payout_cents)} paid back." if payout_cents else f"Bet #{bet_id} {what}."
+
+
 def _describe(rec: Recommendation, names: Names | None = None) -> str:
     venue = "PrizePicks" if rec.kind == "pp_entry" else "Kalshi"
     what = bet_text(rec, names) if names else bet_text(rec)
@@ -244,6 +254,22 @@ HYPERPARAMS = {
 
 
 _log = logging.getLogger(__name__)
+# plain names for the log tab
+API_NAMES = {"odds_api": "The Odds API (sportsbook prices)", "therundown": "TheRundown (scores)",
+             "cfbd": "College Football Data", "kalshi": "Kalshi"}
+STEP_WORDS = {"teams": "loading college teams", "games": "loading the schedule", "nflverse": "loading NFL stats",
+              "nfl model": "building the NFL team ratings", "cfb model": "building the college team ratings",
+              "gates": "checking our model on past games", "first-run": "the first-run checks",
+              "settle": "settling finished bets", "expire": "clearing stale bet ideas",
+              "rundown_scores": "loading scores", "rundown_lines": "loading lines from the scores service",
+              "odds_games": "loading sportsbook prices", "odds_props": "loading player lines",
+              "kalshi_refresh": "loading Kalshi prices", "cfbd_weekly": "updating the college ratings",
+              "nflverse_refresh": "updating NFL stats", "scan": "looking for bets"}
+
+
+def _plural(n: int, word: str, many: str | None = None) -> str:
+    """'1 game', '2 games' (with commas for big numbers)."""
+    return f"{n:,} {word if n == 1 else many or word + 's'}"
 _GATE_LABEL = {"nfl": "NFL spreads/moneylines", "cfb": "College football bets"}
 
 
@@ -326,6 +352,7 @@ class Services:
         self.notifier.enabled = self.settings.notify_enabled
         self.notifier.quiet_hours = self.settings.quiet_hours
         self.settler.payouts = payout_table(self.settings)  # pp_mode / pp_payouts_json changes
+        self.notifier.payouts = self.settler.payouts
         return self.settings
 
     # -- error handling --------------------------------------------------
@@ -335,16 +362,16 @@ class Services:
         for api, client in (("odds_api", self.odds), ("therundown", self.rundown), ("cfbd", self.cfbd)):
             if client is not None and client.disabled and api not in self._auth_reported:
                 self._auth_reported.add(api)
-                out.append(("error", f"{api}: invalid key - disabled"))
+                out.append(("error", f"{API_NAMES.get(api, api)} rejected the key in .env, so it is turned off."))
         return out
 
     async def _guarded(self, name: str, coro) -> list[tuple[str, str]]:
         try:
             return await coro or []
         except AuthError as e:  # keyed clients disable themselves; disabled ones never call again
-            return self._newly_disabled() or [("error", f"{name}: {e}")]
+            return self._newly_disabled() or [("error", f"Could not finish {STEP_WORDS.get(name, name)}: {e}")]
         except Exception as e:
-            return [("error", f"{name}: {e}")]
+            return [("error", f"Could not finish {STEP_WORDS.get(name, name)}: {e}")]
 
     # -- startup ---------------------------------------------------------
     async def startup(self, now: datetime) -> list[tuple[str, str]]:
@@ -352,9 +379,9 @@ class Services:
         missing = [api for api, c in (("odds_api", self.odds), ("therundown", self.rundown),
                                       ("cfbd", self.cfbd)) if c is None]
         if missing:
-            out.append(("info", f"disabled (no key in .env): {', '.join(missing)}"))
+            out.append(("info", f"Not set up (no key in .env): {', '.join(API_NAMES[a] for a in missing)}."))
         if not (self.settings.notify_phone or self.settings.ntfy_topic):
-            out.append(("info", "notify: no NOTIFY_PHONE or NTFY_TOPIC - texts appear in this log only"))
+            out.append(("info", "Texts: no NOTIFY_PHONE or NTFY_TOPIC in .env, so bet ideas show up in this log only."))
         out += await self._guarded("teams", self._seed_teams(now))
         out += await self._guarded("games", self._register_games(now))
         out += await self._guarded("nflverse", self._load_nflverse(now))
@@ -384,7 +411,7 @@ class Services:
             for n in names:
                 if n:
                     self.teams.add("cfb", n, code)
-        return [("info", f"College teams loaded: {len(rows)} top-division schools")]
+        return [("info", f"College teams loaded: {_plural(len(rows), 'top-division school')}.")]
 
     def _apply_scores(self, games: list[Game]) -> int:
         n = 0
@@ -415,7 +442,8 @@ class Services:
             for league in LEAGUES:
                 for d in range(8):
                     from_rundown += self._apply_scores(await self.rundown.scores(league, today + timedelta(days=d)))
-        return [("info", f"Schedule: {from_odds} games from the odds service, {from_rundown} from the scores service")]
+        return [("info", f"Schedule: {_plural(from_odds, 'game')} from the odds service, "
+                         f"{_plural(from_rundown, 'game')} from the scores service.")]
 
     def _read_nflverse(self, seasons: list[int]) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
         # schedules ship as one file for every season, so the margin model's 2015+ history is free
@@ -472,7 +500,10 @@ class Services:
             self.projector = _NoProjector()
         self.player_teams = self._latest_teams(weekly)
         weeks = self._assign_nfl_weeks(sched, now)
-        return ([("info", f"NFL stats loaded: {sched.height:,} games, {weekly.height:,} player games, {weeks} game weeks set"), *out]
+        return ([("info", f"NFL stats loaded: {_plural(sched.height, 'past game')} and "
+                          f"{_plural(weekly.height, 'player stat line')}; "
+                          f"{_plural(weeks, 'upcoming game')} matched to {'its' if weeks == 1 else 'their'} "
+                          "season week."), *out]
                 + await self._check_qbs(sched, cur, now))
 
     async def _check_qbs(self, sched: pl.DataFrame, season: int, now: datetime) -> list[tuple[str, str]]:
@@ -489,8 +520,9 @@ class Services:
         self.qb_changes = {self.teams.canonical("nfl", t) or t for t in teams}
         if not self.qb_changes:
             return []
-        return [("info", f"New starting quarterback since last game: {', '.join(sorted(self.qb_changes))} - "
-                         "their games use the betting market's number only")]
+        teams = sorted(self.notifier.names.team("nfl", t, full=True) for t in self.qb_changes)
+        return [("info", f"New starting quarterback since last game: {', '.join(teams)}. "
+                         "Their games use the betting market's number only.")]
 
     def _latest_teams(self, weekly: pl.DataFrame) -> dict[str, str]:
         """Ruling R2: each player's latest team from the weekly stats."""
@@ -552,11 +584,11 @@ class Services:
         self.nfl_model = await asyncio.to_thread(NflRatings.fit, sched, self.history.get("nfl_epa"), now.date())
         margin = nfl_margin_model(self.history.get("nfl_margin", sched))
         self.margin_models["nfl_spread"] = margin
-        games = (f"winning margins learned from {margin.n:,} past games with betting lines"
+        games = (f"how likely each score margin is was learned from {_plural(margin.n, 'past game')} with betting lines"
                  if isinstance(margin, ConditionalMarginModel)
-                 else "not enough past games with betting lines yet, so winning margins use a simple bell curve")
-        return [("info", f"NFL team ratings ready: {len(self.nfl_model.ratings)} teams, home teams get "
-                         f"{self.nfl_model.hfa:+.1f} points; {games}")]
+                 else "not enough past games with betting lines yet, so a rough estimate is used for score margins")
+        return [("info", f"NFL team ratings ready: {_plural(len(self.nfl_model.ratings), 'team')}, home teams get "
+                         f"{self.nfl_model.hfa:+.1f} points; {games}.")]
 
     def _cfb_games(self, rows: list[dict]) -> list[dict]:
         def canon(name):
@@ -582,8 +614,12 @@ class Services:
         self.cfb_model = model
         out = self._fit_cfb_margin(now)
         if model is None:
-            return [("info", "College football ratings: no games yet"), *out]
-        return [("info", f"College football ratings ready: {len(model.ratings)} teams, home teams get {model.hfa:+.1f} points"), *out]
+            return [("info", "College football ratings: no games played yet."), *out]
+        teams = _plural(len(model.ratings), "team")
+        if model.n_games < cfb_models.MIN_HFA_GAMES:  # a home edge fit from a few games means nothing
+            return [("info", f"College football ratings ready: {teams} (mostly from last season so far; "
+                             f"only {_plural(model.n_games, 'game')} played this season)."), *out]
+        return [("info", f"College football ratings ready: {teams}, home teams get {model.hfa:+.1f} points."), *out]
 
     def _fit_cfb_margin(self, now: datetime) -> list[tuple[str, str]]:
         """CFB P(margin | spread) from CFBD lines already in the cache (backtests store them).
@@ -607,10 +643,13 @@ class Services:
                         margins.append(float(r["homeScore"] - r["awayScore"]))
         if len(spreads) < MIN_EMPIRICAL_RESIDUALS:
             self.margin_models.pop(CFB_MARGIN_KEY, None)
-            return [("info", f"college winning margins: only {len(spreads)} saved past games with betting lines, "
-                             "so a simple bell curve is used (testing the college model on past seasons saves more)")]
+            last = CfbdClient.current_season(now) - 1
+            have = "no saved past games yet" if not spreads else f"only {_plural(len(spreads), 'saved past game')}"
+            return [("info", f"College scores: {have}, so a rough estimate is used for how likely each score "
+                             f"margin is (type: backtest cfb {last - 2}-{last} to save more).")]
         self.margin_models[CFB_MARGIN_KEY] = ConditionalMarginModel(spreads, margins, CFB_SIGMA)
-        return [("info", f"college winning margins learned from {len(spreads):,} past games with betting lines")]
+        return [("info", f"College scores: how likely each score margin is was learned from "
+                         f"{_plural(len(spreads), 'past game')} with betting lines.")]
 
     # -- gates and backtests ---------------------------------------------
     async def _nfl_sched(self, years: list[int]) -> pl.DataFrame:
@@ -823,7 +862,7 @@ class Services:
             tot = r.get("total")
             if lg == "nfl":  # NFL totals have their own model and gate
                 gates[(lg, "total")] = True if tot is None else bool(tot["gated"])
-                if tot is not None:
+                if tot is not None and not tot["gated"]:  # a failed check gives the totals model no weight
                     fits[(lg, "total")] = (float(tot["b_model"]), float(tot["se"]))
             else:  # no totals backtest outside the NFL: totals stay observe-only
                 gates[(lg, "total")] = bool(r.get("total_gated", True))
@@ -857,7 +896,7 @@ class Services:
         """Run one scheduler job; never raises (errors come back as ("error", ...) lines)."""
         handler = getattr(self, f"_job_{job.name}", None)
         if handler is None:
-            return [("error", f"{job.name}: unknown job")]
+            return [("error", f"Unknown task: {job.name}")]
         return await self._guarded(job.name, handler(job, now))
 
     def _merge(self, key: str, source: str, items: list, now: datetime) -> None:
@@ -919,7 +958,7 @@ class Services:
 
     async def _job_expire(self, job: Job, now: datetime):
         ids = self.lifecycle.expire_due(now)
-        return [("info", f"{len(ids)} bet idea(s) went stale")] if ids else []
+        return [("info", f"{_plural(len(ids), 'bet idea')} went stale (the price or the game moved on).")] if ids else []
 
     async def _job_rundown_scores(self, job: Job, now: datetime):
         if self.rundown is None:
@@ -929,8 +968,8 @@ class Services:
         for day in sorted({(now - timedelta(hours=12)).date(), now.date()}):
             n += self._apply_scores(await self.rundown.scores(job.league, day, essential=essential))
         if self.rundown.last_status == "skipped_budget":
-            return [("info", f"therundown scores {job.league}: skipped to protect the daily/monthly points")]
-        return [("api", f"therundown scores {job.league}: {n} games")]
+            return [("info", f"{LEAGUE_WORDS[job.league]} scores: skipped to save the scores service's free allowance.")]
+        return [("api", f"{LEAGUE_WORDS[job.league]} scores updated: {_plural(n, 'game')}.")]
 
     async def _job_rundown_lines(self, job: Job, now: datetime):
         if self.rundown is None:
@@ -942,9 +981,10 @@ class Services:
         for day in days:
             quotes += await self.rundown.lines(job.league, day, fetched_at=now)
         if self.rundown.last_status == "skipped_budget":
-            return [("info", f"therundown lines {job.league}: skipped to protect the daily/monthly points")]
+            return [("info", f"{LEAGUE_WORDS[job.league]} lines from the scores service: skipped to save its free "
+                             "allowance.")]
         self._merge("quotes", "therundown", quotes, now)
-        return [("api", f"therundown lines {job.league}: {len(quotes)} quotes")]
+        return [("api", f"{LEAGUE_WORDS[job.league]} lines from the scores service: {_plural(len(quotes), 'price')}.")]
 
     async def _job_odds_games(self, job: Job, now: datetime):
         if self.odds is None:
@@ -954,10 +994,12 @@ class Services:
                                            job.args.get("commence_to"), essential=job.essential,
                                            fetched_at=now)
         if self.odds.last_status == "skipped_budget":
-            return [("info", f"odds_api games {job.league}: skipped to protect the credit reserve")]
+            return [("info", f"{LEAGUE_WORDS[job.league]} sportsbook prices: skipped to keep credits in reserve.")]
         self._merge("quotes", "odds_api", quotes, now)
-        out = [("api", f"odds_api games {job.league} ({job.args.get('window', 'manual')}): {len(quotes)} quotes, "
-                       f"{self.odds.budget.remaining()} credits left")]
+        rem = self.odds.budget.remaining()
+        why = "closing prices" if str(job.args.get("window", "")).startswith("close:") else "prices"
+        out = [("api", f"{LEAGUE_WORDS[job.league]} sportsbook {why}: {_plural(len(quotes), 'price')} loaded, "
+                       f"{'an unknown number of' if rem is None else f'{rem:,}'} Odds API credits left this month.")]
         if str(job.args.get("window", "")).startswith("close:"):
             out += self._record_clv(now)
         return out
@@ -968,14 +1010,16 @@ class Services:
         gid = job.args["game_id"]
         row = self.conn.execute("SELECT odds_event_id FROM games WHERE game_id=?", (gid,)).fetchone()
         if row is None or row["odds_event_id"] is None:
-            return [("info", f"Player odds: the odds service has no listing for game {gid} yet")]
+            return [("info", f"Player lines for {self._matchup(gid)}: the odds service does not list this game yet.")]
         props = await self.odds.event_props(job.league, row["odds_event_id"], essential=job.essential)
         if self.odds.last_status == "skipped_budget":
-            return [("info", f"Player lines for {self._matchup(gid)}: skipped to protect the credit reserve")]
+            return [("info", f"Player lines for {self._matchup(gid)}: skipped to keep credits in reserve.")]
         self._merge("props", "odds_api", props, now)
         pp = sum(q.book == "prizepicks" for q in props)
-        return [("api", f"Player lines for {self._matchup(gid)}: {pp} PrizePicks, {len(props) - pp} sportsbook - "
-                        f"{self.odds.budget.remaining()} credits left")]
+        rem = self.odds.budget.remaining()
+        return [("api", f"Player lines for {self._matchup(gid)}: {pp:,} from PrizePicks, {len(props) - pp:,} from "
+                        f"sportsbooks; {'an unknown number of' if rem is None else f'{rem:,}'} Odds API credits "
+                        "left this month.")]
 
     def _matchup(self, gid: str) -> str:
         g = self.registry.get(gid)
@@ -997,7 +1041,8 @@ class Services:
         self.latest["kalshi"] = markets
         unmatched = sum(m.game_id is None for m in markets)
         # free: refresh the near-kickoff closes (prop closes come only from already-paid prop pulls)
-        return [("api", f"kalshi: {len(markets)} markets ({unmatched} unmatched)")] + self._record_clv(now)
+        matched = "" if not unmatched else f" ({unmatched:,} not matched to a game we know)"
+        return [("api", f"Kalshi prices updated: {_plural(len(markets), 'market')}{matched}.")] + self._record_clv(now)
 
     async def _job_cfbd_weekly(self, job: Job, now: datetime):
         had = self.cfb_model is not None
@@ -1023,7 +1068,7 @@ class Services:
                     except ApiError:
                         continue
         done = self.settler.settle_ready(now, markets.get, self._stat_lookup)
-        out = [("settle", f"bet {i} {result}: ${payout / 100:,.2f}") for i, result, payout in done]
+        out = [("settle", _settled_text(i, result, payout)) for i, result, payout in done]
         return out + (self.check_drift(now) if done else [])
 
     def _stat_lookup(self, game_id: str, player: str, stat: str):
@@ -1110,7 +1155,7 @@ class Services:
             value = self.settler.record_clv(bet["id"], p, src)
             if value is not None:
                 word = "better" if value >= 0 else "worse"
-                out.append(("info", f"bet {bet['id']}: our price was {abs(value):.1%} {word} than the closing price"))
+                out.append(("info", f"Bet #{bet['id']}: our price was {abs(value):.1%} {word} than the closing price."))
         n = 0
         since = (now - UPCOMING_WINDOW).isoformat()
         for r in self.conn.execute("SELECT id, kind, legs_json FROM recommendations WHERE created_at >= ? "
@@ -1127,7 +1172,7 @@ class Services:
                     p, _, stale = self._close_p("pp_leg", leg, snap, markets)
                     n += self.settler.record_leg_clv(r["id"], i, leg["p_mkt"], p, now, stale) is not None
         if n:
-            out.append(("info", f"recorded closing prices for {n} bet idea(s), including ones not placed"))
+            out.append(("info", f"Recorded closing prices for {_plural(n, 'bet idea')}, including ones not placed."))
             out += self.check_drift(now)
         return out
 
@@ -1241,19 +1286,19 @@ class Services:
                 continue  # notifications off, quiet hours, or already sent
             if res.ok:
                 self.lifecycle.mark_pending(saved.id)
-                sent = f"#{saved.id} sent via {res.channel}"
+                sent = f"Bet idea #{saved.id} texted via {CHANNEL_WORDS.get(res.channel, res.channel)}"
                 if res.channel == ConsoleNotifier.name:  # no phone channel worked: show the text here
-                    sent += f": {format_message(saved, PT, self.notifier.names)}"
+                    sent += f": {self.notifier.format(saved)}"
                 out.append(("text", sent))
             else:
-                out.append(("error", f"text for #{saved.id} failed: {res.error}"))
+                out.append(("error", f"The text for bet idea #{saved.id} did not go out: {res.error}"))
         new_names = sorted(set(getattr(self.projector, "unmatched", ())) - self._reported_unmatched)
         if new_names:
             self._reported_unmatched |= set(new_names)
-            out.append(("info", "player-prop model: no stats found for " + ", ".join(new_names[:10])
-                        + (f" and {len(new_names) - 10} more" if len(new_names) > 10 else "")))
+            out.append(("info", "Player projections: no past stats found for " + ", ".join(new_names[:10])
+                        + (f" and {len(new_names) - 10} more" if len(new_names) > 10 else "") + "."))
         if not out:
-            out.append(("info", f"checked for bets: {len(recs)} found, nothing new"))
+            out.append(("info", f"Checked for bets: {_plural(len(recs), 'idea')} found, nothing new."))
         return out
 
     # -- PrizePicks visibility ----------------------------------------------------
@@ -1312,8 +1357,8 @@ class Services:
             affordable -= 1
         cost = PROPS_COST * len(games)
         left = "an unknown number" if rem is None else str(rem)
-        text = (f"This uses about {PROPS_COST} credits per game x {len(games)} game{'s' * (len(games) != 1)} = "
-                f"{cost} of your {left} left.")
+        each = "1 game" if len(games) == 1 else f"{len(games)} games, {PROPS_COST} each"
+        text = f"This uses about {cost} Odds API credits ({each}) out of {left} left this month."
         if affordable < len(games):
             text += (f" Only {affordable} fit without dipping into the credits kept for game odds; "
                      "those load first (NFL first).")
@@ -1344,7 +1389,7 @@ class Services:
         """`pp add`: a PrizePicks line typed in by hand (used when the Odds API key lacks PrizePicks)."""
         g = self.registry.get(game_id)
         if g is None:
-            raise ValueError(f"unknown game {game_id}")
+            raise ValueError(f"Unknown game {game_id} (type the game id as shown in the Scores tab).")
         self.manual_props = [q for q in self.manual_props
                              if not (q.game_id == game_id and q.player == player and q.stat == stat)]
         self.manual_props.append(PropQuote("manual", "prizepicks", game_id, player, stat, "over", line, None, now))
@@ -1358,8 +1403,10 @@ class Services:
         out = []
         for api, guard in self.budgets.items():
             rem = guard.remaining()
-            out.append(f"{api}: {'unknown' if rem is None else rem} of {guard.monthly_cap} free calls left this month")
-        out.append(f"kalshi: {'working' if self.kalshi_ok else 'not reached yet'}")
+            unit = QUOTA_UNITS.get(api, "calls")
+            left = "an unknown number" if rem is None else f"{rem:,}"
+            out.append(f"{API_NAMES.get(api, api)}: {left} of {guard.monthly_cap:,} free {unit} left this month.")
+        out.append(f"Kalshi: {'working' if self.kalshi_ok else 'not reached yet'}.")
         return out
 
     async def _first_run(self, now: datetime) -> list[tuple[str, str]]:
@@ -1377,26 +1424,31 @@ class Services:
                     self._merge("props", "odds_api", props, now)
                     probed = (row["game_id"], sum(q.book == "prizepicks" for q in props))
             books = sorted(self.odds.seen_books)
-            out.append(("info", f"Sportsbooks on the odds service: {', '.join(dict.fromkeys(book_name(b) for b in books)) or 'none'}"))
+            out.append(("info", "Sportsbooks on the odds service: "
+                                f"{', '.join(dict.fromkeys(book_name(b) for b in books)) or 'none'}."))
             out.append(("info", self._pp_probe_text(probed, now)))
         if self.rundown is not None:
             rd = self.rundown
-            out.append(("info", f"Scores service: {rd.tier} plan, scores about {max(1, round(rd.delay_seconds / 60))} min behind"))
+            mins = max(1, round(rd.delay_seconds / 60))
+            out.append(("info", f"Scores service: {rd.tier} plan, scores about {_plural(mins, 'minute')} behind."))
         if self.cfbd is not None and not self.cfbd.disabled:
             info = await self.cfbd.info()
-            out.append(("info", f"College football data: {info.get('remainingCalls')} calls left this month"))
+            out.append(("info", f"College Football Data: {info.get('remainingCalls')} free calls left this month."))
         try:
             await self.kalshi.markets(GAME_SERIES["nfl"]["ml"])
             self.kalshi_ok = True
         except Exception:
             self.kalshi_ok = False
-        out.append(("info", "Kalshi: working" if self.kalshi_ok else "Kalshi: not reachable right now"))
-        out.append(("info", 'notify: run "notify test" to confirm your phone alerts'))
+        out.append(("info", "Kalshi: working." if self.kalshi_ok else "Kalshi: not reachable right now."))
+        out.append(("info", 'Texts: type "notify test" to check that your phone gets them.'))
         if "prizepicks" in self.settings.venues and not self.settings.pp_payouts_verified:
-            out.append(("info", "PrizePicks payouts not confirmed: check your app pays 6x for a 3-pick Power "
-                                "and 10x / 2x / 0.4x for a 5-pick Flex, then type: set pp_payouts_verified true "
-                                "(PrizePicks stakes are halved until then). If only a perfect card pays (Arena), "
-                                "type: set pp_mode arena"))
+            table = payout_table(self.settings)
+            out.append(("info", "PrizePicks payouts not confirmed: check your app "
+                                f"{payouts_text(table.get((3, 'power'), {}))} on a 3-pick Power Play and "
+                                f"{payouts_text(table.get((5, 'flex'), {}))} on a 5-pick Flex Play, then type: "
+                                f"set pp_payouts_verified true (PrizePicks bets are cut to "
+                                f"{self.settings.pp_unverified_mult:.0%} of normal until then). If only a "
+                                "perfect card pays (Arena), type: set pp_mode arena"))
         return out
 
     # -- evaluation ----------------------------------------------------------
@@ -1413,17 +1465,17 @@ class Services:
             return k
         k["extra"] = [ln for ln in r["summary"] if ln.startswith(self._EXTRA_PREFIXES)]
         k["calibration"] = report_mod.calibration_lines(r["calibration"]["reliability"])
-        warnings = [ln for ln in r["summary"] if ln.startswith("Warning")]
-        warnings += [f"Paused (shown but not texted): {report_mod.segment_label(seg)}. "
-                     f"To turn back on, type: drift reset {seg}" for seg in sorted(self.drift_paused())]
-        k["warnings"] = warnings
+        k["warnings"] = [ln for ln in r["summary"] if ln.startswith(("Warning", "Paused"))]
         return k
 
     def report(self, now: datetime) -> dict:
         """The full performance report (bets/report.py) as a plain dict, with plain-English summary lines."""
         stored = json.loads(self._get("gates") or "null") or {}
-        return build_report(self.conn, now, backtest=stored.get("leagues"), window=self.settings.drift_window,
-                            drift_since=self._drift_resets())
+        r = build_report(self.conn, now, backtest=stored.get("leagues"), window=self.settings.drift_window,
+                         drift_since=self._drift_resets())
+        r["summary"] += [f"Paused (shown but not texted): {report_mod.segment_label(seg)}. "
+                         f"To turn back on, type: drift reset {seg}" for seg in sorted(self.drift_paused())]
+        return r
 
     def drift_paused(self) -> dict[str, str]:
         """Segments paused by drift monitoring -> when they were paused."""
@@ -1452,19 +1504,18 @@ class Services:
             if not d["alarm"] or seg in paused or seg == "arb":
                 continue
             self._put(DRIFT_PREFIX + seg, now.isoformat())
-            msg = (f"Warning: {d['label']} have been getting worse prices than the closing price lately "
-                   f"(last {d['n']} averaged {d['mean'] * 100:+.1f}%). New ones are paused to watch-only. "
-                   f"To turn them back on, type: drift reset {seg}")
-            out.append(("warn", msg))
+            out.append(("warn", f"Warning: {d['label']} have been getting worse prices than the closing price "
+                                f"lately (the last {d['n']} averaged {abs(d['mean']) * 100:.1f}% worse). "
+                                "New ones are shown but not texted. "
+                                f"To turn them back on, type: drift reset {seg}"))
             if self.notifier.enabled:
-                self.notifier.send_text(msg, now)
+                self.notifier.send_text(drift_message(d["label"], d["n"], d["mean"], seg), now)
         stored = json.loads(self._get("gates") or "null") or {}
         cal = report_mod.calibration_drift(self.conn, self.settings.drift_window, stored.get("leagues"))
         flagged = self._get("drift_cal") is not None
         if cal["worse"] and not flagged:
             self._put("drift_cal", now.isoformat())
-            out.append(("warn", f"Warning: our chances have been less accurate lately ({cal['rolling_brier']:.3f}) "
-                                f"than in testing ({cal['backtest_brier']:.3f}). Bets are not paused for this."))
+            out.append(("warn", report_mod.CALIBRATION_WARNING))
         elif not cal["worse"] and flagged:
             self.conn.execute("DELETE FROM settings WHERE key='drift_cal'")
         return out
@@ -1557,6 +1608,7 @@ def build_services(settings: Settings, transports: dict[str, httpx.AsyncBaseTran
     channels.append(ConsoleNotifier(sink))  # last resort: the text shows in the event log
     notifier = NotifyChain(conn, channels, settings.quiet_hours, settings.notify_enabled)
     notifier.names = Names(teams.display_names)
+    notifier.payouts = payout_table(settings)
 
     view = _RegistryView(registry, lambda: datetime.now(UTC))
     scheduler = Scheduler(view, budgets, state=_SchedulerState(conn, datetime.now(UTC)),
