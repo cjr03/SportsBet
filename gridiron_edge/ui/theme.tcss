@@ -21,6 +21,14 @@ BankrollHeader {
     text-style: bold;
 }
 
+#info-line {
+    width: 1fr;
+    height: auto;
+    padding: 0 1;
+    background: $surface;
+    color: #94a3b8;
+}
+
 #tabs { height: 1fr; }
 #tabs TabPane { padding: 0; }
 #tabs Tabs { background: $bg; }
@@ -29,7 +37,10 @@ BankrollHeader {
 #home { layout: vertical; }
 #place-box { height: 3fr; }
 #open-box { height: 2fr; }
-#place-box, #open-box {
+#watch-box { height: 2fr; }
+#watch-box.is-empty { height: auto; }
+#watch-box .empty { padding: 0 1; }
+#place-box, #open-box, #watch-box {
     background: $surface;
     border: round $accent 40%;
     border-title-color: $accent;
@@ -37,7 +48,9 @@ BankrollHeader {
 }
 #place-box:focus-within { border: round $accent; }
 #open-box:focus-within { border: round $accent; }
-PlaceNowList, OpenBetsList {
+#watch-box:focus-within { border: round $accent; }
+#watch-box { border: round $pending 30%; border-title-color: $pending; }
+PlaceNowList, OpenBetsList, WatchList {
     height: 1fr;
     background: $surface;
     border: none;
@@ -45,6 +58,12 @@ PlaceNowList, OpenBetsList {
 }
 PlaceNowList > .option-list--option { padding: 0 1; }
 OpenBetsList > .option-list--option { padding: 0 1; }
+WatchList > .option-list--option { padding: 0 1; }
+.summary {
+    height: auto;
+    padding: 0 1;
+    color: $accent;
+}
 .empty {
     height: auto;
     padding: 1 2;

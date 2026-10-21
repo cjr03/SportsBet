@@ -16,7 +16,7 @@ from textual_plotext import PlotextPlot
 from gridiron_edge.bets import report
 from gridiron_edge import describe as d
 from gridiron_edge.types import Game, Recommendation
-from gridiron_edge.ui.home import OpenBetView, place_now_cells
+from gridiron_edge.ui.home import OpenBetView, pack, place_now_cells
 
 PROFIT, LOSS, PENDING, ACCENT = "#22c55e", "#ef4444", "#f59e0b", "#22d3ee"
 _RGB = {"profit": (34, 197, 94), "loss": (239, 68, 68)}
@@ -311,6 +311,39 @@ class BankrollHeader(Static):
         self.update(out)
 
 
+SEP = " \u00b7 "
+Piece = tuple[str, str]  # (text, style)
+
+
+def append_packed(out: Text, segments: list, width: int, indent: str = "    ", style: str = "") -> None:
+    """Start a new indented line on `out` and add the segments joined by ' · ', breaking only between
+    segments (each wrapped line keeps the indent). A segment is a str or a list of (text, style) pieces."""
+    cur = len(indent)
+    out.append("\n" + indent)
+    first = True
+    for seg in segments:
+        pieces: list[Piece] = [(seg, style)] if isinstance(seg, str) else list(seg)
+        n = sum(len(t) for t, _ in pieces)
+        if not n:
+            continue
+        if not first:
+            if cur + len(SEP) + n > width:
+                out.append("\n" + indent)
+                cur = len(indent)
+            else:
+                out.append(SEP, style=style)
+                cur += len(SEP)
+        for t, st in pieces:
+            out.append(t, style=st or style)
+        cur += n
+        first = False
+
+
+def _list_width(w) -> int:
+    """Usable text width inside an OptionList row (padding 0 1, room for the scrollbar)."""
+    return max(30, (w.size.width or 160) - 4)
+
+
 class PlaceNowList(OptionList):
     """Recs that can be placed right now, two lines each; Enter confirm, s skip, d why."""
 
@@ -332,13 +365,16 @@ class PlaceNowList(OptionList):
     def __init__(self, **kw):
         super().__init__(**kw)
         self.recs: list[Recommendation] = []
+        self.details: dict[int, str] = {}
         self.flash_ids: set[int] = set()
         self._seen: set[int] = set()
         self._args: tuple = ()
 
     def set_recs(self, recs: list[Recommendation], now: datetime, games: dict,
-                 names: d.Names = d.DEFAULT_NAMES) -> None:
+                 names: d.Names = d.DEFAULT_NAMES, details: dict[int, str] | None = None) -> None:
+        """details: rec id -> the extra line (chances, contracts, payout, source) from home.place_now_detail."""
         self.recs = list(recs)
+        self.details = dict(details or {})
         self._args = (now, games, names)
         for r in recs:
             if r.id is not None and r.id not in self._seen:
@@ -346,6 +382,10 @@ class PlaceNowList(OptionList):
                 self.flash_ids.add(r.id)
                 self.set_timer(self.FLASH_S, lambda i=r.id: self._unflash(i))
         self._render()
+
+    def on_resize(self) -> None:
+        if self.recs:
+            self._render()
 
     def _unflash(self, rec_id: int) -> None:
         self.flash_ids.discard(rec_id)
@@ -357,14 +397,16 @@ class PlaceNowList(OptionList):
         out = Text()
         out.append(f"#{rid} ", style=f"bold {ACCENT}")
         out.append(where, style=f"bold {PROFIT}" if r.kind == "arb" else "bold")
-        out.append(f"  {bet}\n")
+        out.append(f"  {bet}")
+        width = _list_width(self)
         profit_word = "locked profit" if r.kind == "arb" else "expected profit"
-        out.append(f"    {price} \u00b7 bet {stake} \u00b7 {profit_word} ")
-        out.append(profit, style=PROFIT)
-        out.append(f" \u00b7 {left}", style=PENDING if "min left" in left and "hr" not in left else "")
-        out.append(f" \u00b7 kickoff {kick}")
+        segs: list = [price, f"bet {stake}", [(f"{profit_word} ", ""), (profit, PROFIT)],
+                      [(left, PENDING if "min left" in left and "hr" not in left else "")], f"kickoff {kick}"]
         if r.state == "PENDING":
-            out.append("  (texted)", style="dim")
+            segs.append([("texted", "dim")])
+        append_packed(out, segs, width)
+        if self.details.get(r.id):
+            append_packed(out, self.details[r.id].split(SEP), width, style="#94a3b8")
         if r.id in self.flash_ids:
             out.stylize(f"on {ACCENT}", 0, len(out))
             out.stylize("#0b0f1a")
@@ -397,36 +439,115 @@ class PlaceNowList(OptionList):
 
 
 class OpenBetsList(OptionList):
+    views: list[OpenBetView] = []
+
     def set_bets(self, views: list[OpenBetView]) -> None:
         self.views = list(views)
+        self._render()
+
+    def on_resize(self) -> None:
+        if self.views:
+            self._render()
+
+    def _render(self) -> None:
+        width = _list_width(self)
         opts = []
-        for v in views:
+        for v in self.views:
             t = Text()
             t.append(f"#{v.bet_id} ", style=f"bold {ACCENT}")
-            t.append(f"{v.text}\n")
-            t.append(f"    {v.stake} in \u00b7 {v.game} \u00b7 ")
+            t.append(v.text)
+            append_packed(t, [x for x in (v.pays or f"{v.stake} in", v.game) if x], width)
             color = "" if v.pnl_cents is None else PROFIT if v.pnl_cents >= 0 else LOSS
             picks = v.pnl_cents is None and any(w in v.worth for w in ("hit", "missed", "pushed", "pending"))
-            t.append("picks: " if picks else "worth now ")
-            t.append(v.worth, style=color)
-            if v.close != "not yet":
-                t.append(f" \u00b7 {v.close}")
+            worth = [(x, color) for x in v.worth.split(SEP)] if v.pnl_cents is not None else \
+                [("picks: " if picks else "") + v.worth]
+            segs: list = [v.paid_text, *([[w] for w in worth] if v.pnl_cents is not None else worth),
+                          *v.chances.split(SEP), "" if v.close == "not yet" else v.close]
+            append_packed(t, [x for x in segs if x], width)
+            if v.picks:
+                append_packed(t, v.picks.split(SEP), width, style="#94a3b8")
             opts.append(Option(t, id=str(v.bet_id)))
+        keep = self.highlighted
         self.set_options(opts)
+        if keep is not None and opts:
+            self.highlighted = min(keep, len(opts) - 1)
+
+
+class WatchList(OptionList):
+    """Watch-only ideas (shown, not texted), two lines each."""
+
+    rows: list[tuple[str, str]] = []
+
+    def set_rows(self, rows: list[tuple[str, str]]) -> None:
+        self.rows = list(rows)
+        self._render()
+
+    def on_resize(self) -> None:
+        if self.rows:
+            self._render()
+
+    def _render(self) -> None:
+        width = _list_width(self)
+        opts = []
+        for i, (head, detail) in enumerate(self.rows):
+            t = Text()
+            num, _, rest = head.partition(" ")
+            t.append(f"{num} ", style=f"bold {ACCENT}")
+            t.append(rest)
+            append_packed(t, detail.strip().split(SEP), width, style="#94a3b8")
+            opts.append(Option(t, id=f"w{i}"))
+        self.set_options(opts)
+
+
+class Packed(Static):
+    """Short segments joined by ' · ', wrapped only between segments."""
+
+    text = ""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.segments: list[str] = []
+
+    def set_segments(self, segments: list[str]) -> None:
+        self.segments = list(segments)
+        self._draw()
+
+    def on_resize(self) -> None:
+        self._draw()
+
+    def _draw(self) -> None:
+        width = max(20, (self.size.width or 160) - 2)
+        self.text = "\n".join(pack(self.segments, width))
+        self.update(Text(self.text))
+
+
+class InfoLine(Packed):
+    """Under the bankroll: today's record, daily-limit room, next price check, how old the prices are."""
 
 
 class Section(Vertical):
     """A titled box holding a list and the plain-English message shown when the list is empty."""
 
-    def __init__(self, title: str, body, empty_id: str, **kw):
+    def __init__(self, title: str, body, empty_id: str, summary_id: str | None = None, **kw):
         super().__init__(**kw)
         self.border_title = title
         self.body = body
         self.empty = Static("", id=empty_id, classes="empty")
+        self.summary = Packed(id=summary_id, classes="summary") if summary_id else None
 
     def compose(self) -> ComposeResult:
         yield self.empty
         yield self.body
+        if self.summary is not None:
+            yield self.summary
+
+    def show_summary(self, line: str | list[str] | None) -> None:
+        """A short summary under the list, as a line or ' · ' segments (hidden when None)."""
+        if self.summary is None:
+            return
+        segs = [] if line is None else line.split(SEP) if isinstance(line, str) else list(line)
+        self.summary.set_segments(segs)
+        self.summary.display = line is not None
 
     def show_empty(self, message: str | None) -> None:
         """message None: show the list; otherwise hide it and explain why it is empty."""
@@ -434,3 +555,4 @@ class Section(Vertical):
         self.empty.update(Text(message or ""))
         self.empty.display = message is not None
         self.body.display = message is None
+        self.set_class(message is not None, "is-empty")

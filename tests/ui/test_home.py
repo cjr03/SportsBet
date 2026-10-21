@@ -81,7 +81,11 @@ def test_open_bet_kalshi_live_with_value():
     assert v.text == "Eagles win by 4 or more points vs Cowboys" and v.stake == "$19.50"
     assert v.game == "Cowboys 10, Eagles 14 - 2nd quarter, 3:00 left"
     # 40 x 60c = $24.00 less a $0.68 fee to sell, against $19.50 paid
-    assert v.pnl_cents == 2400 - 68 - 1950 and v.worth == "$23.32 (+$3.82)"
+    assert v.pnl_cents == 2400 - 68 - 1950
+    assert v.worth == "sell now for $23.32 \u00b7 paid $19.50 \u00b7 +$3.82" and v.paid_text == ""
+    assert v.pays == "pays $40.00 if it wins" and v.max_payout_cents == 4000
+    assert v.chances == "our chance 55% when placed \u00b7 market says 53% now"  # mid of 60 bid / 47 ask
+    assert v.expected_cents == 2200  # 40 x 55%
     assert v.close == "price 2.1% better than closing"
     assert home.close_text(-0.008) == "price 0.8% worse than closing"
 
@@ -170,3 +174,153 @@ def test_within_limits_drops_markets_paused_since_the_rec():
 def test_middle_row_is_labelled_not_risk_free():
     mid = rec(1, kind="middle", legs=[leg(line=2.5), leg(side="no", line=6.5)], p_win=0.2, stake_cents=0)
     assert home.place_now_cells(mid, NOW, {GID: GAME})[1] == "Kalshi - Not risk-free"
+
+
+# -- info line, detail lines, WATCHING, open-bet values ---------------------------------------------
+def test_age_and_info_segments():
+    assert home.age_text(None, NOW, "Kalshi prices") == "no Kalshi prices yet"
+    assert home.age_text(NOW - timedelta(seconds=20), NOW, "Kalshi prices") == "Kalshi prices under 1 min old"
+    assert home.age_text(NOW - timedelta(minutes=12), NOW, "sportsbook lines") == "sportsbook lines 12 min old"
+    assert home.age_text(NOW - timedelta(minutes=150), NOW, "player lines") == "player lines 2 hr old"
+    assert home.age_text(NOW - timedelta(days=1, hours=1), NOW, "player lines") == "player lines 1 day old"
+    assert home.record_text(0, 0, 0) == "Today: no bets settled yet"
+    assert home.record_text(2, 1, 1) == "Today: 2 won, 1 lost, 1 refunded"
+    segs = home.info_segments(NOW, record=(2, 1, 0), day_left=1240, day_cap=3580,
+                              next_check=NOW + timedelta(minutes=12), kalshi_at=NOW - timedelta(minutes=1),
+                              books_at=NOW - timedelta(minutes=12), props_at=NOW - timedelta(hours=2))
+    assert segs == ["Today: 2 won, 1 lost", "$12.40 of today's $35.80 limit left", "next check 12:42 PM PT",
+                    "Kalshi prices 1 min old", "sportsbook lines 12 min old", "player lines 2 hr old"]
+    assert home.info_segments(NOW, record=(0, 0, 0), day_left=None, day_cap=None, next_check=NOW,
+                              kalshi_at=None, books_at=None, props_at=None)[1] == "checking prices now"
+
+
+def test_pack_breaks_only_between_segments():
+    segs = ["aaaa", "bbbb", "cccc"]
+    assert home.pack(segs, 200) == ["aaaa · bbbb · cccc"]
+    assert home.pack(segs, 11) == ["aaaa · bbbb", "cccc"]
+    assert home.pack(["a very long segment"], 5) == ["a very long segment"]  # never split a segment
+
+
+def test_max_price_keeps_the_minimum_edge():
+    top = home.max_price(leg(p_fair=0.55), 40, 0.025)
+    from gridiron_edge.strategy.kalshi_pricing import effective_price, kalshi_ev
+    assert kalshi_ev(0.55, effective_price(top, 40)) >= 0.025
+    assert kalshi_ev(0.55, effective_price(top + 0.01, 40)) < 0.025
+    assert home.max_price(leg(p_fair=0.01), 40, 0.025) is None
+
+
+def test_short_player_and_source():
+    assert home.short_player("Jalen Hurts") == "Hurts"
+    assert home.short_player("Kenneth Walker III") == "Walker"
+    assert home.short_player("Amon-Ra St. Brown") == "St. Brown"
+    pin = {"fair_source": "pinnacle", "books": ["pinnacle", "draftkings", "fanduel"], "model_weight": 0.0}
+    assert home.source_short(rec(1, why=pin)) == "from Pinnacle and 2 other sportsbooks"
+    blended = {**pin, "model_weight": 0.3, "p_model": 0.55}
+    assert home.source_short(rec(1, why=blended)) == "from Pinnacle and 2 other sportsbooks plus our team ratings"
+    assert home.source_short(rec(1, why={"fair_source": "pinnacle", "books": ["pinnacle"]})) == "from Pinnacle"
+    assert home.source_short(rec(1, why={"fair_source": "exchanges"})) == "from betting exchanges"
+    proj = {"kalshi_mid": 0.4, "weight": 0.3, "p_ours": 0.5, "book_line": None}
+    assert home.source_short(rec(1, kind="kalshi_prop", why=proj)) == "from our player projection and Kalshi traders"
+    assert home.source_short(rec(1, kind="kalshi_prop", why={**proj, "book_line": 1.5})) == \
+        "from sportsbook player lines and Kalshi traders"
+    assert home.source_short(rec(1)) == "from sportsbook lines"
+
+
+def test_place_now_detail_kalshi_single():
+    r = rec(9, legs=[leg(p_fair=0.52, p_mkt=0.51)], qty=40,
+            why={"fair_source": "pinnacle", "books": ["pinnacle", "draftkings", "fanduel"]})
+    text = home.place_now_detail(r, {}, {GID: GAME}, 0.025)
+    top = round(home.max_price(r.legs[0], 40, 0.025) * 100)
+    assert text == (f"our chance 52% · price says 47% · sportsbooks say 51% · 40 contracts, pay up to "
+                    f"{top} cents · pays $40.00 if it wins · from Pinnacle and 2 other sportsbooks")
+
+
+def test_place_now_detail_locked_profit_shows_worst_and_best():
+    ml = dict(market_type="ml", line=None)
+    markets = {"KC": market(ticker="KC", team="PHI", **ml), "MIA": market(ticker="MIA", team="DAL", **ml)}
+    arb = rec(12, kind="arb", qty=20, tie_risk=True,
+              legs=[leg(ticker="KC", line=None, price=0.60, worst_price=0.60),
+                    leg(ticker="MIA", team="DAL", line=None, price=0.36, worst_price=0.37)])
+    text = home.place_now_detail(arb, markets, {GID: GAME}, 0.025)
+    assert "20 contracts of each side, pay up to 60 cents and 37 cents" in text
+    assert "pays $20.00 whichever team wins ($0.00 on a tie)" in text
+    assert text.endswith("from the prices alone (no prediction needed)")
+    spread = dict(market_type="spread")
+    ladder = {"A": market(ticker="A", line=2.5, **spread), "B": market(ticker="B", line=6.5, **spread)}
+    mid = rec(13, kind="middle", qty=20, p_win=0.16, legs=[leg(ticker="A", line=2.5), leg(ticker="B", side="no",
+                                                                                        line=6.5)])
+    text = home.place_now_detail(mid, ladder, {GID: GAME}, 0.025)
+    assert "both sides pay about 16% of the time" in text and "pays $20.00 at worst, $40.00 at best" in text
+
+
+def test_place_now_detail_prizepicks_needed_chance():
+    legs = [leg(venue="prizepicks", side="over", player=n, stat="pass_tds", line=1.5, ticker=None, p_fair=p,
+                p_mkt=p) for n, p in (("Jalen Hurts", 0.61), ("Patrick Mahomes", 0.62), ("Jared Goff", 0.6))]
+    pp = rec(11, kind="pp_entry", legs=legs, structure="3-power", stake_cents=1000, qty=None)
+    text = home.place_now_detail(pp, {}, {GID: GAME}, 0.025)
+    need = home.pp_needed("3-power")
+    assert text == ("our chance per pick: Hurts 61%, Mahomes 62%, Goff 60% · each pick needs about "
+                    f"{need:.0%} · pays up to $60.00 if all 3 hit · from sportsbook player lines")
+
+
+def test_watching_filters_dedupes_and_ranks():
+    games = {GID: GAME}
+    a_old = rec(1, observe_only=True, state="LOGGED", ev=0.05)
+    a_new = rec(4, observe_only=True, state="LOGGED", ev=0.04)  # same idea, newer price
+    b = rec(2, observe_only=True, state="LOGGED", ev=0.09, legs=[leg(side="no")])
+    texted = rec(3, ev=0.2)  # a real rec: in PLACE NOW, not here
+    stale = rec(5, observe_only=True, state="LOGGED", expires_at=NOW, legs=[leg(line=6.5)])
+    out = home.watching([a_old, a_new, b, texted, stale], NOW, games)
+    assert [r.id for r in out] == [2, 4]
+    started = {GID: replace(GAME, status="live")}
+    assert home.watching([b], NOW, started) == []
+    assert home.watch_summary(2, 2) is None
+    assert home.watch_summary(8, 11) == "3 more ideas on the watch list not shown."
+
+
+def test_watch_reasons():
+    games = {GID: GAME, "cfb:1:A@B": replace(GAME, game_id="cfb:1:A@B", league="cfb")}
+    r = rec(1, observe_only=True)
+    assert home.watch_reason(r, games, {}, {("nfl", "spread"): True}) == "paused after poor recent results"
+    assert home.watch_reason(r, games, {("nfl", "spread"): True}, {}) == \
+        "our model is still being tested for this kind of bet"
+    cfb = rec(2, observe_only=True, legs=[leg(game_id="cfb:1:A@B")])
+    assert home.watch_reason(cfb, games, {("cfb", "spread"): True}, {}) == "our college model is still being tested"
+    prop = rec(3, kind="kalshi_prop", observe_only=True, legs=[leg(player="Jordan Love", stat="pass_tds", line=1.5)],
+               why={"kalshi_mid": 0.4, "book_line": None})
+    assert home.watch_reason(prop, games, {}, {}) == "our player projection is still being tested"
+    mid = rec(4, kind="middle", observe_only=True, legs=[leg(), leg(side="no", line=6.5)])
+    assert home.watch_reason(mid, games, {}, {}, middles_live=False) == \
+        "pairs that are not risk-free are watch-only for now"
+    head, detail = home.watch_cells(rec(9, ev=0.07), NOW, games, "our model is still being tested")
+    assert head == "#9 Kalshi  Eagles win by 4 or more points vs Cowboys"
+    assert detail == ("    47 cents · our chance 55% · about 7 cents profit per $1 bet · kickoff 1:20 PM PT"
+                      " · not texted: our model is still being tested")
+
+
+def test_open_bet_without_a_buyer_or_a_price():
+    v = home.open_bet_view(bet_row(), {GID: GAME}, {"KXNFLSPREAD-T": market(yes_bid=0.0)}, NOW)
+    assert v.worth == "no buyer right now" and v.paid_text == "paid $19.50" and v.pnl_cents is None
+    v = home.open_bet_view(bet_row(), {GID: GAME}, {}, NOW)
+    assert v.worth == "no current Kalshi price" and v.chances == "our chance 55% when placed"
+
+
+def test_open_bet_pp_pick_progress_and_summary():
+    legs = [asdict(leg(venue="prizepicks", side="over", player=n, stat="pass_tds", line=1.5, ticker=None,
+                       team=None, p_fair=0.6)) for n in ("Jalen Hurts", "Jared Goff", "Dak Prescott")]
+    row = bet_row(id=8, kind="pp_entry", legs_json=json.dumps(legs), structure="3-power", qty=None, fee_cents=0,
+                  stake_cents=1000)
+    stats = {"Jalen Hurts": 1.0, "Jared Goff": 3.0}
+    v = home.open_bet_view(row, {GID: GAME}, {}, NOW, stat_lookup=lambda g, p, s: stats.get(p, "pending"))
+    assert v.picks == ("Hurts 1 of 1.5 passing touchdowns (needed more; missed) · Goff 3 of 1.5 passing "
+                       "touchdowns (needed more; hit) · Prescott: no stats yet")
+    assert v.pays == "pays up to $60.00 if all 3 hit" and v.max_payout_cents == 6000
+    assert v.expected_cents == round(1000 * 6 * 0.6 ** 3)
+    quiet = home.open_bet_view(row, {GID: GAME}, {}, NOW)
+    assert quiet.picks == "" and quiet.worth == "3 pending"
+    k = home.open_bet_view(bet_row(), {GID: GAME}, {}, NOW)
+    assert home.open_summary([]) is None
+    assert home.open_summary([k, v]) == [
+        "$28.80 in 2 open bets ($29.50 with fees)", "up to $100.00 back if all win",
+        f"about {home.d.money(k.expected_cents + v.expected_cents)} expected back "
+        f"(+{home.d.money(k.expected_cents + v.expected_cents - 2950)}) at our chances when placed"]

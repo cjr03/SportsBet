@@ -1,5 +1,6 @@
 """The Textual app: focus-mode tabs (Home, Performance, Scores, Log, PrizePicks), command bar, scheduler workers."""
 import json
+import math
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
@@ -26,9 +27,10 @@ from gridiron_edge.ui import prizepicks as pp_ui
 from gridiron_edge.ui.commands import COMMAND_WORDS, HELP, Command, CommandError, parse_command
 from gridiron_edge.ui.screens import ConfirmScreen, WhyScreen
 from gridiron_edge.ui.widgets import (
-    BalanceChart, BankrollHeader, EventLog, KpiTiles, OpenBetsList, PlaceNowList, QuotaBar,
-    ScoresPanel, Section,
+    BalanceChart, BankrollHeader, EventLog, InfoLine, KpiTiles, OpenBetsList, PlaceNowList, QuotaBar,
+    ScoresPanel, Section, WatchList,
 )
+from gridiron_edge.strategy.prizepicks import payout_table
 
 _LEAGUE = {"nfl": "NFL", "cfb": "college football"}
 ODDS_GAMES_COST = 3  # credits per league for h2h+spreads+totals
@@ -121,10 +123,14 @@ class GridironApp(App):
 
     def compose(self) -> ComposeResult:
         yield BankrollHeader()
+        yield InfoLine(id="info-line")
         with TabbedContent(id="tabs", initial="home"):
             with TabPane("1 Home", id="home"):
                 yield Section("PLACE NOW", PlaceNowList(id="place-now"), "place-empty", id="place-box")
-                yield Section("OPEN BETS", OpenBetsList(id="open-bets"), "open-empty", id="open-box")
+                yield Section("OPEN BETS", OpenBetsList(id="open-bets"), "open-empty", "open-summary",
+                              id="open-box")
+                yield Section("WATCHING (shown, not texted)", WatchList(id="watching"), "watch-empty",
+                              "watch-summary", id="watch-box")
                 yield Static("", id="pp-status")
             with TabPane("2 Performance", id="performance"):
                 yield BalanceChart()
@@ -229,21 +235,57 @@ class GridironApp(App):
         s, now = self.services, self.clock()
         games = {g.game_id: g for g in s.registry.all_since(now - timedelta(days=2))}
         markets = {m.ticker: m for m in s.latest.get("kalshi", [])}
-        recs = home.actionable(s.lifecycle.board(), now, games, markets, s.settings.kalshi_min_ev)
+        board = s.lifecycle.board(300)
+        recs = home.actionable(board, now, games, markets, s.settings.kalshi_min_ev)
         budget, paused = s.place_limits(now)
+        day_left, day_cap = budget.day_left(), math.floor(s.settings.cap_day * budget.bankroll)
         recs = home.within_limits(recs, games, budget, paused)
+        try:
+            payouts = payout_table(s.settings)
+        except ValueError:  # a bad payout override: fall back to the standard tables
+            payouts = None
         place = self.query_one("#place-box", Section)
-        place.body.set_recs(recs, now, games, self.names)
+        details = {r.id: home.place_now_detail(r, markets, games, s.settings.kalshi_min_ev, payouts) for r in recs}
+        place.body.set_recs(recs, now, games, self.names, details)
         place.show_empty(None if recs else home.empty_reason(
             now, odds_key=s.odds is not None and not s.odds.disabled, games=list(games.values()),
             markets=list(markets.values()), gates=dict(s.gates), next_check=s.scheduler.next_check(now),
             names=self.names))
-        views = [home.open_bet_view(b, games, markets, now, self.names, s._stat_lookup)
+        views = [home.open_bet_view(b, games, markets, now, self.names, s._stat_lookup, payouts)
                  for b in s.lifecycle.open_bets()]
         bets = self.query_one("#open-box", Section)
         bets.body.set_bets(views)
         bets.show_empty(None if views else "No open bets. Bets you confirm show up here.")
+        bets.show_summary(home.open_summary(views))
+        self._show_watching(board, now, games, paused)
+        self._show_info(now, day_left, day_cap)
         self._show_pp(sum(r.kind == "pp_entry" for r in recs), now)
+
+    def _show_watching(self, board: list[Recommendation], now: datetime, games: dict, paused: dict) -> None:
+        s = self.services
+        watch = home.watching(board, now, games)
+        shown = watch[:home.WATCH_LIMIT]
+        rows = [home.watch_cells(r, now, games, home.watch_reason(r, games, dict(s.gates), paused,
+                                                                  s.settings.middles_live), self.names)
+                for r in shown]
+        box = self.query_one("#watch-box", Section)
+        box.body.set_rows(rows)
+        summary = home.watch_summary(len(shown), len(watch))
+        box.show_empty(summary if not watch else None)
+        box.show_summary(summary if watch else None)
+
+    def _show_info(self, now: datetime, day_left: int, day_cap: int) -> None:
+        s = self.services
+
+        def newest(items) -> datetime | None:
+            stamps = [getattr(i, "fetched_at", None) or getattr(i, "last_update", None) for i in items]
+            stamps = [t for t in stamps if t is not None]
+            return max(stamps) if stamps else None
+
+        self.query_one(InfoLine).set_segments(home.info_segments(
+            now, record=self._today_record(now), day_left=day_left, day_cap=day_cap,
+            next_check=s.scheduler.next_check(now), kalshi_at=newest(s.latest.get("kalshi", [])),
+            books_at=newest(s.latest.get("quotes", [])), props_at=newest(s.latest.get("props", []))))
 
     def _show_pp(self, active: int, now: datetime) -> None:
         """The Home PrizePicks status line and the PrizePicks tab."""
@@ -253,6 +295,18 @@ class GridironApp(App):
         view.active = active
         self.query_one("#pp-status", Static).update(Text(pp_ui.status_line(view, now, self.names)))
         self.query_one("#pp-board", Static).update(Text("\n".join(pp_ui.board_lines(view, now, self.names))))
+
+    def _settled_today(self, now: datetime) -> list:
+        day = now.astimezone(PT).replace(hour=0, minute=0, second=0, microsecond=0)
+        return [b for b in self.services.conn.execute(
+            "SELECT result, stake_cents, fee_cents, payout_cents, settled_at FROM bets "
+            "WHERE state != 'PLACED' AND settled_at IS NOT NULL")
+            if datetime.fromisoformat(b["settled_at"]) >= day]
+
+    def _today_record(self, now: datetime) -> tuple[int, int, int]:
+        """(won, lost, refunded) among bets settled since PT midnight."""
+        rows = self._settled_today(now)
+        return tuple(sum(b["result"] == r for b in rows) for r in ("won", "lost", "refund"))  # type: ignore[return-value]
 
     def _today_profit(self, now: datetime) -> int:
         """Today's win/loss: net result of every bet settled since PT midnight, whenever it was placed.

@@ -217,3 +217,13 @@ async def test_quota_low_class_and_header():
         assert h.text.endswith("(7.5%) \u00b7 Odds: 412/500") and len(h.text) <= 78
 
 
+
+
+def test_append_packed_wraps_between_segments_with_the_indent():
+    from rich.text import Text
+
+    from gridiron_edge.ui.widgets import append_packed
+    t = Text("head")
+    append_packed(t, ["our chance 52%", [("pays ", ""), ("$40.00", "green")], "from Pinnacle"], 36)
+    assert t.plain == "head\n    our chance 52% · pays $40.00\n    from Pinnacle"
+    assert all(len(line) <= 36 for line in t.plain.splitlines())

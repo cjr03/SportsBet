@@ -6,7 +6,7 @@ from textual.widgets import Input, Static, TabbedContent
 from gridiron_edge.app import GridironApp
 from gridiron_edge.scheduler import Job
 from gridiron_edge.ui.screens import ConfirmScreen, WhyScreen
-from gridiron_edge.ui.widgets import BankrollHeader, EventLog, OpenBetsList, PlaceNowList
+from gridiron_edge.ui.widgets import BankrollHeader, EventLog, InfoLine, OpenBetsList, PlaceNowList
 
 # Five minutes after the fixtures' odds were pulled; Sunday's SEA game is ~31 h away.
 NOW = datetime(2026, 10, 31, 18, 5, tzinfo=UTC)
@@ -301,6 +301,11 @@ async def test_home_empty_state_explains_itself(services_mocked):
         place = app.query_one("#place-box")
         assert place.region.height >= 8 and place.region.right <= 100
         assert app.query_one(BankrollHeader).region.height == 1
+        assert str(app.query_one("#watch-empty", Static).render()) == "Nothing on the watch list."
+        info = app.query_one(InfoLine)
+        assert info.text.startswith("Today: no bets settled yet") and "limit left" in info.text
+        assert all(len(line) <= 98 for line in info.text.splitlines()) and info.region.right <= 100
+        assert not app.query_one("#open-summary").display
 
 
 async def test_home_place_why_skip_and_open_bets(services_mocked, load):
@@ -315,6 +320,7 @@ async def test_home_place_why_skip_and_open_bets(services_mocked, load):
         await pilot.pause()
         text = home_text(app)
         assert "#1 Kalshi  Seahawks beat Bears" in text and "expected profit $" in text
+        assert "our chance " in text and "pays $" in text and " contract" in text
         assert not [w for w in JARGON if w in text], text
         await pilot.press("down")  # from the empty command bar into the list
         await pilot.press("d")
@@ -335,6 +341,9 @@ async def test_home_place_why_skip_and_open_bets(services_mocked, load):
         assert opened.option_count == 1
         assert "Seahawks beat Bears" in opened.get_option_at_index(0).prompt.plain
         assert "in open bets" in app.query_one(BankrollHeader).text
+        summary = app.query_one("#open-summary")
+        assert summary.display and "in 1 open bet" in summary.text and "back if it wins" in summary.text
+        assert "pays $" in opened.get_option_at_index(0).prompt.plain
         assert not app.query_one("#place-now").display  # nothing left to place
 
 

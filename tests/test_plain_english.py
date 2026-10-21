@@ -150,6 +150,44 @@ def test_home_and_why_panel_are_plain(name):
     assert lines[-1].startswith("[details]")
 
 
+WHYS = (None, {"fair_source": "pinnacle", "books": ["pinnacle", "draftkings"], "p_market": 0.51, "p_model": 0.55,
+               "model_weight": 0.3}, {"fair_source": "anchored-median", "books": ["fanduel"]},
+        {"kalshi_mid": 0.4, "weight": 0.3, "p_ours": 0.5, "book_line": None},
+        {"source": "sportsbook player lines (DraftKings) with the bookmakers' cut removed"})
+
+
+@pytest.mark.parametrize("name", list(RECS))
+def test_home_detail_and_watch_rows_are_plain(name):
+    """The PLACE NOW detail line and WATCHING rows, for every kind of idea and every source of our number."""
+    from dataclasses import replace
+    games = {GID: GAME, CFB: CFB_GAME}
+    markets = {m.ticker: m for m in (_market(), _market(ticker="KXNFLGAME-X-PHI", market_type="ml", line=None),
+                                     _market(ticker="KXNFLGAME-X-DAL", market_type="ml", team="DAL", line=None))}
+    for why in WHYS:
+        rec = replace(RECS[name], why=why)
+        detail = home.place_now_detail(rec, markets, games, 0.025)
+        clean(detail)
+        assert "None" not in detail and "_" not in detail, detail
+        reason = home.watch_reason(rec, games, {("cfb", "spread"): True}, {("nfl", "ml"): True}, False)
+        for cell in home.watch_cells(rec, NOW, games, reason, NAMES):
+            clean(cell)
+            assert " PT" in cell or not cell.startswith("    "), cell
+
+
+def test_info_line_and_open_summary_are_plain():
+    segs = home.info_segments(NOW, record=(2, 1, 0), day_left=1240, day_cap=3580,
+                              next_check=NOW + timedelta(minutes=4), kalshi_at=NOW - timedelta(minutes=1),
+                              books_at=NOW - timedelta(minutes=12), props_at=None)
+    lines = home.pack(segs, 98)
+    sentence(lines[0])
+    for line in lines[1:]:
+        clean(line)
+    assert "$12.40 of today's $35.80 limit left" in segs and "next check 10:04 AM PT" in segs
+    assert "no player lines yet" in segs and "Kalshi prices 1 min old" in segs
+    assert home.watch_summary(0, 0) == "Nothing on the watch list."
+    sentence(home.watch_summary(8, 9))
+
+
 def test_open_bets_and_empty_reasons_are_plain():
     import json
     from dataclasses import asdict
@@ -163,6 +201,8 @@ def test_open_bets_and_empty_reasons_are_plain():
                                lambda g, p, s: 250.0)
         for cell in v.cells():
             clean(cell)
+        for seg in home.open_summary([v]):
+            clean(seg)
     for kw in (dict(odds_key=False), dict(games=[]), dict(markets=[]), dict(gates={("nfl", m): True for m in
                                                                                    ("ml", "spread", "total")})):
         args = dict(odds_key=True, games=[GAME], markets=[_market()], gates={}, next_check=NOW + timedelta(minutes=2))
