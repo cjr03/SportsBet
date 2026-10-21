@@ -204,3 +204,39 @@ def test_close_games_shadow_skips_kalshi_props(services_mocked, mk):
                        observe_only=True), NOW - timedelta(hours=1))
     svc.odds.budget.record(400, 100, 1)  # plenty of budget
     assert gid not in svc.close_games()  # prop CLV never uses game odds: no paid close pull
+
+
+# -- Performance tab wiring: KPI tiles + the evaluation report ---------------------------------------
+def test_performance_adds_report_calibration_warnings_and_pauses(services_mocked, mk):
+    svc = services_mocked()
+    _bad_signals(svc, mk)
+    svc.check_drift(NOW)
+    perf = svc.performance(NOW)
+    assert {"roi", "roi_ci", "conclusive", "record"} <= set(perf)  # the KPI tiles' own numbers
+    assert any(w.startswith("Warning: NFL point-spread bets") for w in perf["warnings"])
+    assert any("type: drift reset nfl spread" in w for w in perf["warnings"])
+    assert any(x.startswith("Beat the closing price") for x in perf["extra"])
+    for line in perf["warnings"] + perf["extra"]:
+        assert line.isascii() and not any(j in line for j in ("CLV", "Brier", "ROI", "EV "))
+
+
+def test_kpi_tiles_show_calibration_and_report_lines():
+    from gridiron_edge.ui.widgets import KpiTiles
+
+    tiles = KpiTiles()
+    tiles.update = lambda *_: None  # render text only
+    tiles.update_kpis({"roi": 0.05, "roi_ci": (-0.1, 0.2), "n": 3, "record": "2-1-0", "max_dd": 0,
+                       "extra": ["Beat the closing price (higher is better): +1.0%."],
+                       "calibration": ["When we said 60-80%, it happened 67% of the time (3 bets)"],
+                       "warnings": ["Warning: something"]})
+    lines = tiles.text.split("\n")
+    i = lines.index("How often our chances came true:")
+    assert lines[i + 1].strip().startswith("When we said 60-80%") and lines[-1] == "Warning: something"
+    assert "Beat the closing price (higher is better): +1.0%." in lines
+
+
+def test_calibration_lines_plain_english():
+    from gridiron_edge.bets.report import calibration_lines
+    rel = [{"lo": 0.4, "hi": 0.6, "n": 12, "mean_p": 0.5, "hit_rate": 0.55},
+           {"lo": 0.6, "hi": 0.8, "n": 0, "mean_p": None, "hit_rate": None}]
+    assert calibration_lines(rel) == ["When we said 40-60%, it happened 55% of the time (12 bets)"]

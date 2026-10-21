@@ -106,3 +106,50 @@ def test_empty_reasons():
     gated = {("nfl", m): True for m in ("ml", "spread", "total")} | {("cfb", "ml"): False}
     assert "tracking-only" in home.empty_reason(NOW, **{**base, "gates": gated})
     assert home.empty_reason(NOW, **{**base, "games": []}).startswith("No games on the schedule")
+
+
+# -- PLACE NOW respects the sizing caps and later pauses ---------------------------------------------
+class _Snap:
+    def __init__(self, **kw):
+        self.games = {GID: GAME}
+        self.open_game_exposure = kw.get("game", {})
+        self.open_window_exposure = {}
+        self.open_dir_exposure = kw.get("dirs", {})
+        self.placed_today_cents = kw.get("today", 0)
+        self.bankroll_cents = 100_000
+        self.open_exposure_cents = 0
+
+
+def _budget(**kw):
+    from gridiron_edge.config import Settings
+    from gridiron_edge.pipeline import Budget
+    snap = _Snap(**kw)
+    return Budget(snap.bankroll_cents, snap.bankroll_cents, Settings(cap_game=0.04, cap_day=0.2,
+                                                                     cap_same_dir=0.03), snap)
+
+
+def test_within_limits_drops_recs_the_game_cap_no_longer_allows():
+    a, b = rec(1, stake_cents=2500), rec(2, stake_cents=2000, legs=[leg(side="no")])
+    assert [r.id for r in home.within_limits([a, b], {GID: GAME}, _budget())] == [1]  # 4% of $1,000 = $40
+    placed = _budget(game={GID: 3000})  # $30 already placed on this game
+    assert home.within_limits([a], {GID: GAME}, placed) == []
+    assert home.within_limits([a], {GID: GAME}, _budget(today=19_000)) == []  # daily cap nearly used
+
+
+def test_within_limits_same_direction_cap_and_hedged_pairs():
+    yes1, yes2 = rec(1, stake_cents=2000), rec(2, stake_cents=2000)
+    assert [r.id for r in home.within_limits([yes1, yes2], {GID: GAME}, _budget())] == [1]
+    arb = rec(3, kind="arb", stake_cents=9000, legs=[leg(), leg(side="no")])
+    assert home.within_limits([arb], {GID: GAME}, _budget(game={GID: 4000})) == [arb]
+
+
+def test_within_limits_drops_markets_paused_since_the_rec():
+    paused = {("nfl", "spread"): True}
+    assert home.within_limits([rec(1)], {GID: GAME}, _budget(), paused) == []
+    ml = rec(2, legs=[leg(line=None, ticker="KXNFLGAME-T")])
+    assert home.within_limits([ml], {GID: GAME}, _budget(), paused) == [ml]
+
+
+def test_middle_row_is_labelled_not_risk_free():
+    mid = rec(1, kind="middle", legs=[leg(line=2.5), leg(side="no", line=6.5)], p_win=0.2, stake_cents=0)
+    assert home.place_now_cells(mid, NOW, {GID: GAME})[1] == "Kalshi - Not risk-free"

@@ -104,3 +104,49 @@ def test_no_jargon_in_bet_text():
         assert "KX" not in t and "ML" not in t and ">" not in t
     assert d.bet_text(rec("arb", [kleg(ticker="A", line=None), kleg(ticker="B", team="DAL", line=None)])) \
         == "Eagles beat Cowboys AND Cowboys beat Eagles"
+
+
+# -- cross-stream wiring: the fair-pricing why dict, middles ---------------------------------------
+JARGON = ("fair_source", "anchored-", "p_market", "p_model", "model_weight", "EV", "CLV", "Brier",
+          "implied mean", "h2h", "hfa")
+
+
+def test_why_panel_renders_fair_pricing_reasons_in_plain_english():
+    why = {"fair_source": "anchored-pinnacle", "books": ["pinnacle"], "p_market": 0.54, "p_model": 0.58,
+           "model_weight": 0.3, "method": "adjacent line", "tie_prob": 0.004}
+    lines = d.why_lines(rec(why=why), NOW, kelly_fraction=0.25, cap_bet=0.02)
+    text = "\n".join(lines[:-1])
+    assert "the last price from Pinnacle, the sharpest sportsbook, moved by how much" in text
+    assert "(Pinnacle)" in text and "adjusted from a line half a point away" in text
+    assert "Sportsbooks say 54%; our team ratings say 58% and count for 30% of our number." in text
+    assert "0.4% chance of a tie" in text
+    assert not [j for j in JARGON if j in text], text
+    assert text.isascii()
+    assert lines[-1].startswith("[details] id 41") and "fair_source=anchored-pinnacle" in lines[-1]
+
+
+def test_why_panel_market_only_and_median_source():
+    why = {"fair_source": "median", "books": ["draftkings", "fanduel"], "p_market": 0.5, "p_model": None,
+           "model_weight": 0.0, "method": "h2h", "tie_prob": 0.0}
+    text = "\n".join(d.why_lines(rec(why=why), NOW)[:-1])
+    assert "middle of the regular sportsbooks' prices" in text and "DraftKings, FanDuel" in text
+    assert "our team ratings are not used for this one" in text and "tie" not in text
+
+
+def test_why_panel_sizing_names_the_caps_and_prizepicks_cut():
+    from gridiron_edge.config import Settings
+    s = Settings()
+    pp = rec("pp_entry", legs=[Leg("prizepicks", "x", "over", 0.0, 0.6, GID, player="Jalen Hurts",
+                                    stat="pass_tds", line=1.5)], structure="5-flex", qty=None, stake_cents=500)
+    text = "\n".join(d.why_lines(pp, NOW, settings=s))
+    assert f"at most {s.cap_game:.0%} of bankroll on one game" in text
+    assert "until you confirm the PrizePicks payouts" in text
+
+
+def test_middle_expected_profit_and_why():
+    legs = [kleg(line=2.5), kleg(side="no", line=6.5, ticker="KXNFLSPREAD-B", price=0.50)]
+    mid = rec("middle", legs=legs, qty=20, p_win=0.18, stake_cents=0)
+    cost, fee = d.cost_cents(mid), d.fee_cents(mid)
+    assert d.expected_profit_cents(mid) == round(20 * 1.18 * 100) - cost - fee
+    text = "\n".join(d.why_lines(mid, NOW))
+    assert "Not risk-free" in text and "18% chance" in text

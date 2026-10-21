@@ -131,6 +131,10 @@ class KpiTiles(Static):
             lines.append(f"After {n} bets we are losing by more than bad luck explains")
         else:
             lines.append(f"Too few bets to tell luck from skill yet ({n} settled)")
+        lines += [str(x) for x in k.get("extra", []) or []]  # extra report lines (locked profit, vs market)
+        cal = k.get("calibration") or []
+        if cal:
+            lines += ["How often our chances came true:", *(f"  {c}" for c in cal)]
         lines += [str(w) for w in k.get("warnings", []) or []]  # e.g. drift warnings from the report
         self.text = "\n".join(lines)
         self.update(Text(self.text))

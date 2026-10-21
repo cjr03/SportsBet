@@ -36,7 +36,7 @@ from gridiron_edge.models.cfb import CfbRatings, cfb_prior, games_played
 from gridiron_edge.models.nfl import NflRatings, is_neutral, qb_changes
 from gridiron_edge.models.props import STAT_COLUMNS, PropProjector
 from gridiron_edge.models.ridge import implied_ratings
-from gridiron_edge.describe import Names, bet_text, expected_profit_cents, money
+from gridiron_edge.describe import Names, bet_text, book_name, expected_profit_cents, money
 from gridiron_edge.notify.chain import NotifyChain
 from gridiron_edge.notify.console import ConsoleNotifier
 from gridiron_edge.notify.format import PT, format_message
@@ -413,7 +413,7 @@ class Services:
             for league in LEAGUES:
                 for d in range(8):
                     from_rundown += self._apply_scores(await self.rundown.scores(league, today + timedelta(days=d)))
-        return [("info", f"games: {from_odds} from odds events, {from_rundown} from therundown")]
+        return [("info", f"Schedule: {from_odds} games from the odds service, {from_rundown} from the scores service")]
 
     def _read_nflverse(self, seasons: list[int]) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
         # schedules ship as one file for every season, so the margin model's 2015+ history is free
@@ -454,23 +454,23 @@ class Services:
             if self.settings.props_use_snaps_injuries:
                 snaps, injuries, missing = await asyncio.to_thread(self._read_player_status, seasons)
                 if missing:
-                    out.append(("info", f"player-prop model: no {' or '.join(missing)} from nflverse - "
-                                        "injury and snap-share filters are off"))
+                    out.append(("info", "Player bets: injury and playing-time data unavailable right now; "
+                                        "those checks are off"))
             self.projector, gate = await asyncio.to_thread(self._build_projector, weekly, snaps, injuries, cur)
             self.projector_live = bool(gate["live"])
             if gate["n"]:
-                out.append(("info", f"player-prop model check ({cur - 1} season): {gate['n']} picks, said "
-                                    f"{gate['claimed']:.0%}, hit {gate['hit']:.0%} - "
-                                    + ("model-only prop picks are live" if self.projector_live
-                                       else "model-only prop picks are watch-only")))
+                out.append(("info", f"Player projections checked on {gate['n']} past picks ({cur - 1} season): "
+                                    f"we said {gate['claimed']:.0%}, they hit {gate['hit']:.0%} - "
+                                    + ("player bets priced by our projection alone can be texted" if self.projector_live
+                                       else "player bets priced by our projection alone are shown but not texted")))
             else:
-                out.append(("info", "player-prop model: not enough history to check it - model-only prop "
-                                    "picks are watch-only"))
+                out.append(("info", "Player projections: not enough history to check them yet - player bets priced by our "
+                                    "projection alone are shown but not texted"))
         else:
             self.projector = _NoProjector()
         self.player_teams = self._latest_teams(weekly)
         weeks = self._assign_nfl_weeks(sched, now)
-        return ([("info", f"nflverse: {sched.height} games, {weekly.height} player-weeks, {weeks} weeks set"), *out]
+        return ([("info", f"NFL stats loaded: {sched.height:,} games, {weekly.height:,} player games, {weeks} game weeks set"), *out]
                 + await self._check_qbs(sched, cur, now))
 
     async def _check_qbs(self, sched: pl.DataFrame, season: int, now: datetime) -> list[tuple[str, str]]:
@@ -481,7 +481,7 @@ class Services:
         try:
             qb1 = await asyncio.to_thread(self.nflverse.depth_chart_qb1, season)
         except Exception as e:  # noqa: BLE001 - the disagreement cap still guards these games
-            return [("info", f"Could not check NFL starting quarterbacks ({type(e).__name__}); "
+            return [("info", "Could not check NFL starting quarterbacks right now; "
                              "games where our number is far from the betting market still use the market only")]
         teams = qb_changes(sched, qb1, now.date())
         self.qb_changes = {self.teams.canonical("nfl", t) or t for t in teams}
@@ -553,7 +553,8 @@ class Services:
         games = (f"winning margins learned from {margin.n:,} past games with betting lines"
                  if isinstance(margin, ConditionalMarginModel)
                  else "not enough past games with betting lines yet, so winning margins use a simple bell curve")
-        return [("info", f"nfl model: {len(self.nfl_model.ratings)} teams, hfa {self.nfl_model.hfa:+.1f}, {games}")]
+        return [("info", f"NFL team ratings ready: {len(self.nfl_model.ratings)} teams, home teams get "
+                         f"{self.nfl_model.hfa:+.1f} points; {games}")]
 
     def _cfb_games(self, rows: list[dict]) -> list[dict]:
         def canon(name):
@@ -579,8 +580,8 @@ class Services:
         self.cfb_model = model
         out = self._fit_cfb_margin(now)
         if model is None:
-            return [("info", "cfb model: no games yet"), *out]
-        return [("info", f"cfb model: {len(model.ratings)} teams, hfa {model.hfa:+.1f}"), *out]
+            return [("info", "College football ratings: no games yet"), *out]
+        return [("info", f"College football ratings ready: {len(model.ratings)} teams, home teams get {model.hfa:+.1f} points"), *out]
 
     def _fit_cfb_margin(self, now: datetime) -> list[tuple[str, str]]:
         """CFB P(margin | spread) from CFBD lines already in the cache (backtests store them).
@@ -958,7 +959,7 @@ class Services:
         gid = job.args["game_id"]
         row = self.conn.execute("SELECT odds_event_id FROM games WHERE game_id=?", (gid,)).fetchone()
         if row is None or row["odds_event_id"] is None:
-            return [("info", f"odds_api props: no odds event for {gid}")]
+            return [("info", f"Player odds: the odds service has no listing for game {gid} yet")]
         props = await self.odds.event_props(job.league, row["odds_event_id"], essential=job.essential)
         self._merge("props", "odds_api", props, now)
         return [("api", f"odds_api props {gid}: {len(props)} lines, {self.odds.budget.remaining()} credits left")]
@@ -1137,32 +1138,55 @@ class Services:
                 vals.append(r["clv"])
         return {lg: clv_throttle(v, self.settings.clv_throttle_min) for lg, v in per.items()}
 
-    def snapshot(self, now: datetime) -> pipeline.Snapshot:
-        games = {g.game_id: g for g in self.registry.all_since(now - timedelta(days=1))}
+    def _open_state(self, now: datetime, games: dict[str, Game]) -> dict:
+        """Bankroll, open exposure and the pauses on top of the fitted gates (CLV throttle, drift):
+        everything the sizing caps need, without the model predictions."""
         exposure = self.lifecycle.open_exposure_cents()
-        bets = self.lifecycle.open_bets()
-        game_legs = _bet_legs([b for b in bets if b["kind"] == "kalshi_game"])
-        prop_legs = _bet_legs([b for b in bets if b["kind"] == "kalshi_prop"])
-        pp_legs = _bet_legs([b for b in bets if b["kind"] == "pp_entry"])
-        pp_players = {normalize_name(leg["player"]) for leg in pp_legs if leg.get("player")}
         positions = self.lifecycle.open_positions()
         exp = pipeline.open_exposure(positions, {**games, **{
             gid: g for _, _, legs in positions for leg in legs
             if (gid := leg.game_id) and gid not in games and (g := self.registry.get(gid)) is not None}})
         clv_mult = self._clv_mult()
-        gates = dict(self.gates)
+        paused: dict[tuple[str, str], bool] = {}
         for league, mult in clv_mult.items():
             if mult <= 0:  # closing-line value significantly negative: observe only until it recovers
-                gates.update({(league, m): True for m in ("ml", "spread", "total")})
+                paused.update({(league, m): True for m in ("ml", "spread", "total")})
+        paused.update(self._drift_gates())
+        return {
+            # the ledger already holds open stakes out, so the Kelly bankroll adds them back
+            "bankroll_cents": self.ledger.balance() + exposure, "open_exposure_cents": exposure,
+            "open_game_exposure": exp.game, "open_window_exposure": exp.window,
+            "open_dir_exposure": exp.direction,
+            "placed_today_cents": self.lifecycle.placed_today_cents(now, PT),
+            "clv_mult": clv_mult, "paused": paused,
+        }
+
+    def place_limits(self, now: datetime) -> tuple[pipeline.Budget, dict[tuple[str, str], bool]]:
+        """Cap headroom left after the bets already placed, and markets paused since their recs were
+        made (CLV throttle, drift). PLACE NOW uses these so it never shows a bet the caps would refuse."""
+        games = {g.game_id: g for g in self.registry.all_since(now - timedelta(days=1))}
+        st = self._open_state(now, games)
+        paused = st.pop("paused")
+        snap = pipeline.Snapshot(now=now, games=games, quotes=[], props=[], kalshi=[], predictions={},
+                                 gates={}, pp_staked_today_cents=0, margin_models={}, **st)
+        return pipeline.Budget.from_snap(snap, self.settings), paused
+
+    def snapshot(self, now: datetime) -> pipeline.Snapshot:
+        games = {g.game_id: g for g in self.registry.all_since(now - timedelta(days=1))}
+        bets = self.lifecycle.open_bets()
+        game_legs = _bet_legs([b for b in bets if b["kind"] == "kalshi_game"])
+        prop_legs = _bet_legs([b for b in bets if b["kind"] == "kalshi_prop"])
+        pp_legs = _bet_legs([b for b in bets if b["kind"] == "pp_entry"])
+        pp_players = {normalize_name(leg["player"]) for leg in pp_legs if leg.get("player")}
+        st = self._open_state(now, games)
+        gates = {**self.gates, **st.pop("paused")}
         open_keys = {r["leg_key"] for r in self.conn.execute(
             "SELECT r.leg_key FROM recommendations r JOIN bets b ON b.rec_id = r.id "
             "WHERE b.state='PLACED' AND r.state='PLACED'")}
         return pipeline.Snapshot(
             now=now, games=games, quotes=list(self.latest["quotes"]),
             props=self.latest["props"] + self.manual_props, kalshi=list(self.latest["kalshi"]),
-            predictions=self._predictions(games), gates={**gates, **self._drift_gates()},
-            # the ledger already holds open stakes out, so the Kelly bankroll adds them back
-            bankroll_cents=self.ledger.balance() + exposure, open_exposure_cents=exposure,
+            predictions=self._predictions(games), gates=gates,
             pp_staked_today_cents=self.lifecycle.pp_staked_today_cents(now, PT),
             margin_models=self.margin_models, player_teams={**self.player_teams, **self.manual_teams},
             open_game_ids={leg["game_id"] for leg in game_legs if leg.get("game_id")},
@@ -1170,11 +1194,9 @@ class Services:
             open_players={normalize_name(leg["player"]) for leg in prop_legs if leg.get("player")} | pp_players,
             open_leg_keys=open_keys, blend_fits=dict(self.blend_fits), disagree_caps=dict(self.disagree_caps),
             projector_live=self.projector_live,
-            open_game_exposure=exp.game, open_window_exposure=exp.window, open_dir_exposure=exp.direction,
-            placed_today_cents=self.lifecycle.placed_today_cents(now, PT),
             pp_open_players=pp_players,
             pp_open_games={leg["game_id"] for leg in pp_legs if leg.get("game_id")},
-            clv_mult=clv_mult)
+            **st)
 
     def _wanted(self, rec: Recommendation, what: str) -> bool:
         venue = "prizepicks" if rec.kind == "pp_entry" else "kalshi"
@@ -1247,21 +1269,21 @@ class Services:
                 if row is not None:
                     self._merge("props", "odds_api", await self.odds.event_props("nfl", row["odds_event_id"]), now)
             books = sorted(self.odds.seen_books)
-            out.append(("info", f"odds_api books: {', '.join(books) or 'none'}"))
+            out.append(("info", f"Sportsbooks on the odds service: {', '.join(dict.fromkeys(book_name(b) for b in books)) or 'none'}"))
             if "prizepicks" not in books:
                 out.append(("info", 'PrizePicks lines unavailable on this key - use "pp add"'))
         if self.rundown is not None:
             rd = self.rundown
-            out.append(("info", f"therundown tier={rd.tier} delay={rd.delay_seconds}s books={rd.bookmakers_header}"))
+            out.append(("info", f"Scores service: {rd.tier} plan, scores about {max(1, round(rd.delay_seconds / 60))} min behind"))
         if self.cfbd is not None and not self.cfbd.disabled:
             info = await self.cfbd.info()
-            out.append(("info", f"cfbd remaining={info.get('remainingCalls')}"))
+            out.append(("info", f"College football data: {info.get('remainingCalls')} calls left this month"))
         try:
             await self.kalshi.markets(GAME_SERIES["nfl"]["ml"])
             self.kalshi_ok = True
         except Exception:
             self.kalshi_ok = False
-        out.append(("info", f"kalshi reachable={self.kalshi_ok}"))
+        out.append(("info", "Kalshi: working" if self.kalshi_ok else "Kalshi: not reachable right now"))
         out.append(("info", 'notify: run "notify test" to confirm your phone alerts'))
         if "prizepicks" in self.settings.venues and not self.settings.pp_payouts_verified:
             out.append(("info", "PrizePicks payouts not confirmed: check your app pays 6x for a 3-pick Power "
@@ -1271,6 +1293,25 @@ class Services:
         return out
 
     # -- evaluation ----------------------------------------------------------
+    _EXTRA_PREFIXES = ("Locked-profit bets made", "Beat the closing price", "Accuracy score (lower is better): ours")
+
+    def performance(self, now: datetime) -> dict:
+        """What the Performance tab shows: the KPI tiles plus, from the evaluation report, the extra
+        plain-English lines, how often our chances came true, drift warnings and paused bet types."""
+        k = self.kpis()
+        try:
+            r = self.report(now)
+        except Exception:  # noqa: BLE001 - the tiles still show; the cause goes to the debug log
+            _log.exception("performance report failed")
+            return k
+        k["extra"] = [ln for ln in r["summary"] if ln.startswith(self._EXTRA_PREFIXES)]
+        k["calibration"] = report_mod.calibration_lines(r["calibration"]["reliability"])
+        warnings = [ln for ln in r["summary"] if ln.startswith("Warning")]
+        warnings += [f"Paused (shown but not texted): {report_mod.segment_label(seg)}. "
+                     f"To turn back on, type: drift reset {seg}" for seg in sorted(self.drift_paused())]
+        k["warnings"] = warnings
+        return k
+
     def report(self, now: datetime) -> dict:
         """The full performance report (bets/report.py) as a plain dict, with plain-English summary lines."""
         stored = json.loads(self._get("gates") or "null") or {}

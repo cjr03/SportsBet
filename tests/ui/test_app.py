@@ -142,7 +142,7 @@ async def test_missing_keys_app_still_starts(services_mocked):
         text = "\n".join(log_lines(app))
         assert "disabled" in text
         assert all(name in text for name in ("odds_api", "therundown", "cfbd"))
-        assert "kalshi reachable=True" in text
+        assert "Kalshi: working" in text
         await submit(app, pilot, "deposit 5")
         assert svc.ledger.balance() == 500 and app.is_running
 
@@ -162,12 +162,12 @@ async def test_first_run_checks_logged_once(services_mocked):
     svc = services_mocked()
     lines = await svc.startup(NOW)
     info = [m for k, m in lines if k == "info"]
-    assert any(m.startswith("odds_api books:") and "pinnacle" in m for m in info)
-    assert "therundown tier=free delay=300s books=19,23,22" in info
-    assert "cfbd remaining=998" in info and "kalshi reachable=True" in info
+    assert any(m.startswith("Sportsbooks on the odds service:") and "Pinnacle" in m for m in info)
+    assert "Scores service: free plan, scores about 5 min behind" in info
+    assert "College football data: 998 calls left this month" in info and "Kalshi: working" in info
     assert 'notify: run "notify test" to confirm your phone alerts' in info
     again = [m for _, m in await svc.startup(NOW)]
-    assert not any(m.startswith("odds_api books:") for m in again)
+    assert not any(m.startswith("Sportsbooks on the odds service:") for m in again)
 
 
 async def test_scheduler_state_survives_restart(services_mocked):

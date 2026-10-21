@@ -66,7 +66,7 @@ async def test_nflverse_load_builds_projector_with_snaps_and_injuries_and_gate(s
     assert calls == ["snaps", "injuries"] and isinstance(svc.projector, PropProjector)
     assert svc.projector.is_out("A", 2026, 9)
     assert svc.projector_live is False and svc.snapshot(NOW).projector_live is False
-    assert any("player-prop model" in m for _, m in out)
+    assert any("Player projections" in m for _, m in out)
 
 
 async def test_nflverse_load_survives_missing_snaps_and_injuries(services_mocked):

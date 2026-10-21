@@ -249,3 +249,23 @@ def test_format_middle_plain_english(rec_arb):
     assert "(about 18% chance)" in t
     assert 'Buy the "Eagles win by 3 or more points" leg first, then the other at 56 cents or less.' in t
     assert "KXNFL" not in t and " x20" not in t and t.endswith("When placed, type: confirm 44")
+
+
+TEXT_JARGON = ("EV", "CLV", "fair", "YES @", "Brier", " x40", " x20", "KXNFL", "GE ", "ML", "_yds", "_tds")
+
+
+def test_every_rec_kind_formats_in_plain_english(rec_kalshi, rec_pp, rec_arb):
+    prop = _rec("kalshi_prop", [Leg("kalshi", "Jalen Hurts pass_tds over 1.5", "no", 0.40, 0.66, GID,
+                                    ticker="KXNFLPASSTDS-X", player="Jalen Hurts", stat="pass_tds", line=1.5,
+                                    team="PHI")], qty=25, stake_cents=1000, id=45)
+    middle = _rec("middle", [Leg("kalshi", "m1", "yes", 0.52, 0.6, GID, ticker="KXNFLSPREAD-A", team="PHI",
+                                 line=2.5),
+                             Leg("kalshi", "m2", "no", 0.50, 0.6, GID, ticker="KXNFLSPREAD-B", team="PHI",
+                                 line=6.5)], qty=20, p_win=0.18, stake_cents=0, id=44)
+    for r in (rec_kalshi, prop, rec_pp, rec_arb, middle):
+        t = format_message(r)
+        assert t.isascii() and len(t) <= 480 and t.endswith(f"When placed, type: confirm {r.id}"), t
+        assert not [j for j in TEXT_JARGON if j in t], t
+    assert '"Jalen Hurts 2 or more passing touchdowns" (you win if it does NOT happen)' in format_message(prop)
+    assert format_message(middle).startswith('Not risk-free #44 (Kalshi): Buy 20 "Yes" on "Eagles win by 3 or '
+                                             'more points vs Cowboys" AND 20 "No" on')

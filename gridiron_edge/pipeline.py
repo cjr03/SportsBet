@@ -63,7 +63,7 @@ _MODEL_KEY = {
     "cfb": {"ml": "cfb", "spread": "cfb_spread", "total": "cfb"},
 }
 _MODEL_FALLBACK = {"cfb_spread": "cfb"}  # no CFB lines history cached: the normal model
-_TIE_NO = re.compile(r"tie[^.]*\b(resolves?|settles?)\b[^.]*\bno\b")
+_TIE_NO = re.compile(r"\btie\b[^.]*\b(resolves?|settles?)\b[^.]*\bno\b")
 
 
 @dataclass

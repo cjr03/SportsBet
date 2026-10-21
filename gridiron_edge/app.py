@@ -189,6 +189,8 @@ class GridironApp(App):
         games = {g.game_id: g for g in s.registry.all_since(now - timedelta(days=2))}
         markets = {m.ticker: m for m in s.latest.get("kalshi", [])}
         recs = home.actionable(s.lifecycle.board(), now, games, markets, s.settings.kalshi_min_ev)
+        budget, paused = s.place_limits(now)
+        recs = home.within_limits(recs, games, budget, paused)
         place = self.query_one("#place-box", Section)
         place.body.set_recs(recs, now, games, self.names)
         place.show_empty(None if recs else home.empty_reason(
@@ -226,7 +228,7 @@ class GridironApp(App):
         self.query_one(QuotaBar).update_quota(remaining("odds_api"), remaining("cfbd"),
                                               remaining("therundown"), s.kalshi_ok)
         self.query_one(BalanceChart).update_series(s.ledger.history(), s.balance_markers())
-        self.query_one(KpiTiles).update_kpis(s.kpis())
+        self.query_one(KpiTiles).update_kpis(s.performance(now))
         self.refresh_home()
         games = [g for g in s.registry.all_since(now - timedelta(hours=12))
                  if g.kickoff <= now + timedelta(days=7)]
@@ -275,7 +277,7 @@ class GridironApp(App):
                 self.log_event("settle", f"bet {a['id']} marked {a['result']} - bankroll now {_money(s.ledger.balance())}")
             case "pp add":
                 s.add_manual_pp(a["player"], a["stat"], a["line"], a["team"], a["game_id"], now)
-                self.log_event("info", f"PrizePicks line added: {a['player']} {a['stat']} {a['line']}")
+                self.log_event("info", f"PrizePicks line added: {a['player']} {a['line']} {d.stat_words(a['stat'])}")
             case "quota":
                 for line in s.quota_lines():
                     self.log_event("api", line)
@@ -283,14 +285,14 @@ class GridironApp(App):
                 self._notify(a["mode"], now)
             case "set":
                 s.set_setting(a["field"], a["value"])
-                self.log_event("info", f"{a['field']} = {getattr(s.settings, a['field'])}")
+                self.log_event("info", f"setting {a['field'].replace('_', ' ')} is now {getattr(s.settings, a['field'])}")
             case "venues":
                 self.log_event("info", f"venues: {', '.join(s.settings.venues)} (change with: set venues a,b)")
             case "backtest":
-                self.log_event("info", f"backtest {a['league']} {a['start']}-{a['end']} running...")
+                self.log_event("info", f"testing the {a['league'].upper()} model on {a['start']}-{a['end']} games...")
                 self.run_worker(self._backtest(a["league"], a["start"], a["end"]), group="backtest")
             case "fit":
-                self.log_event("info", "refitting the blend gates...")
+                self.log_event("info", "rechecking which markets our model has earned...")
                 self.run_worker(self._fit_blend(), group="backtest")
             case "report":
                 self._report()
@@ -362,10 +364,10 @@ class GridironApp(App):
         try:
             fit, m = await self.services.backtest(league, start, end, self.clock())
         except Exception as e:
-            self.log_event("error", f"backtest: {e}")
+            self.log_event("error", f"could not test the model on past games: {e}")
             return
         verdict = "kept tracking-only (not proven yet)" if fit.gated else "allowed to suggest bets"
-        self.log_event("info", f"backtest {league.upper()} {start}-{end}: {m['n']} games, picked the "
+        self.log_event("info", f"{league.upper()} model test, {start}-{end}: {m['n']} games, picked the "
                                f"spread winner {m['ats_pct']:.1%} of the time, accuracy score "
                                f"{m['brier']:.3f} - our model is {verdict}")
 
@@ -373,7 +375,7 @@ class GridironApp(App):
         try:
             self.log_lines(await self.services.fit_gates(self.clock(), force=True))
         except Exception as e:
-            self.log_event("error", f"fit blend: {e}")
+            self.log_event("error", f"could not recheck the model: {e}")
 
     # -- PLACE NOW keys: Enter confirm, s skip, d why ------------------------------
     def _open_rec(self, rec_id: int) -> Recommendation | None:
@@ -415,4 +417,5 @@ class GridironApp(App):
         if rec is None:
             return
         st = self.services.settings
-        self.push_screen(WhyScreen(d.why_lines(rec, self.clock(), self.names, st.kelly_fraction, st.cap_bet)))
+        self.push_screen(WhyScreen(d.why_lines(rec, self.clock(), self.names, st.kelly_fraction, st.cap_bet,
+                                               settings=st)))

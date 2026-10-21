@@ -315,6 +315,16 @@ def build_report(conn, now, backtest: dict | None = None, window: int = 50,
     return report
 
 
+def calibration_lines(reliability: list[dict], min_n: int = 1) -> list[str]:
+    """How often our chances came true, per band: 'When we said 40-60%, it happened 55% of the time (12 bets)'."""
+    out = []
+    for b in reliability:
+        if b["n"] >= min_n and b["hit_rate"] is not None:
+            out.append(f"When we said {b['lo'] * 100:.0f}-{b['hi'] * 100:.0f}%, it happened "
+                       f"{b['hit_rate'] * 100:.0f}% of the time ({b['n']} bet{'s' if b['n'] != 1 else ''})")
+    return out
+
+
 def summary_lines(r: dict) -> list[str]:
     """Plain-English, ASCII lines for the Performance tab and the log."""
     out = []

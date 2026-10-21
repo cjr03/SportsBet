@@ -58,6 +58,57 @@ def actionable(recs: Iterable[Recommendation], now: datetime, games: dict[str, G
     return sorted(out, key=lambda r: (-d.expected_profit_cents(r), r.id or 0))
 
 
+_HEDGED = ("arb", "middle")
+
+
+def _gate_keys(rec: Recommendation, games: dict[str, Game]) -> set[tuple[str, str]]:
+    """Gate keys a rec answers to: (league, ml|spread|total) for game bets, prop/pp for player bets."""
+    out = set()
+    for leg in rec.legs:
+        g = games.get(leg.game_id or "")
+        if g is None:
+            continue
+        if rec.kind == "kalshi_game":
+            out.add((g.league, d.market_type(leg)))
+        elif rec.kind == "kalshi_prop":
+            out.add((g.league, "prop"))
+        elif rec.kind == "pp_entry":
+            out |= {(g.league, "prop"), (g.league, "pp")}
+    return out
+
+
+def within_limits(recs: Iterable[Recommendation], games: dict[str, Game], budget,
+                  paused: dict[tuple[str, str], bool] | None = None) -> list[Recommendation]:
+    """Keep recs (in order) whose stake still fits the cumulative caps after the bets already placed
+    and the recs kept before them, and whose market has not been paused since the rec was made.
+
+    budget: a pipeline.Budget (per-game, per-slate, per-day and same-direction headroom in cents).
+    Locked-profit pairs and middles are hedged, so the directional caps do not apply to them.
+    """
+    from gridiron_edge.pipeline import direction_key, slate_window
+
+    paused = paused or {}
+    out = []
+    for r in recs:
+        if any(paused.get(k) for k in _gate_keys(r, games)):
+            continue
+        if r.kind in _HEDGED or budget is None:
+            out.append(r)
+            continue
+        gids = {leg.game_id for leg in r.legs if leg.game_id}
+        known = [games[g] for g in gids if g in games]
+        dirs = ([direction_key(leg, games.get(leg.game_id or "")) for leg in r.legs]
+                if r.kind in ("kalshi_game", "kalshi_prop") else [])
+        room = [budget.day_left(), *(budget.game_left(g) for g in gids),
+                *(budget.window_left(slate_window(g)) for g in known),
+                *(budget.dir_left(k) for k in dirs if k is not None)]
+        if r.stake_cents > min(room):
+            continue
+        budget.charge(r.stake_cents, gids, dirs)
+        out.append(r)
+    return out
+
+
 def _kickoff(rec: Recommendation, games: dict[str, Game]) -> datetime | None:
     ks = [games[leg.game_id].kickoff for leg in rec.legs if leg.game_id in games]
     return min(ks) if ks else None
@@ -67,7 +118,8 @@ def place_now_cells(rec: Recommendation, now: datetime, games: dict[str, Game],
                     names: d.Names = d.DEFAULT_NAMES) -> list[str]:
     """id, where, bet, price, stake, expected profit, time left, kickoff."""
     kick = _kickoff(rec, games) or rec.expires_at
-    where = "Kalshi - Locked profit" if rec.kind == "arb" else d.venue(rec.kind)
+    where = ("Kalshi - Locked profit" if rec.kind == "arb" else "Kalshi - Not risk-free" if rec.kind == "middle"
+             else d.venue(rec.kind))
     return [str(rec.id), where, d.bet_text(rec, names), d.price_text(rec), d.money(rec.stake_cents),
             d.money(d.expected_profit_cents(rec)), d.countdown(rec.expires_at, now), d.when(kick, now)]
 

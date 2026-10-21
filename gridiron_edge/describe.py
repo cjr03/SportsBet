@@ -110,7 +110,8 @@ def stat_words(stat: str | None) -> str:
 
 
 # -- legs -------------------------------------------------------------------------
-def _market_type(leg: Leg) -> str:
+def market_type(leg: Leg) -> str:
+    """ml | spread | total | prop, from the leg itself."""
     t = (leg.ticker or "").upper()
     if leg.player:
         return "prop"
@@ -131,7 +132,7 @@ def leg_text(leg: Leg, names: Names = DEFAULT_NAMES) -> str:
         return f"{leg.player} {more} than {line} {stat_words(leg.stat)}"
     league, away, home = parse_game_id(leg.game_id)
     yes = leg.side != "no"
-    kind = _market_type(leg)
+    kind = market_type(leg)
     if kind == "prop":
         if leg.line is None:
             return f"{leg.player} {stat_words(leg.stat)}"
@@ -196,6 +197,8 @@ def cost_cents(rec: Recommendation) -> int:
 def expected_profit_cents(rec: Recommendation) -> int:
     if rec.kind == "arb" and rec.qty:
         return rec.qty * 100 - cost_cents(rec) - fee_cents(rec)
+    if rec.kind == "middle" and rec.qty:  # $1 back per pair, $2 when the game lands in the middle
+        return round(rec.qty * (1.0 + rec.p_win) * 100) - cost_cents(rec) - fee_cents(rec)
     if rec.kind in ("kalshi_game", "kalshi_prop") and rec.qty:
         return round(rec.qty * rec.legs[0].p_fair * 100) - cost_cents(rec) - fee_cents(rec)
     return round(rec.ev * rec.stake_cents)
@@ -208,8 +211,71 @@ def price_text(rec: Recommendation) -> str:
 
 
 # -- the "Why this bet?" panel ----------------------------------------------------
+BOOK_NAMES = {
+    "pinnacle": "Pinnacle", "betfair_ex_eu": "Betfair", "betfair_ex_uk": "Betfair", "matchbook": "Matchbook",
+    "novig": "Novig", "prophetx": "ProphetX", "lowvig": "LowVig", "betonlineag": "BetOnline",
+    "bookmaker": "BookMaker", "draftkings": "DraftKings", "fanduel": "FanDuel", "betmgm": "BetMGM",
+    "williamhill_us": "Caesars", "caesars": "Caesars", "betrivers": "BetRivers", "espnbet": "ESPN BET",
+    "hardrockbet": "Hard Rock Bet", "fanatics": "Fanatics", "bovada": "Bovada", "mybookieag": "MyBookie",
+    "kalshi": "Kalshi", "polymarket": "Polymarket", "prizepicks": "PrizePicks",
+}
+_SOURCE_WORDS = {
+    "pinnacle": "Pinnacle, the sharpest sportsbook",
+    "exchanges": "betting exchanges, where bettors set the price",
+    "mid": "low-margin sportsbooks",
+    "median": "the middle of the regular sportsbooks' prices (no sharp sportsbook had this game)",
+}
+_METHOD_WORDS = {
+    "exact line": "taken straight from the same line",
+    "adjacent line": "adjusted from a line half a point away",
+    "implied mean": "worked out from the sportsbooks' point spread or total",
+    "h2h": "from the sportsbooks' win/lose prices",
+}
+
+
+def book_name(key: str) -> str:
+    return BOOK_NAMES.get(key, key.replace("_", " ").title())
+
+
+def source_text(why: dict) -> str | None:
+    """Where our number came from, in words, from a rec's why dict (fair-pricing fields)."""
+    src = why.get("fair_source")
+    if not src:
+        return why.get("source")
+    anchored = src.startswith("anchored-")
+    base = _SOURCE_WORDS.get(src.removeprefix("anchored-"), src)
+    text = (f"the last price from {base}, moved by how much the other sportsbooks have moved since"
+            if anchored else base)
+    books = [book_name(b) for b in why.get("books") or []]
+    if books:
+        text += f" ({', '.join(dict.fromkeys(books))})"
+    method = _METHOD_WORDS.get(why.get("method") or "")
+    if method:
+        text += f", {method}"
+    return text
+
+
+def model_share_text(why: dict) -> str | None:
+    """'Sportsbooks say 54%; our team ratings say 57% and count for 30% of our number.'"""
+    p_mkt, p_model, w = why.get("p_market"), why.get("p_model"), why.get("model_weight")
+    if p_mkt is None:
+        return None
+    if not w or p_model is None:
+        return f"Sportsbooks say {pct(p_mkt)}; our number is theirs (our team ratings are not used for this one)"
+    return (f"Sportsbooks say {pct(p_mkt)}; our team ratings say {pct(p_model)} and count for "
+            f"{w * 100:.0f}% of our number")
+
+
+def _tie_text(why: dict) -> str | None:
+    tie = why.get("tie_prob")
+    if not tie:
+        return None
+    return f"Allows for a {tie * 100:.1f}% chance of a tie, which this bet would lose"
+
+
 def why_lines(rec: Recommendation, now: datetime, names: Names = DEFAULT_NAMES,
-              kelly_fraction: float | None = None, cap_bet: float | None = None) -> list[str]:
+              kelly_fraction: float | None = None, cap_bet: float | None = None,
+              settings=None) -> list[str]:
     """Plain-English reasons; only the last line carries internal identifiers."""
     why = getattr(rec, "why", None) or {}
     out = [f"The bet: {bet_text(rec, names)}."]
@@ -219,6 +285,10 @@ def why_lines(rec: Recommendation, now: datetime, names: Names = DEFAULT_NAMES,
                    f"so the profit is locked: about {money(expected_profit_cents(rec))}.")
         if rec.tie_risk:
             out.append("Small catch: if the game ends in a tie, neither side pays.")
+    elif rec.kind == "middle":
+        out.append(f"Not risk-free: both sides cost {money(cost_cents(rec))} plus {money(fee_cents(rec))} in fees. "
+                   f"You get {money((rec.qty or 0) * 100)} back, or {money(2 * (rec.qty or 0) * 100)} "
+                   f"if the game lands in the middle (about {pct(rec.p_win)} chance).")
     elif rec.kind == "pp_entry":
         legs = ", ".join(f"{leg.player} {pct(leg.p_fair)}" for leg in rec.legs)
         out.append(f"Our chance each pick hits: {legs}.")
@@ -226,10 +296,14 @@ def why_lines(rec: Recommendation, now: datetime, names: Names = DEFAULT_NAMES,
     else:
         leg = rec.legs[0]
         out.append(f"Our chance: {pct(leg.p_fair)}. The price implies {pct(leg.price)}.")
-    out.append("Where our number came from: " + why.get("source", _default_source(rec)) + ".")
-    if rec.kind != "pp_entry" and rec.kind != "arb":
+    out.append("Where our number came from: " + (source_text(why) or _default_source(rec)) + ".")
+    for extra_line in (model_share_text(why), _tie_text(why)):
+        if extra_line:
+            out.append(extra_line + ".")
+    if rec.kind not in ("pp_entry", "arb", "middle"):
         out.append(f"Kalshi fee: {money(fee_cents(rec))} (already counted in the profit).")
-    out.append("How much to bet: " + why.get("sizing", _default_sizing(rec, kelly_fraction, cap_bet)) + ".")
+    out.append("How much to bet: " + why.get("sizing", _default_sizing(rec, kelly_fraction, cap_bet, settings))
+               + ".")
     out.append(f"Expected profit: about {money(expected_profit_cents(rec))}.")
     out.append(f"Goes stale at {when(rec.expires_at, now)} PT ({countdown(rec.expires_at, now)}), "
                "or sooner if the price moves.")
@@ -242,16 +316,30 @@ def why_lines(rec: Recommendation, now: datetime, names: Names = DEFAULT_NAMES,
 
 
 def _default_source(rec: Recommendation) -> str:
-    if rec.kind == "arb":
+    if rec.kind in ("arb", "middle"):
         return "the prices themselves; no prediction is needed"
     if rec.kind == "kalshi_game":
         return "sportsbook lines with the bookmakers' cut removed, blended with our team ratings"
     return "sportsbook player lines with the bookmakers' cut removed, or our player projection"
 
 
-def _default_sizing(rec: Recommendation, kelly_fraction: float | None, cap_bet: float | None) -> str:
+def _default_sizing(rec: Recommendation, kelly_fraction: float | None, cap_bet: float | None,
+                    settings=None) -> str:
     if rec.kind == "arb":
         return "as many contracts as are on offer, up to the share of bankroll set aside for locked profits"
+    if rec.kind == "middle":
+        return "sized like a bet that can lose part of its cost, within the per-bet limit"
     share = f"{kelly_fraction:.0%} of " if kelly_fraction else "a fraction of "
     cap = f", never more than {cap_bet:.0%} of bankroll on one bet" if cap_bet else ""
-    return f"{share}the amount that grows the bankroll fastest at these odds{cap}"
+    text = f"{share}the amount that grows the bankroll fastest at these odds{cap}"
+    if settings is not None:
+        text += (f", at most {settings.cap_game:.0%} of bankroll on one game and "
+                 f"{settings.cap_day:.0%} placed per day")
+        if rec.kind == "kalshi_prop" or rec.kind == "pp_entry":
+            text += ("; player bets are cut to "
+                     f"{settings.shrink_prop_anchored:.0%} (sportsbook-priced) or "
+                     f"{settings.shrink_prop_model:.0%} (our projection only) because their numbers are less certain")
+        if rec.kind == "pp_entry" and not settings.pp_payouts_verified:
+            text += (f", and cut again to {settings.pp_unverified_mult:.0%} until you confirm the PrizePicks "
+                     "payouts (type: set pp_payouts_verified true)")
+    return text
