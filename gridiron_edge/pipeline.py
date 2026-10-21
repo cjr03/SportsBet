@@ -256,6 +256,14 @@ class GameFair:
     fair: FairPrice
     method: str  # h2h | exact line | adjacent line | implied mean
     tie_prob: float = 0.0
+    mkt_yes: float | None = None  # market-only P(YES)/P(NO), tie-adjusted like p_yes/p_no
+    mkt_no: float | None = None
+
+    def market_side(self, side: str) -> float:
+        """Market-only P(this side wins), for calibration baselines and CLV."""
+        if side == "yes":
+            return self.p_market if self.mkt_yes is None else self.mkt_yes
+        return 1.0 - self.p_market if self.mkt_no is None else self.mkt_no
 
     def why(self) -> dict:
         return {"fair_source": self.fair.source, "books": list(self.fair.books),
@@ -389,15 +397,18 @@ def _game_fair(m: KalshiMarket, g: Game, snap: Snapshot, s: Settings,
             p = blend(p_model, p_mkt, w)
         else:
             w = 0.0
-    p_no, tie = 1.0 - p, 0.0
-    if g.league == "nfl" and mtype == "ml":
+    tie = s.nfl_tie_prob if (g.league == "nfl" and mtype == "ml") else 0.0
+    tie_no = kalshi_tie_rule(m) == "no"
+
+    def sides(q: float) -> tuple[float, float]:
         # sportsbook moneylines and the model are P(win | no tie); a tie loses YES for both teams.
         # Unless the rules confirm a tie settles NO, a tie loses NO too (worst case per side).
-        tie = s.nfl_tie_prob
-        p_yes = p * (1.0 - tie)
-        p_no = 1.0 - p_yes if kalshi_tie_rule(m) == "no" else (1.0 - p) * (1.0 - tie)
-        p = p_yes
-    return GameFair(p, p_no, p_mkt, p_model, w, fp, method, tie)
+        y = q * (1.0 - tie)
+        return y, (1.0 - y if tie_no else (1.0 - q) * (1.0 - tie))
+
+    p_yes, p_no = sides(p)
+    mkt_yes, mkt_no = sides(p_mkt)
+    return GameFair(p_yes, p_no, p_mkt, p_model, w, fp, method, tie, mkt_yes, mkt_no)
 
 
 def game_p_yes_w(m: KalshiMarket, g: Game, snap: Snapshot, s: Settings) -> tuple[float, float] | None:
@@ -438,13 +449,21 @@ def _best_side(m: KalshiMarket, p_yes: float, snap: Snapshot, s: Settings, extra
 
 def _kalshi_rec(kind: Literal["kalshi_game", "kalshi_prop"], m: KalshiMarket, g: Game, sd: _Side,
                 description: str, snap: Snapshot, gate: str, tie_risk: bool, why: dict | None = None,
-                observe: bool | None = None, team: str | None = None) -> Recommendation:
-    """observe: None takes the (league, gate) gate; True/False overrides it."""
+                observe: bool | None = None, team: str | None = None,
+                p_mkt: float | None = None) -> Recommendation:
+    """observe: None takes the (league, gate) gate; True/False overrides it. p_mkt: market-only P(side)."""
     leg = Leg("kalshi", description, sd.side, sd.price, sd.p, g.game_id, ticker=m.ticker,
-              player=m.player, stat=m.stat, line=m.line, team=team or m.team, fee_multiplier=m.fee_multiplier)
+              player=m.player, stat=m.stat, line=m.line, team=team or m.team, fee_multiplier=m.fee_multiplier,
+              p_mkt=p_mkt)
     observe_only = snap.gates.get((g.league, gate), False) if observe is None else observe
     return Recommendation(None, kind, [leg], 0, sd.qty, sd.ev, sd.p, None, snap.now, g.kickoff,
-                          observe_only=observe_only, tie_risk=tie_risk, why=why)
+                          observe_only=observe_only, tie_risk=tie_risk, why=why, p_mkt=p_mkt)
+
+
+def _model_gated(snap: Snapshot, league: str) -> bool:
+    """Projector-only (non-anchored) props stake only once the projector passed its calibration check
+    (snap.projector_live); an explicit (league, "prop_model") gate overrides that either way."""
+    return snap.gates.get((league, "prop_model"), not snap.projector_live)
 
 
 def kalshi_game_candidates(snap: Snapshot, s: Settings) -> list[Recommendation]:
@@ -476,7 +495,9 @@ def kalshi_game_candidates(snap: Snapshot, s: Settings) -> list[Recommendation]:
                                                                        or not s.market_only_live)
         # soft-book median only: no sharp price behind it, so log it rather than stake it
         observe = gated or (gf.fair.source == "median" and s.median_fair_policy == "observe")
-        out.append(_kalshi_rec("kalshi_game", m, g, sd, desc, snap, m.market_type, tie, gf.why(), observe))
+        p_mkt = gf.market_side(sd.side)
+        out.append(_kalshi_rec("kalshi_game", m, g, sd, desc, snap, m.market_type, tie, gf.why(), observe,
+                               p_mkt=p_mkt))
     return out
 
 
@@ -608,11 +629,10 @@ def kalshi_prop_candidates(snap: Snapshot, s: Settings, projector: Projector) ->
             best[key] = (m, g, sd, anchored)
     out = []
     for m, g, sd, anchored in best.values():
-        r = _kalshi_rec("kalshi_prop", m, g, sd, f"{m.player} {m.stat} over {m.line}", snap, "prop", False,
-                        team=_player_team(snap, projector, m.player))
-        if not anchored and not snap.projector_live:
-            r = replace(r, observe_only=True)
-        out.append(r)
+        # anchored props are priced from devigged books (market-derived) so sd.p is the market's p
+        out.append(_kalshi_rec("kalshi_prop", m, g, sd, f"{m.player} {m.stat} over {m.line}", snap, "prop",
+                               False, observe=(not anchored and _model_gated(snap, g.league)) or None,
+                               team=_player_team(snap, projector, m.player), p_mkt=sd.p if anchored else None))
     return out
 
 
@@ -665,10 +685,13 @@ def _pp_rec(legs: list[Pick], st: tuple, ev: float, stake: int, observe: bool, t
     dist = hit_distribution(ps)
     p_win = sum(dist[k] for k, mult in table[st].items() if mult > 1)
     out_legs = [Leg("prizepicks", f"{pk.player} {pk.side} {pk.line} {pk.stat}", pk.side, 0.0, pk.p,
-                    pk.game_id, player=pk.player, stat=pk.stat, line=pk.line, team=pk.team)
+                    pk.game_id, player=pk.player, stat=pk.stat, line=pk.line, team=pk.team,
+                    p_mkt=pk.p if pk.anchored else None)
                 for pk in legs]
+    p_mkt = p_win if all(pk.anchored for pk in legs) else None  # all-anchored legs: p_win is market-only
     return Recommendation(None, "pp_entry", out_legs, stake, None, ev, p_win, f"{st[0]}-{st[1]}",
-                          snap.now, min(snap.games[pk.game_id].kickoff for pk in legs), observe_only=observe)
+                          snap.now, min(snap.games[pk.game_id].kickoff for pk in legs), observe_only=observe,
+                          p_mkt=p_mkt)
 
 
 def pp_entry_candidates(snap: Snapshot, s: Settings, projector: Projector,
@@ -685,7 +708,7 @@ def pp_entry_candidates(snap: Snapshot, s: Settings, projector: Projector,
     budget = budget or Budget.from_snap(snap, s)
     daily_left = math.floor(s.cap_pp_daily * snap.bankroll_cents) - snap.pp_staked_today_cents
     out: list[Recommendation] = []
-    pool = picks if snap.projector_live else [pk for pk in picks if pk.anchored]
+    pool = [pk for pk in picks if pk.anchored or not _model_gated(snap, snap.games[pk.game_id].league)]
     built = False
     while pool and len(out) < s.pp_max_entries:
         found = build_best_entry(pool, s, allowed, payouts=table, brute=s.pp_brute_force)
@@ -694,7 +717,8 @@ def pp_entry_candidates(snap: Snapshot, s: Settings, projector: Projector,
         built = True
         legs, st, ev, _ = found
         games = [snap.games[pk.game_id] for pk in legs]
-        observe = any(snap.gates.get((g.league, "prop"), False) for g in games)
+        observe = any(snap.gates.get((g.league, "prop"), False) or snap.gates.get((g.league, "pp"), False)
+                      for g in games)
         stake = 0
         if not observe:
             f, _ = kelly_entry([pk.p for pk in legs], st, table)
@@ -713,7 +737,7 @@ def pp_entry_candidates(snap: Snapshot, s: Settings, projector: Projector,
         used_games = {pk.game_id for pk in legs}
         used_players = {normalize_name(pk.player) for pk in legs}
         pool = [pk for pk in pool if pk.game_id not in used_games and normalize_name(pk.player) not in used_players]
-    if not built and not snap.projector_live and picks:
+    if not built and len(pool) < len(picks):
         found = build_best_entry(picks, s, allowed, payouts=table, brute=s.pp_brute_force)
         if found is not None:  # projector legs, unproven: log it, stake nothing
             legs, st, ev, _ = found

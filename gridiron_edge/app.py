@@ -12,6 +12,7 @@ from gridiron_edge.bets.lifecycle import LifecycleError
 from gridiron_edge.bets.settle import _yes_from_score
 from gridiron_edge.db import InsufficientFunds, InvalidAmount
 from gridiron_edge.notify.format import PT
+from gridiron_edge.bets.report import segment_label
 from gridiron_edge.scheduler import LEAGUES, Job
 from gridiron_edge.services import NOTIFY_TEST_TEXT, Services
 from gridiron_edge.types import Leg, Recommendation
@@ -32,10 +33,6 @@ def _money(cents: int) -> str:
 def _funds_error(e: InsufficientFunds) -> str:
     msg = str(e)
     return msg if "insufficient" in msg.lower() else f"insufficient funds: {msg}"
-
-
-def _pct(v: float | None) -> str:
-    return "n/a" if v is None else f"{v:+.1%}"
 
 
 class GridironApp(App):
@@ -216,6 +213,12 @@ class GridironApp(App):
                 self.run_worker(self._fit_blend(), group="backtest")
             case "report":
                 self._report()
+            case "drift":
+                names = s.reset_drift(a["segment"])
+                if not names:
+                    self.log_event("info", "nothing was paused")
+                for name in names:
+                    self.log_event("info", f"{segment_label(name)} are back on (no longer watch-only)")
             case "help":
                 self.log_event("info", "commands: " + ", ".join(COMMAND_WORDS))
 
@@ -263,11 +266,8 @@ class GridironApp(App):
         self.log_event("info", f"texts {mode}")
 
     def _report(self) -> None:
-        k = self.services.kpis()
-        band = "" if k["roi_band"] is None else f" ±{k['roi_band']:.1%}"
-        brier = "n/a" if k["brier"] is None else f"{k['brier']:.3f}"
-        self.log_event("info", f"report: ROI {_pct(k['roi'])}{band} | CLV {_pct(k['clv_mean'])} | "
-                               f"record {k['record']} | max DD {_money(k['max_dd'])} | Brier {brier} | n={k['n']}")
+        for line in self.services.report(self.clock())["summary"]:
+            self.log_event("warn" if line.startswith("Warning") else "info", line)
 
     async def _backtest(self, league: str, start: int, end: int) -> None:
         try:

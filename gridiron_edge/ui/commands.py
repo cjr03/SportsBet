@@ -23,7 +23,7 @@ COMMAND_WORDS: list[str] = [
     "bets", "bets open", "bets settled",
     "settle", "pp add", "quota",
     "notify test", "notify on", "notify off",
-    "set", "venues", "backtest", "fit blend", "report", "help",
+    "set", "venues", "backtest", "fit blend", "report", "drift reset", "help",
 ]
 
 _SETTINGS_FIELDS = {f.name for f in fields(Settings)}
@@ -139,6 +139,12 @@ def parse_command(text: str) -> Command:
             return Command("backtest", {"league": league, "start": start, "end": end})
         case "backtest", _:
             raise _usage("backtest <nfl|cfb> <yyyy>-<yyyy>")
+        case "drift", ["reset", "all"]:
+            return Command("drift", {"segment": "all"})
+        case "drift", ["reset", ("nfl" | "cfb") as lg, ("ml" | "spread" | "total" | "prop" | "prizepicks") as typ]:
+            return Command("drift", {"segment": f"{lg} {typ}"})
+        case "drift", _:
+            raise _usage("drift reset <nfl|cfb> <ml|spread|total|prop|prizepicks>  or  drift reset all")
         case "fit", ["blend"]:
             return Command("fit", {"what": "blend"})
         case "fit", _:

@@ -11,7 +11,7 @@ from dotenv import dotenv_values
 _FRACTIONS = (
     "kelly_fraction", "cap_bet", "cap_game", "cap_slate", "cap_pp_daily",
     "kalshi_price_lo", "kalshi_price_hi", "arb_fraction", "arb_max_roi",
-    "odds_reserve_frac", "nfl_tie_prob",
+    "odds_reserve_frac", "nfl_tie_prob", "shadow_clv_min_budget",
     "cap_day", "cap_same_dir", "copula_rho", "shrink_game",
     "shrink_prop_anchored", "shrink_prop_model", "pp_unverified_mult", "arb_min_roi", "middle_max_over",
 )
@@ -97,6 +97,11 @@ class Settings:
     # projector inputs: nflverse snap counts / injury reports (free), usage x efficiency mean
     props_use_snaps_injuries: bool = True
     props_usage_model: bool = True
+    # evaluation
+    shadow_clv_min_budget: float = 0.5  # extra close pulls for not-placed signals only above this Odds API share
+    prop_close_stale_minutes: int = 60  # a prop close older than this before kickoff is labelled stale
+    drift_window: int = 50  # rolling bets per segment for drift checks
+    cfb_gate_seasons: int = 2  # CFB seasons in the gate backtest (past seasons cache forever)
     # secrets
     odds_api_key: str = ""
     cfbd_api_key: str = ""

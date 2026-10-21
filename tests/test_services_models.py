@@ -90,7 +90,7 @@ def test_cfb_clv_recorded_from_market(services_mocked, mk):
     svc.ledger.deposit(100_00)
     bet = svc.lifecycle.confirm(rec.id, NOW)
     out = svc._record_clv(NOW)
-    assert any(f"clv bet {bet}" in msg for _, msg in out), out
+    assert any(f"bet {bet}:" in msg for _, msg in out), out
 
 
 def _line_rows(year, strong="Georgia", weak="Akron", n=8):
@@ -106,9 +106,12 @@ def _line_rows(year, strong="Georgia", weak="Akron", n=8):
 
 
 def test_cfb_gate_span_is_two_seasons():
+    from gridiron_edge.config import Settings
     from gridiron_edge.services import Services
 
-    assert Services._gate_spans(NOW)["cfb"] == (2024, 2025)
+    svc = Services.__new__(Services)
+    svc.settings = Settings()
+    assert svc._gate_spans(NOW)["cfb"] == (2024, 2025)
 
 
 async def test_cfb_backtest_uses_last_season_prior(services_mocked):

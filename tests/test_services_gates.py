@@ -1,8 +1,10 @@
 """fit_gates fails closed: one league's backtest failure never ungates another."""
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 
 import httpx
 
+from gridiron_edge import pipeline
 from gridiron_edge.clients import http as http_mod
 from gridiron_edge.models.blend import BlendFit
 from gridiron_edge.scheduler import Job
@@ -201,3 +203,45 @@ async def test_live_gate_line_is_plain_english(services_mocked):
     nfl = next(m for _, m in out if m.startswith("NFL spreads/moneylines"))
     assert "trusted, bets are texted" in nfl
     assert not any(j in nfl for j in JARGON), nfl
+
+
+async def test_totals_stay_gated_on_a_passing_spread_backtest(services_mocked):
+    svc = services_mocked()
+    live = BlendFit(a=0.0, b_model=0.5, b_market=0.5, b_model_se=0.05, n=600)
+
+    async def backtest(league, start, end, now):
+        return live, {"n": live.n}
+
+    svc.backtest = backtest
+    await svc.fit_gates(NOW - timedelta(days=7))  # two passing weekly refits to go live
+    await svc.fit_gates(NOW)
+    for lg in ("nfl", "cfb"):
+        assert svc.gates[(lg, "spread")] is False and svc.gates[(lg, "ml")] is False
+        assert svc.gates[(lg, "total")] is True  # no totals backtest yet
+        assert svc.gates[(lg, "prop")] is False  # book-anchored props are market-derived
+    # projector-only props follow the projector's own calibration check unless drift pauses them
+    snap = svc.snapshot(NOW)
+    assert snap.projector_live is False and pipeline._model_gated(snap, "nfl")
+
+
+def test_cfb_gate_span_uses_setting(services_mocked):
+    svc = services_mocked(cfb_gate_seasons=2)
+    assert svc._gate_spans(NOW)["cfb"] == (2024, 2025)
+    svc.settings = replace(svc.settings, cfb_gate_seasons=1)
+    assert svc._gate_spans(NOW)["cfb"] == (2025, 2025)
+
+
+async def test_cfb_backtest_skips_weeks_without_enough_history(services_mocked):
+    from datetime import date
+    svc = services_mocked()
+    rows = [{"homeTeam": "Aaa", "awayTeam": "Bbb", "homeScore": 21, "awayScore": 14,
+             "startDate": "2025-09-06T19:00:00Z", "neutralSite": False, "week": 2,
+             "lines": [{"spread": -3.5}]}]
+
+    async def lines(year, week):
+        return rows
+
+    svc.cfbd.lines = lines
+    games, predict_asof = await svc._cfb_inputs([2025], date(2026, 1, 1))
+    assert len(games) == 1
+    assert predict_asof(date(2025, 9, 1))(games[0]) is None  # nothing fitted: no forecast

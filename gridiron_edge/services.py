@@ -12,7 +12,9 @@ import numpy as np
 import polars as pl
 
 from gridiron_edge import pipeline
+from gridiron_edge.bets import report as report_mod
 from gridiron_edge.bets.lifecycle import Lifecycle
+from gridiron_edge.bets.report import build_report
 from gridiron_edge.bets.settle import Settler
 from gridiron_edge.budget import BudgetGuard
 from gridiron_edge.clients import odds_api, therundown
@@ -46,6 +48,7 @@ from gridiron_edge.strategy.distributions import (
 )
 from gridiron_edge.strategy.kelly import clv_throttle
 from gridiron_edge.strategy.prizepicks import payout_table
+from gridiron_edge.strategy.fair import fair_two_way
 from gridiron_edge.types import Game, KalshiMarket, Leg, PropQuote, Quote, Recommendation, make_game_id
 from gridiron_edge.ui.widgets import compute_kpis
 
@@ -56,6 +59,12 @@ UPCOMING_WINDOW = timedelta(days=8)
 GATE_REFIT = timedelta(days=7)
 GATE_RECENT = timedelta(days=1)  # refits closer together than this don't count as another pass
 GATE_PASSES = 2  # consecutive passing refits before a market goes live
+CLV_WINDOW = timedelta(minutes=30)
+DRIFT_PREFIX = "drift."
+DRIFT_RESET_PREFIX = "drift_reset."  # not matched by LIKE 'drift.%'
+# drift segment type -> pipeline gate keys it pauses
+_SEGMENT_GATES = {"ml": ("ml",), "spread": ("spread",), "total": ("total",), "prop": ("prop", "prop_model"),
+                  "prizepicks": ("pp",)}
 QUOTE_TTL = timedelta(days=2)
 LINES_HORIZON = timedelta(hours=48)
 # sportsbook quotes and prop lines, written through to api_cache so a restart keeps them
@@ -63,6 +72,8 @@ _PERSISTED = {"quotes": Quote, "props": PropQuote}
 NFL_SEASONS = 3
 MARGIN_FIRST_SEASON = 2015  # spread-conditional margin models fit on closing lines from here on
 CFB_MARGIN_KEY = "cfb_spread"
+NFL_BURN_IN_GAMES = 48  # ~3 weeks: the first weeks of the backtest span have nothing to fit on
+CFB_BURN_IN_GAMES = 150
 # Settings the `set` command may not touch: secrets and paths live in .env / --db.
 LOCKED_SETTINGS = {"odds_api_key", "cfbd_api_key", "therundown_api_key", "notify_phone", "ntfy_topic",
                    "kalshi_base_url", "db_path"}
@@ -605,7 +616,12 @@ class Services:
         sched = await self._nfl_sched(years)
         epa = self.history.get("nfl_epa")
 
+        played = [_as_date(d) for d, h in zip(sched["gameday"].to_list(), sched["home_score"].to_list())
+                  if d is not None and h is not None] if "home_score" in sched.columns else []
+
         def predict_asof(d: date):
+            if sum(x < d for x in played) < NFL_BURN_IN_GAMES:  # start of the span: no forecast yet
+                return lambda g: None
             model = NflRatings.fit(sched, epa, d)
             return lambda g: model.predict(g["home"], g["away"], g.get("neutral", False))
 
@@ -683,7 +699,7 @@ class Services:
                 model = CfbRatings.fit(by_year.get(y, ([], []))[0], prior, d)
             except np.linalg.LinAlgError:  # nothing played this season yet: the prior alone
                 if not prior:
-                    return lambda g: 0.0
+                    return lambda g: None  # no forecast: skipped rather than scored as 0
                 model = CfbRatings(prior, hfa)
             return lambda g: model.predict(g["home"], g["away"], g["neutral"])
 
@@ -800,8 +816,9 @@ class Services:
                 gates[(lg, "total")] = True if tot is None else bool(tot["gated"])
                 if tot is not None:
                     fits[(lg, "total")] = (float(tot["b_model"]), float(tot["se"]))
-            else:
-                gates[(lg, "total")] = bool(r["gated"])
+            else:  # no totals backtest outside the NFL: totals stay observe-only
+                gates[(lg, "total")] = bool(r.get("total_gated", True))
+            gates[(lg, "prop")] = False  # book-anchored props; projector-only props follow projector_live
             if r.get("disagree_p95") is not None:
                 caps[lg] = float(r["disagree_p95"])
         gates.update({(lg, m): True for lg in closed for m in ("ml", "spread", "total")})
@@ -812,10 +829,10 @@ class Services:
                 out.append(("info", _gate_line("NFL over/unders", r["total"])))
         return out
 
-    @staticmethod
-    def _gate_spans(now: datetime) -> dict[str, tuple[int, int]]:
+    def _gate_spans(self, now: datetime) -> dict[str, tuple[int, int]]:
         cur = _season(now)
-        return {"nfl": (cur - NFL_SEASONS + 1, cur), "cfb": (cur - 2, cur - 1)}
+        n_cfb = max(1, self.settings.cfb_gate_seasons)
+        return {"nfl": (cur - NFL_SEASONS + 1, cur), "cfb": (cur - n_cfb, cur - 1)}
 
     def _league_model(self, league: str):
         return self.nfl_model if league == "nfl" else self.cfb_model
@@ -863,10 +880,26 @@ class Services:
         return {leg["game_id"] for leg in _bet_legs(self.lifecycle.open_bets()) if leg.get("game_id")}
 
     def close_games(self) -> set[str]:
-        """Games whose closing line matters: a PLACED bet, or an active non-observe recommendation."""
+        """Games whose closing line matters: a PLACED bet, or an active non-observe recommendation.
+
+        Games with only observe-only or unconfirmed signals are added for shadow CLV, but only while
+        the Odds API budget is above shadow_clv_min_budget (close pulls are paid).
+        """
         rows = self.conn.execute("SELECT legs_json FROM recommendations "
                                  "WHERE state IN ('RECOMMENDED','PENDING') AND observe_only=0").fetchall()
-        return self.open_bet_games() | {leg["game_id"] for leg in _bet_legs(rows) if leg.get("game_id")}
+        out = self.open_bet_games() | {leg["game_id"] for leg in _bet_legs(rows) if leg.get("game_id")}
+        if self._shadow_budget_ok():
+            since = (self.clock() - UPCOMING_WINDOW).isoformat()
+            shadow = self.conn.execute("SELECT legs_json FROM recommendations WHERE created_at >= ? "
+                                       "AND kind='kalshi_game'", (since,)).fetchall()  # prop CLV skips game odds
+            out |= {leg["game_id"] for leg in _bet_legs(shadow) if leg.get("game_id")}
+        return out
+
+    def _shadow_budget_ok(self) -> bool:
+        if self.odds is None:
+            return False
+        rem = self.odds.budget.remaining()
+        return rem is None or rem >= self.settings.shadow_clv_min_budget * self.odds.budget.monthly_cap
 
     async def _job_expire(self, job: Job, now: datetime):
         ids = self.lifecycle.expire_due(now)
@@ -937,7 +970,8 @@ class Services:
         self.kalshi_ok = True
         self.latest["kalshi"] = markets
         unmatched = sum(m.game_id is None for m in markets)
-        return [("api", f"kalshi: {len(markets)} markets ({unmatched} unmatched)")]
+        # free: refresh the near-kickoff closes (prop closes come only from already-paid prop pulls)
+        return [("api", f"kalshi: {len(markets)} markets ({unmatched} unmatched)")] + self._record_clv(now)
 
     async def _job_cfbd_weekly(self, job: Job, now: datetime):
         had = self.cfb_model is not None
@@ -963,7 +997,8 @@ class Services:
                     except ApiError:
                         continue
         done = self.settler.settle_ready(now, markets.get, self._stat_lookup)
-        return [("settle", f"bet {i} {result}: ${payout / 100:,.2f}") for i, result, payout in done]
+        out = [("settle", f"bet {i} {result}: ${payout / 100:,.2f}") for i, result, payout in done]
+        return out + (self.check_drift(now) if done else [])
 
     def _stat_lookup(self, game_id: str, player: str, stat: str):
         """A player's stat from nflverse weekly stats: value, None (did not play) or "pending"."""
@@ -984,24 +1019,88 @@ class Services:
             return None
         return float(row[col][0])
 
+    def _close_p(self, kind: str, leg: dict, snap: pipeline.Snapshot, markets: dict[str, KalshiMarket]
+                 ) -> tuple[float | None, str | None, bool]:
+        """Market-only P(our side) at the close, where it came from, and whether it is a stale snapshot.
+
+        Game markets use the sportsbook close; props use the last paid prop pull before kickoff
+        (no extra credits), flagged stale when it is older than prop_close_stale_minutes.
+        """
+        g = self.registry.get(leg.get("game_id") or "")
+        if g is None:
+            return None, None, False
+        if kind == "kalshi_game":
+            m = markets.get(leg.get("ticker") or "")
+            p_yes = None if m is None else pipeline.market_p_yes(m, g, snap, self.settings)
+            if p_yes is None:
+                return None, None, False
+            src = "sportsbook line"
+            if m.market_type == "ml":
+                quotes = [q for q in snap.quotes if q.game_id == g.game_id]
+                fair = fair_two_way(quotes, "h2h", None, now=snap.now, stale_seconds=self.settings.stale_seconds)
+                src = fair[1] if fair else src
+            return (p_yes if leg.get("side") == "yes" else 1.0 - p_yes), src, False
+        player, stat, line = leg.get("player"), leg.get("stat"), leg.get("line")
+        if not player or not stat or line is None:
+            return None, None, False
+        props = [q for q in snap.props if q.game_id == g.game_id and q.last_update <= g.kickoff
+                 and q.book != "prizepicks" and q.decimal is not None and q.stat == stat
+                 and q.player.lower() == player.lower()]
+        if not props:
+            return None, None, False
+        loose = replace(self.settings, stale_seconds=10**9)  # the last snapshot, however old
+        sides = pipeline._book_p_sides(replace(snap, props=props), loose, g.game_id, player, stat, line)
+        if sides is None:
+            return None, None, False
+        newest = max(q.last_update for q in props)
+        stale = g.kickoff - newest > timedelta(minutes=self.settings.prop_close_stale_minutes)
+        over = leg.get("side") in ("yes", "over")
+        return (sides[0] if over else sides[1]), "prop books", stale
+
     def _record_clv(self, now: datetime) -> list[tuple[str, str]]:
-        """CLV for open single-leg Kalshi game bets kicking off soon, from the closing market fair."""
+        """CLV for open Kalshi bets, and shadow CLV for every signal (any state), kicking off soon.
+
+        Uses only data already fetched: no API calls are made here.
+        """
+        if not self.registry.upcoming(CLV_WINDOW, now):
+            return []
         markets = {m.ticker: m for m in self.latest["kalshi"]}
         snap = self.snapshot(now)
+
+        def soon(leg: dict) -> bool:
+            g = self.registry.get(leg.get("game_id") or "")
+            return g is not None and now <= g.kickoff <= now + CLV_WINDOW
+
         out = []
         for bet in self.lifecycle.open_bets():
-            if bet["kind"] != "kalshi_game":
+            if bet["kind"] not in ("kalshi_game", "kalshi_prop"):
                 continue
-            leg = Leg(**json.loads(bet["legs_json"])[0])
-            g, m = self.registry.get(leg.game_id or ""), markets.get(leg.ticker or "")
-            if g is None or m is None or not now <= g.kickoff <= now + timedelta(minutes=30):
+            leg = json.loads(bet["legs_json"])[0]
+            if not soon(leg):
                 continue
-            p_yes = pipeline.market_p_yes(m, g, snap, self.settings)  # devigged close, no model, any league
-            if p_yes is None:
-                continue
-            value = self.settler.record_clv(bet["id"], p_yes if leg.side == "yes" else 1 - p_yes)
+            p, src, _ = self._close_p(bet["kind"], leg, snap, markets)
+            value = self.settler.record_clv(bet["id"], p, src)
             if value is not None:
-                out.append(("info", f"clv bet {bet['id']}: {value:+.1%}"))
+                word = "better" if value >= 0 else "worse"
+                out.append(("info", f"bet {bet['id']}: our price was {abs(value):.1%} {word} than the closing price"))
+        n = 0
+        since = (now - UPCOMING_WINDOW).isoformat()
+        for r in self.conn.execute("SELECT id, kind, legs_json FROM recommendations WHERE created_at >= ? "
+                                   "AND kind IN ('kalshi_game','kalshi_prop','pp_entry')", (since,)).fetchall():
+            legs = json.loads(r["legs_json"])
+            if r["kind"] != "pp_entry":
+                if soon(legs[0]):
+                    p, src, stale = self._close_p(r["kind"], legs[0], snap, markets)
+                    n += self.settler.record_rec_clv(r["id"], p, now, src, stale) is not None
+                continue
+            for i, leg in enumerate(legs):
+                # line movement needs a market price at rec time; model-only legs would score model vs market
+                if soon(leg) and leg.get("p_mkt") is not None:
+                    p, _, stale = self._close_p("pp_leg", leg, snap, markets)
+                    n += self.settler.record_leg_clv(r["id"], i, leg["p_mkt"], p, now, stale) is not None
+        if n:
+            out.append(("info", f"recorded closing prices for {n} bet idea(s), including ones not placed"))
+            out += self.check_drift(now)
         return out
 
     # -- scanning --------------------------------------------------------
@@ -1055,7 +1154,7 @@ class Services:
         return pipeline.Snapshot(
             now=now, games=games, quotes=list(self.latest["quotes"]),
             props=self.latest["props"] + self.manual_props, kalshi=list(self.latest["kalshi"]),
-            predictions=self._predictions(games), gates=gates,
+            predictions=self._predictions(games), gates={**gates, **self._drift_gates()},
             # the ledger already holds open stakes out, so the Kelly bankroll adds them back
             bankroll_cents=self.ledger.balance() + exposure, open_exposure_cents=exposure,
             pp_staked_today_cents=self.lifecycle.pp_staked_today_cents(now, PT),
@@ -1164,6 +1263,70 @@ class Services:
                                 "(PrizePicks stakes are halved until then). If only a perfect card pays (Arena), "
                                 "type: set pp_mode arena"))
         return out
+
+    # -- evaluation ----------------------------------------------------------
+    def report(self, now: datetime) -> dict:
+        """The full performance report (bets/report.py) as a plain dict, with plain-English summary lines."""
+        stored = json.loads(self._get("gates") or "null") or {}
+        return build_report(self.conn, now, backtest=stored.get("leagues"), window=self.settings.drift_window,
+                            drift_since=self._drift_resets())
+
+    def drift_paused(self) -> dict[str, str]:
+        """Segments paused by drift monitoring -> when they were paused."""
+        return {r["key"].removeprefix(DRIFT_PREFIX): r["value"]
+                for r in self.conn.execute("SELECT key, value FROM settings WHERE key LIKE 'drift.%'")}
+
+    def _drift_resets(self) -> dict[str, str]:
+        """Segment -> when it was last reset; drift only counts CLV recorded after that."""
+        return {r["key"].removeprefix(DRIFT_RESET_PREFIX): r["value"] for r in self.conn.execute(
+            "SELECT key, value FROM settings WHERE key LIKE ?", (DRIFT_RESET_PREFIX + "%",))}
+
+    def _drift_gates(self) -> dict[tuple[str, str], bool]:
+        out = {}
+        for seg in self.drift_paused():
+            lg, _, typ = seg.partition(" ")
+            for gate in _SEGMENT_GATES.get(typ, ()):
+                out[(lg, gate)] = True
+        return out
+
+    def check_drift(self, now: datetime) -> list[tuple[str, str]]:
+        """Pause (observe-only) any segment whose rolling CLV is significantly below 0; text once."""
+        paused = self.drift_paused()
+        out = []
+        for seg, d in report_mod.drift(self.conn, self.settings.drift_window,
+                                                  self._drift_resets()).items():
+            if not d["alarm"] or seg in paused or seg == "arb":
+                continue
+            self._put(DRIFT_PREFIX + seg, now.isoformat())
+            msg = (f"Warning: {d['label']} have been getting worse prices than the closing price lately "
+                   f"(last {d['n']} averaged {d['mean'] * 100:+.1f}%). New ones are paused to watch-only. "
+                   f"To turn them back on, type: drift reset {seg}")
+            out.append(("warn", msg))
+            if self.notifier.enabled:
+                self.notifier.send_text(msg, now)
+        stored = json.loads(self._get("gates") or "null") or {}
+        cal = report_mod.calibration_drift(self.conn, self.settings.drift_window, stored.get("leagues"))
+        flagged = self._get("drift_cal") is not None
+        if cal["worse"] and not flagged:
+            self._put("drift_cal", now.isoformat())
+            out.append(("warn", f"Warning: our chances have been less accurate lately ({cal['rolling_brier']:.3f}) "
+                                f"than in testing ({cal['backtest_brier']:.3f}). Bets are not paused for this."))
+        elif not cal["worse"] and flagged:
+            self.conn.execute("DELETE FROM settings WHERE key='drift_cal'")
+        return out
+
+    def reset_drift(self, seg: str = "all", now: datetime | None = None) -> list[str]:
+        """Un-pause one drift-paused segment (e.g. 'nfl spread'), or all of them.
+
+        The rolling window restarts at the reset: it must refill with new CLV before it can alarm again.
+        """
+        paused = self.drift_paused()
+        names = list(paused) if seg == "all" else [seg] if seg in paused else []
+        at = (now or self.clock()).isoformat()
+        for name in names:
+            self.conn.execute("DELETE FROM settings WHERE key=?", (DRIFT_PREFIX + name,))
+            self._put(DRIFT_RESET_PREFIX + name, at)
+        return names
 
     # -- views -------------------------------------------------------------
     def kpis(self) -> dict:

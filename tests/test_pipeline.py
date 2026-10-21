@@ -341,6 +341,7 @@ def test_zero_ask_markets_make_no_arb_and_no_crash(mk, settings):
 
 # -- fair-pricing audit: tie, median gate, direct sharp lines, why ---------------------------------
 
+
 def test_nfl_ml_tie_adjustment(mk, settings):
     from gridiron_edge.strategy.devig import devig
     p = devig([1.80, 2.10], "power")[0]
@@ -428,3 +429,74 @@ def test_game_fair_solves_each_implied_mean_once_per_scan(mk, settings, monkeypa
     ladder = [mk(f"E1-H{x}", "E1", "spread", "H1", line=x, yes_ask=0.5, game_id="g1") for x in (1.5, 4.5, 7.5)]
     kalshi_game_candidates(snap_with(quotes=spreads("g1", -3.0), kalshi=ladder), settings)
     assert calls == ["spreads"]
+
+
+def test_market_p_yes_ignores_cfb_disagreement_filter(mk, settings):
+    from gridiron_edge.pipeline import _game_p_yes, market_p_yes
+    g = game(1, league="cfb")
+    m = mk("E1-H1", "E1", "spread", "H1", line=3.5, game_id="g1")
+    snap = snap_with(games={"g1": g}, quotes=spreads("g1", -7.0))
+    p = market_p_yes(m, g, snap, settings)
+    assert p is not None and 0.5 < p < 0.9  # the close is measurable
+    assert _game_p_yes(m, g, snap, settings) == pytest.approx(p)  # no model: CFB falls back to the market
+
+
+def test_market_p_yes_ml_matches_devig(mk, settings):
+    from gridiron_edge.pipeline import market_p_yes
+    m = mk("E1-H1", "E1", "ml", "H1", game_id="g1")
+    snap = snap_with(quotes=h2h("g1", 1.80, 2.10))
+    p = market_p_yes(m, game(1), snap, settings)
+    assert 0.5 < p < 0.56
+    m_away = mk("E1-A1", "E1", "ml", "A1", game_id="g1")
+    assert market_p_yes(m_away, game(1), snap, settings) == pytest.approx(1 - p)
+
+
+def _prop_market(mk, yes_ask=0.50):
+    return replace(mk("P1", "EP", "prop", line=49.5, yes_ask=yes_ask, no_ask=0.60, game_id="g1"),
+                   player="Player 1", stat="rush_yds")
+
+
+def test_projector_only_kalshi_prop_is_observe_only(mk, settings):
+    strong = StubProjector({("Player 1", "rush_yds"): (75.0, 20.0)})
+    snap = snap_with(kalshi=[_prop_market(mk)])
+    recs = kalshi_prop_candidates(snap, settings, strong)
+    assert len(recs) == 1 and recs[0].observe_only and recs[0].legs[0].p_mkt is None
+    assert [r.stake_cents for r in scan(snap, settings, strong, lambda m: "nfl")] == [0]
+    live = kalshi_prop_candidates(replace(snap, gates={("nfl", "prop_model"): False}), settings, strong)
+    assert not live[0].observe_only
+
+
+def test_anchored_kalshi_prop_stays_live_and_keeps_market_p(mk, settings):
+    props = [PropQuote("odds_api", "draftkings", "g1", "Player 1", "rush_yds", "over", 52.5, 1.70, NOW),
+             PropQuote("odds_api", "draftkings", "g1", "Player 1", "rush_yds", "under", 52.5, 2.25, NOW)]
+    recs = kalshi_prop_candidates(snap_with(kalshi=[_prop_market(mk, 0.45)], props=props), settings,
+                                  StubProjector())
+    assert not recs[0].observe_only and recs[0].legs[0].p_mkt == recs[0].legs[0].p_fair
+    assert recs[0].p_mkt == recs[0].legs[0].p_mkt
+
+
+def test_pp_entry_with_projector_leg_is_observe_only(settings):
+    snap = _pp_snap()
+    snap = replace(snap, props=[q for q in snap.props if not (q.book == "draftkings" and q.player == "Player 0")])
+    proj = StubProjector({("Player 0", "rush_yds"): (90.0, 10.0)})
+    recs = pp_entry_candidates(snap, settings, proj)
+    assert recs
+    for r in recs:  # a live entry is built from book-anchored legs; any projector leg means watch-only
+        if any(leg.p_mkt is None for leg in r.legs):
+            assert r.observe_only and r.stake_cents == 0 and r.p_mkt is None
+    only_proj = replace(snap, props=[q for q in snap.props if q.book == "prizepicks"])
+    recs = pp_entry_candidates(only_proj, settings, StubProjector({(f"Player {i}", "rush_yds"): (90.0, 10.0)
+                                                                   for i in range(6)}))
+    assert recs and all(r.observe_only and r.stake_cents == 0 and r.p_mkt is None for r in recs)
+
+
+def test_pp_entry_anchored_records_market_p(settings):
+    r = pp_entry_candidates(_pp_snap(), settings, StubProjector())[0]
+    assert not r.observe_only and all(leg.p_mkt == leg.p_fair for leg in r.legs)
+    assert r.p_mkt == pytest.approx(r.p_win)
+
+
+def test_kalshi_game_rec_records_market_p(mk, settings):
+    r = kalshi_game_candidates(_ml_snap(mk, 0.48), settings)[0]
+    assert r.legs[0].p_mkt is not None and r.p_mkt == r.legs[0].p_mkt
+    assert r.legs[0].p_mkt == pytest.approx(r.legs[0].p_fair)  # no model: fair is the market

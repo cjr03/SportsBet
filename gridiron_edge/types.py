@@ -106,6 +106,7 @@ class Leg:
     team: str | None = None
     fee_multiplier: float = 1.0  # the market's Kalshi fee multiplier, used by confirm and texts
     worst_price: float | None = None  # arbs: the most this leg can cost and still lock a profit
+    p_mkt: float | None = None  # market-only P(this side) at rec time (None when not market-anchored)
 
     def identity(self) -> str:
         if self.ticker:
@@ -131,6 +132,7 @@ class Recommendation:
     # machine-readable reasons, e.g. {"fair_source": "pinnacle", "books": [...], "p_market": .52,
     # "p_model": .55, "model_weight": .3}; the UI renders it, nothing downstream depends on it
     why: dict | None = None
+    p_mkt: float | None = None  # market-only P(win event) at rec time, for calibration baselines
 
     @property
     def leg_key(self) -> str:

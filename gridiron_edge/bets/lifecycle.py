@@ -4,7 +4,7 @@ import sqlite3
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone, tzinfo
 
-from gridiron_edge.db import Ledger, register_schema
+from gridiron_edge.db import Ledger, register_column, register_schema
 from gridiron_edge.strategy.kalshi_pricing import taker_fee
 from gridiron_edge.types import Leg, Recommendation
 
@@ -44,6 +44,22 @@ register_schema(
         settled_at TEXT,
         clv REAL)""")
 register_schema("CREATE INDEX IF NOT EXISTS idx_recs_leg_key ON recommendations (leg_key)")
+# evaluation: market p at rec time and the close for every signal (shadow CLV), per-leg CLV for PrizePicks
+for _col, _decl in (("p_mkt", "REAL"), ("p_close_fair", "REAL"), ("clv_close", "REAL"),
+                    ("clv_source", "TEXT"), ("clv_stale", "INTEGER"), ("clv_at", "TEXT")):
+    register_column("recommendations", _col, _decl)
+register_column("bets", "p_close_fair", "REAL")
+register_column("bets", "clv_source", "TEXT")
+register_schema(
+    """CREATE TABLE IF NOT EXISTS leg_clv (
+        rec_id INTEGER NOT NULL,
+        leg_idx INTEGER NOT NULL,
+        p_rec REAL NOT NULL,
+        p_close REAL NOT NULL,
+        clv REAL NOT NULL,
+        stale INTEGER NOT NULL DEFAULT 0,
+        ts TEXT NOT NULL,
+        PRIMARY KEY (rec_id, leg_idx))""")
 
 
 class LifecycleError(Exception):
@@ -60,6 +76,7 @@ def _row_to_rec(r: sqlite3.Row) -> Recommendation:
         stake_cents=r["stake_cents"], qty=r["qty"], ev=r["ev"], p_win=r["p_win"],
         structure=r["structure"], snapshot_ts=_dt(r["snapshot_ts"]), expires_at=_dt(r["expires_at"]),
         state=r["state"], observe_only=bool(r["observe_only"]), tie_risk=bool(r["tie_risk"]),
+        p_mkt=r["p_mkt"] if "p_mkt" in r.keys() else None,
         why=json.loads(r["why_json"]) if "why_json" in r.keys() and r["why_json"] else None)
 
 
@@ -89,11 +106,11 @@ class Lifecycle:
             cur = self.conn.execute(
                 "INSERT INTO recommendations (kind, dedupe_key, leg_key, legs_json, stake_cents, qty,"
                 " ev, p_win, structure, snapshot_ts, expires_at, state, observe_only, tie_risk,"
-                " created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " created_at, p_mkt) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (rec.kind, rec.dedupe_key, rec.leg_key, json.dumps([asdict(g) for g in rec.legs]),
                  rec.stake_cents, rec.qty, rec.ev, rec.p_win, rec.structure,
                  rec.snapshot_ts.isoformat(), rec.expires_at.isoformat(), state,
-                 int(rec.observe_only), int(rec.tie_risk), now.isoformat()))
+                 int(rec.observe_only), int(rec.tie_risk), now.isoformat(), rec.p_mkt))
             if rec.why is not None:
                 self.conn.execute("UPDATE recommendations SET why_json=? WHERE id=?",
                                   (json.dumps(rec.why), cur.lastrowid))

@@ -190,12 +190,41 @@ class Settler:
             raise LifecycleError("payout must not be negative")
         self._write(bet_id, result, payout_cents, now or datetime.now().astimezone())
 
-    def record_clv(self, bet_id: int, p_close_fair: float | None) -> float | None:
+    def record_clv(self, bet_id: int, p_close_fair: float | None, source: str | None = None) -> float | None:
         bet = self.conn.execute("SELECT * FROM bets WHERE id=?", (bet_id,)).fetchone()
         if bet is None or bet["kind"] not in ("kalshi_game", "kalshi_prop") or not bet["qty"]:
             return None
         value = clv((bet["stake_cents"] + bet["fee_cents"]) / (bet["qty"] * 100), p_close_fair)
         if value is not None:
             with self.conn:
-                self.conn.execute("UPDATE bets SET clv=? WHERE id=?", (value, bet_id))
+                self.conn.execute("UPDATE bets SET clv=?, p_close_fair=?, clv_source=? WHERE id=?",
+                                  (value, p_close_fair, source, bet_id))
+        return value
+
+    def record_rec_clv(self, rec_id: int, p_close_fair: float | None, now: datetime,
+                       source: str | None = None, stale: bool = False) -> float | None:
+        """Shadow CLV for any Kalshi rec (placed or not), from its quoted ask plus the taker fee."""
+        rec = self.conn.execute("SELECT * FROM recommendations WHERE id=?", (rec_id,)).fetchone()
+        if rec is None or rec["kind"] not in ("kalshi_game", "kalshi_prop"):
+            return None
+        leg = json.loads(rec["legs_json"])[0]
+        qty = rec["qty"] or 100
+        cost = round(qty * leg["price"] * 100) + round(taker_fee(qty, leg["price"], 1.0) * 100)
+        value = clv(cost / (qty * 100), p_close_fair)
+        if value is not None:
+            with self.conn:
+                self.conn.execute(
+                    "UPDATE recommendations SET p_close_fair=?, clv_close=?, clv_source=?, clv_stale=?, clv_at=? "
+                    "WHERE id=?", (p_close_fair, value, source, int(stale), now.isoformat(), rec_id))
+        return value
+
+    def record_leg_clv(self, rec_id: int, leg_idx: int, p_rec: float | None, p_close: float | None,
+                       now: datetime, stale: bool = False) -> float | None:
+        """PrizePicks legs have no price: this is line movement, P(close)/P(at rec) - 1 for our side."""
+        value = clv(p_rec, p_close)
+        if value is not None:
+            with self.conn:
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO leg_clv (rec_id, leg_idx, p_rec, p_close, clv, stale, ts) "
+                    "VALUES (?,?,?,?,?,?,?)", (rec_id, leg_idx, p_rec, p_close, value, int(stale), now.isoformat()))
         return value

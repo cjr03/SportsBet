@@ -32,9 +32,22 @@ def register_schema(sql: str) -> None:
         _SCHEMA.append(sql)
 
 
+_COLUMNS: list[tuple[str, str, str]] = []
+
+
+def register_column(table: str, column: str, decl: str) -> None:
+    """Additive column for an existing table; migrate() adds it to older databases."""
+    if (table, column, decl) not in _COLUMNS:
+        _COLUMNS.append((table, column, decl))
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     for sql in _SCHEMA:
         conn.execute(sql)
+    for table, column, decl in _COLUMNS:
+        have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if have and column not in have:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
 
 def connect(path: Path) -> sqlite3.Connection:

@@ -1,5 +1,4 @@
 """TUI widgets: chart, KPI tiles, quota bars, opportunity board, scores, event log, header."""
-import math
 from datetime import datetime
 from typing import Literal
 
@@ -9,12 +8,13 @@ from textual.reactive import reactive
 from textual.widgets import DataTable, RichLog, Static, TabbedContent, TabPane
 from textual_plotext import PlotextPlot
 
+from gridiron_edge.bets import report
 from gridiron_edge.types import Game, Recommendation
 
 PROFIT, LOSS, PENDING, ACCENT = "#22c55e", "#ef4444", "#f59e0b", "#22d3ee"
 _RGB = {"profit": (34, 197, 94), "loss": (239, 68, 68)}
 _SURFACE_RGB = (18, 24, 41)
-MIN_CONCLUSIVE_N = 1500
+MIN_CONCLUSIVE_N = 1500  # unused: kept for importers; the verdict now comes from the ROI CI
 
 
 def _get(row, key, default=None):
@@ -25,52 +25,28 @@ def _get(row, key, default=None):
     return default if v is None else v
 
 
-def compute_kpis(settled_rows, history: list[tuple[datetime, int]]) -> dict:
-    """KPIs from settled bet rows (dicts or sqlite rows) and balance history (cents).
+def compute_kpis(settled_rows, history: list[tuple[datetime, int]] | None = None) -> dict:
+    """KPIs from settled bet rows (dicts or sqlite rows); see bets/report.py for the definitions.
 
-    ROI/record count graded bets only (won/lost; refunds are tracked but not in the ROI sample).
-    Brier needs a `p_win` column on the rows; it is None when none carry one.
+    ROI is net of Kalshi fees and excludes arbs (reported as realized profit). Max drawdown is on
+    settled trading P&L, not the ledger balance, so `history` is no longer used.
     """
-    won = lost = refunds = 0
-    stake = profit = 0
-    returns: list[float] = []
-    clvs: list[float] = []
-    briers: list[float] = []
-    for r in settled_rows:
-        result = _get(r, "result")
-        if result == "refund":
-            refunds += 1
-            continue
-        if result not in ("won", "lost"):
-            continue
-        s, payout = _get(r, "stake_cents", 0), _get(r, "payout_cents", 0)
-        won += result == "won"
-        lost += result == "lost"
-        stake += s
-        profit += payout - s
-        if s > 0:
-            returns.append((payout - s) / s)
-        if (c := _get(r, "clv")) is not None:
-            clvs.append(c)
-        if (p := _get(r, "p_win")) is not None:
-            briers.append((p - (result == "won")) ** 2)
-    n = won + lost
-    roi = profit / stake if stake else None
-    band = None
-    if len(returns) >= 2 and roi is not None:
-        mean = sum(returns) / len(returns)
-        sd = math.sqrt(sum((x - mean) ** 2 for x in returns) / (len(returns) - 1))
-        band = 2 * sd / math.sqrt(len(returns))
-    peak, max_dd = None, 0
-    for _, cents in history:
-        peak = cents if peak is None else max(peak, cents)
-        max_dd = max(max_dd, peak - cents)
+    rows = list(settled_rows)
+    bets = [r for r in rows if _get(r, "kind") != "arb"]
+    arbs = [r for r in rows if _get(r, "kind") == "arb" and _get(r, "result") in ("won", "lost", "refund")]
+    roi = report.roi_stats(bets)
+    clv = report.clv_stats(_get(r, "clv") for r in rows if _get(r, "result") in ("won", "lost"))
+    dd = report.drawdown(rows)
+    won = sum(_get(r, "result") == "won" for r in rows)
+    lost = sum(_get(r, "result") == "lost" for r in rows)
+    refunds = sum(_get(r, "result") == "refund" for r in rows)
     return {
-        "roi": roi, "roi_band": band,
-        "clv_mean": sum(clvs) / len(clvs) if clvs else None,
-        "clv_pos": sum(c > 0 for c in clvs) / len(clvs) if clvs else None,
-        "record": f"{won}-{lost}-{refunds}", "max_dd": max_dd,
-        "brier": sum(briers) / len(briers) if briers else None, "n": n,
+        "roi": roi["roi"], "roi_band": None if roi["se"] is None else report.Z * roi["se"],
+        "roi_ci": (roi["ci_lo"], roi["ci_hi"]), "conclusive": roi["conclusive"],
+        "clv_mean": clv["mean"], "clv_pos": clv["pos_share"],
+        "record": f"{won}-{lost}-{refunds}", "max_dd": dd["max_dd_cents"], "current_dd": dd["current_dd_cents"],
+        "brier": report.brier(rows), "brier_by_kind": report.brier_by_kind(rows), "n": roi["n"],
+        "arb_profit_cents": sum(report._profit(r) for r in arbs),
     }
 
 
@@ -115,23 +91,37 @@ class KpiTiles(Static):
     text = ""
 
     def update_kpis(self, k: dict) -> None:
+        """Plain-English tiles; the luck-vs-skill verdict comes from the profit CI, not a bet count."""
         def pct(v, sign="+"):
-            return "n/a" if v is None else f"{v * 100:{sign}.1f}%"
+            return "not enough data" if v is None else f"{v * 100:{sign}.1f}%"
 
-        roi = pct(k.get("roi"))
-        if k.get("roi_band") is not None and k.get("roi") is not None:
-            roi += f" ±{k['roi_band'] * 100:.1f}%"
+        roi, (lo, hi) = k.get("roi"), k.get("roi_ci") or (None, None)
+        profit = f"Profit per $1 staked: {pct(roi)}"
+        if lo is not None and hi is not None:
+            profit += f" (likely range {pct(lo)} to {pct(hi)})"
+        clv = k.get("clv_mean")
+        if clv is None:
+            vs_close = "Our prices vs the closing price: not enough data"
+        else:
+            word = "better" if clv >= 0 else "worse"
+            vs_close = (f"Our prices vs the closing price: {abs(clv) * 100:.1f}% {word} on average"
+                        f" ({pct(k.get('clv_pos'), '')} of bets got a better price)")
         brier = k.get("brier")
         lines = [
-            f"ROI {roi}",
-            f"CLV {pct(k.get('clv_mean'))}  ({pct(k.get('clv_pos'), '')} pos)",
-            f"Record {k.get('record', '0-0-0')}",
-            f"Max DD ${k.get('max_dd', 0) / 100:,.2f}",
-            f"Brier {'n/a' if brier is None else f'{brier:.3f}'}",
+            profit,
+            vs_close,
+            f"Won-lost-refunded: {k.get('record', '0-0-0')}",
+            f"Biggest drop from a high point: ${k.get('max_dd', 0) / 100:,.2f}",
+            "Accuracy of our chances: " + ("not enough data" if brier is None else
+                                           f"{brier:.3f} (lower is better; 0.250 is a coin flip)"),
         ]
         n = k.get("n", 0)
-        if n < MIN_CONCLUSIVE_N:
-            lines.append(f"inconclusive (n<{MIN_CONCLUSIVE_N})  n={n}")
+        if k.get("conclusive") and lo is not None and lo > 0:
+            lines.append(f"After {n} bets the profit looks like real skill, not luck")
+        elif k.get("conclusive") and hi is not None and hi < 0:
+            lines.append(f"After {n} bets we are losing by more than bad luck explains")
+        else:
+            lines.append(f"Too few bets to tell luck from skill yet ({n} settled)")
         self.text = "\n".join(lines)
         self.update(Text(self.text))
 
@@ -303,7 +293,7 @@ class ScoresPanel(DataTable):
 class EventLog(RichLog):
     KIND_COLORS = {"rec": ACCENT, "text": "#a78bfa", "confirm": PROFIT, "deposit": PROFIT,
                    "withdraw": PENDING, "settle": "#60a5fa", "api": "#94a3b8",
-                   "error": LOSS, "info": "#e2e8f0"}
+                   "error": LOSS, "info": "#e2e8f0", "warn": PENDING}
 
     def __init__(self, **kw):
         super().__init__(wrap=True, markup=False, **kw)
