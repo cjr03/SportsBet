@@ -94,3 +94,75 @@ def test_compute_kpis_uses_fee_and_settled_pnl():
     assert k["roi"] == pytest.approx(96 / 104)  # arbs are reported as profit, not in ROI
     assert k["arb_profit_cents"] == 90 and k["n"] == 1
     assert k["brier"] == pytest.approx(0.16)
+
+
+# -- build_report over a database ----------------------------------------------
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+from gridiron_edge.bets.lifecycle import Lifecycle  # noqa: E402
+from gridiron_edge.bets.settle import Settler  # noqa: E402
+from gridiron_edge.db import Ledger  # noqa: E402
+from gridiron_edge.matching import GameRegistry, TeamResolver  # noqa: E402
+from gridiron_edge.types import Leg, Recommendation  # noqa: E402
+
+T0 = datetime(2026, 10, 25, 17, 0, tzinfo=timezone.utc)
+
+
+def _db(conn):
+    ledger = Ledger(conn)
+    ledger.deposit(100_000)
+    lc = Lifecycle(conn, ledger)
+    st = Settler(conn, lc, GameRegistry(conn, TeamResolver(conn)))
+    return ledger, lc, st
+
+
+def _rec(i, line=3.5, team="PHI", observe=False, p_mkt=0.5, p_win=0.55, league="nfl"):
+    leg = Leg("kalshi", "x", "yes", 0.50, p_win, f"{league}:2026102{i % 10}:A@B", ticker=f"T{i}", team=team,
+              line=line, p_mkt=p_mkt)
+    return Recommendation(None, "kalshi_game", [leg], 0 if observe else 500, 10, 0.05, p_win, None,
+                          T0, T0 + timedelta(hours=3), observe_only=observe, p_mkt=p_mkt)
+
+
+def test_build_report_shape_and_plain_english(conn):
+    ledger, lc, st = _db(conn)
+    for i in range(4):
+        rec, _ = lc.upsert_recommendation(_rec(i), T0)
+        bet = lc.confirm(rec.id, T0)
+        st.record_clv(bet, 0.56)
+        st.record_rec_clv(rec.id, 0.56, T0)
+        st.manual_settle(bet, "won" if i % 2 else "lost", now=T0 + timedelta(hours=i + 4))
+    obs, _ = lc.upsert_recommendation(_rec(9, observe=True), T0)
+    st.record_rec_clv(obs.id, 0.45, T0)
+    r = report.build_report(conn, T0 + timedelta(days=1))
+    assert r["placed"]["roi"]["n"] == 4 and r["placed"]["record"] == "2-2-0"
+    assert r["clv"]["placed"]["n"] == 4 and r["clv"]["all_signals"]["n"] == 5
+    assert "nfl spread" in r["clv"]["by_segment"]
+    assert r["calibration"]["brier"] is not None and r["calibration"]["brier_market"] is not None
+    assert len(r["calibration"]["reliability"]) == 5
+    assert r["drawdown"]["max_dd_cents"] >= 0
+    text = " ".join(r["summary"])
+    for jargon in ("CLV", "Brier", "EV", "ROI"):
+        assert jargon not in text
+    assert all(s.isascii() for s in r["summary"])
+
+
+def test_drift_flags_segment_when_rolling_clv_significantly_negative(conn):
+    _, lc, st = _db(conn)
+    for i in range(60):
+        rec, _ = lc.upsert_recommendation(_rec(i, observe=True), T0 + timedelta(minutes=i))
+        st.record_rec_clv(rec.id, 0.47 + (i % 3) * 0.005, T0 + timedelta(minutes=i))
+    d = report.drift(conn, window=50)
+    seg = d["nfl spread"]
+    assert seg["n"] == 50 and seg["hi"] < 0 and seg["alarm"] is True
+    assert report.drift(conn, window=100)["nfl spread"]["alarm"] is False  # not enough signals yet
+
+
+def test_drift_calibration_vs_backtest(conn):
+    ledger, lc, st = _db(conn)
+    for i in range(10):
+        rec, _ = lc.upsert_recommendation(_rec(i, p_win=0.9), T0)
+        bet = lc.confirm(rec.id, T0)
+        st.manual_settle(bet, "lost", now=T0 + timedelta(hours=i))
+    r = report.build_report(conn, T0 + timedelta(days=1), backtest={"nfl": {"brier": 0.24}})
+    cal = r["drift"]["calibration"]
+    assert cal["rolling_brier"] == pytest.approx(0.81) and cal["backtest_brier"] == 0.24 and cal["worse"]

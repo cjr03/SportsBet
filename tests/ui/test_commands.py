@@ -27,6 +27,8 @@ from gridiron_edge.ui.commands import COMMAND_WORDS, Command, CommandError, pars
     ("backtest nfl 2018-2025", Command("backtest", {"league": "nfl", "start": 2018, "end": 2025})),
     ("fit blend", Command("fit", {"what": "blend"})),
     ("report", Command("report", {})),
+    ("drift reset nfl spread", Command("drift", {"segment": "nfl spread"})),
+    ("drift reset all", Command("drift", {"segment": "all"})),
     ("help", Command("help", {})),
 ])
 def test_parses(text, expected):
@@ -37,7 +39,7 @@ def test_parses(text, expected):
     "withdraw -5", "deposit abc", "confirm x", "confirm 42 1.5", "frobnicate",
     "set nosuch 1", "", 'pp add "unterminated',
     "withdraw", "confirm 42 0.5 0", "scan bogus", "settle 3 maybe",
-    "backtest nfl 2025-2018", "notify maybe", "skip", "quota extra",
+    "backtest nfl 2025-2018", "notify maybe", "drift reset nba spread", "drift", "skip", "quota extra",
 ])
 def test_rejects(text):
     with pytest.raises(CommandError) as e:

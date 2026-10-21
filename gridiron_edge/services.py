@@ -11,7 +11,9 @@ import numpy as np
 import polars as pl
 
 from gridiron_edge import pipeline
+from gridiron_edge.bets import report as report_mod
 from gridiron_edge.bets.lifecycle import Lifecycle
+from gridiron_edge.bets.report import build_report
 from gridiron_edge.bets.settle import Settler
 from gridiron_edge.budget import BudgetGuard
 from gridiron_edge.clients import odds_api, therundown
@@ -51,6 +53,10 @@ STATE_TTL = timedelta(days=14)
 UPCOMING_WINDOW = timedelta(days=8)
 GATE_REFIT = timedelta(days=7)
 CLV_WINDOW = timedelta(minutes=30)
+DRIFT_PREFIX = "drift."
+# drift segment type -> pipeline gate keys it pauses
+_SEGMENT_GATES = {"ml": ("ml",), "spread": ("spread",), "total": ("total",), "prop": ("prop", "prop_model"),
+                  "prizepicks": ("pp",)}
 QUOTE_TTL = timedelta(days=2)
 LINES_HORIZON = timedelta(hours=48)
 # sportsbook quotes and prop lines, written through to api_cache so a restart keeps them
@@ -791,6 +797,7 @@ class Services:
                     n += self.settler.record_leg_clv(r["id"], i, p_rec, p, now, stale) is not None
         if n:
             out.append(("info", f"recorded closing prices for {n} bet idea(s), including ones not placed"))
+            out += self.check_drift(now)
         return out
 
     # -- scanning --------------------------------------------------------
@@ -817,7 +824,7 @@ class Services:
         return pipeline.Snapshot(
             now=now, games=games, quotes=list(self.latest["quotes"]),
             props=self.latest["props"] + self.manual_props, kalshi=list(self.latest["kalshi"]),
-            predictions=self._predictions(games), gates=dict(self.gates),
+            predictions=self._predictions(games), gates={**self.gates, **self._drift_gates()},
             # the ledger already holds open stakes out, so the Kelly bankroll adds them back
             bankroll_cents=self.ledger.balance() + exposure, open_exposure_cents=exposure,
             pp_staked_today_cents=self.lifecycle.pp_staked_today_cents(now, PT),
@@ -909,6 +916,48 @@ class Services:
         out.append(("info", f"kalshi reachable={self.kalshi_ok}"))
         out.append(("info", 'notify: run "notify test" to confirm your phone alerts'))
         return out
+
+    # -- evaluation ----------------------------------------------------------
+    def report(self, now: datetime) -> dict:
+        """The full performance report (bets/report.py) as a plain dict, with plain-English summary lines."""
+        stored = json.loads(self._get("gates") or "null") or {}
+        return build_report(self.conn, now, backtest=stored.get("leagues"), window=self.settings.drift_window)
+
+    def drift_paused(self) -> dict[str, str]:
+        """Segments paused by drift monitoring -> when they were paused."""
+        return {r["key"].removeprefix(DRIFT_PREFIX): r["value"]
+                for r in self.conn.execute("SELECT key, value FROM settings WHERE key LIKE 'drift.%'")}
+
+    def _drift_gates(self) -> dict[tuple[str, str], bool]:
+        out = {}
+        for seg in self.drift_paused():
+            lg, _, typ = seg.partition(" ")
+            for gate in _SEGMENT_GATES.get(typ, ()):
+                out[(lg, gate)] = True
+        return out
+
+    def check_drift(self, now: datetime) -> list[tuple[str, str]]:
+        """Pause (observe-only) any segment whose rolling CLV is significantly below 0; text once."""
+        paused = self.drift_paused()
+        out = []
+        for seg, d in report_mod.drift(self.conn, self.settings.drift_window).items():
+            if not d["alarm"] or seg in paused or seg == "arb":
+                continue
+            self._put(DRIFT_PREFIX + seg, now.isoformat())
+            msg = (f"Warning: {d['label']} have been getting worse prices than the closing price lately "
+                   f"(last {d['n']} averaged {d['mean'] * 100:+.1f}%). New ones are paused to watch-only. "
+                   f"To turn them back on, type: drift reset {seg}")
+            out.append(("warn", msg))
+            if self.notifier.enabled:
+                self.notifier.send_text(msg, now)
+        return out
+
+    def reset_drift(self, seg: str = "all") -> list[str]:
+        """Un-pause one drift-paused segment (e.g. 'nfl spread'), or all of them."""
+        names = list(self.drift_paused()) if seg == "all" else [seg]
+        for name in names:
+            self.conn.execute("DELETE FROM settings WHERE key=?", (DRIFT_PREFIX + name,))
+        return names
 
     # -- views -------------------------------------------------------------
     def kpis(self) -> dict:

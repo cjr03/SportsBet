@@ -307,7 +307,8 @@ def pp_entry_candidates(snap: Snapshot, s: Settings, projector: Projector) -> li
     legs, st, ev, _ = found
     ps = [pk.p for pk in legs]
     games = [snap.games[pk.game_id] for pk in legs]
-    observe = any(snap.gates.get((g.league, "prop"), False) for g in games) or any(
+    observe = any(snap.gates.get((g.league, "prop"), False) or snap.gates.get((g.league, "pp"), False)
+                  for g in games) or any(
         not pk.anchored and _model_gated(snap, g.league) for pk, g in zip(legs, games))
     stake = 0
     if not observe:

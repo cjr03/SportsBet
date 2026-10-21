@@ -241,3 +241,16 @@ async def test_rundown_lines_only_for_dates_within_48h(services_mocked):
     await svc.run_job(Job("rundown_lines", "nfl"), NOW)
     after = sum(r.call_count for r in route if "therundown" in str(r.pattern))
     assert after - before == 1
+
+
+async def test_report_and_drift_reset_commands_log_plain_english(services_mocked):
+    svc = services_mocked()
+    svc._put("drift.nfl spread", "2026-10-31T18:00:00+00:00")
+    app = GridironApp(svc, clock=lambda: NOW)
+    async with app.run_test() as pilot:
+        await submit(app, pilot, "report")
+        await submit(app, pilot, "drift reset nfl spread")
+        text = "\n".join(log_lines(app))
+    assert "No settled bets yet." in text
+    assert "NFL point-spread bets are back on" in text
+    assert svc.drift_paused() == {}

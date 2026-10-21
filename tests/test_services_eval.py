@@ -96,3 +96,35 @@ def test_close_games_adds_observe_games_only_with_budget(services_mocked, mk):
     assert gid in svc.close_games()
     svc.odds.budget.record(100, 400, 1)  # 20% left: no extra pulls for shadow CLV
     assert gid not in svc.close_games()
+
+
+def _bad_signals(svc, mk, n=55):
+    gid, m = setup_game(svc, mk, league="nfl", gid="nfl:20261031:AAA@BBB")
+    for i in range(n):
+        leg = Leg("kalshi", "x", "yes", 0.50, 0.6, gid, ticker=f"T{i}", team="BBB", line=3.5)
+        rec = Recommendation(None, "kalshi_game", [leg], 0, 10, 0.05, 0.6, None, NOW, KICK, observe_only=True)
+        rec, _ = svc.lifecycle.upsert_recommendation(rec, NOW)
+        svc.settler.record_rec_clv(rec.id, 0.46 + (i % 2) * 0.01, NOW + timedelta(seconds=i))
+    return gid
+
+
+def test_drift_pauses_segment_texts_once_and_resets(services_mocked, mk):
+    svc = services_mocked()
+    _bad_signals(svc, mk)
+    out = svc.check_drift(NOW)
+    assert any(k == "warn" and "NFL point-spread bets" in msg for k, msg in out)
+    assert len(services_mocked.sink) == 1 and services_mocked.sink[0].isascii()
+    assert "paused" in services_mocked.sink[0] and "drift reset nfl spread" in services_mocked.sink[0]
+    assert svc.snapshot(NOW).gates[("nfl", "spread")] is True
+    assert svc.check_drift(NOW) == []  # already paused: no repeat text
+    assert len(services_mocked.sink) == 1
+    svc.reset_drift("nfl spread")
+    assert svc.snapshot(NOW).gates.get(("nfl", "spread"), False) is False
+
+
+def test_services_report_returns_plain_dict(services_mocked, mk):
+    svc = services_mocked()
+    _bad_signals(svc, mk)
+    r = svc.report(NOW)
+    assert r["clv"]["all_signals"]["n"] == 55 and r["drift"]["segments"]["nfl spread"]["alarm"]
+    assert isinstance(r["summary"], list) and r["summary"]

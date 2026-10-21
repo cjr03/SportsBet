@@ -278,7 +278,7 @@ class ScoresPanel(DataTable):
 class EventLog(RichLog):
     KIND_COLORS = {"rec": ACCENT, "text": "#a78bfa", "confirm": PROFIT, "deposit": PROFIT,
                    "withdraw": PENDING, "settle": "#60a5fa", "api": "#94a3b8",
-                   "error": LOSS, "info": "#e2e8f0"}
+                   "error": LOSS, "info": "#e2e8f0", "warn": PENDING}
 
     def __init__(self, **kw):
         super().__init__(wrap=True, markup=False, **kw)
