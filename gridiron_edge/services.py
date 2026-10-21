@@ -966,7 +966,8 @@ class Services:
 
     def reset_drift(self, seg: str = "all") -> list[str]:
         """Un-pause one drift-paused segment (e.g. 'nfl spread'), or all of them."""
-        names = list(self.drift_paused()) if seg == "all" else [seg]
+        paused = self.drift_paused()
+        names = list(paused) if seg == "all" else [seg] if seg in paused else []
         for name in names:
             self.conn.execute("DELETE FROM settings WHERE key=?", (DRIFT_PREFIX + name,))
         return names
