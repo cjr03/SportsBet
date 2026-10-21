@@ -20,19 +20,21 @@ class ConfirmScreen(ModalScreen[tuple[float | None, int | None, int | None] | No
         self.rec = rec
         self.names = names
         self.warning = warning  # e.g. the PrizePicks prices are hours old
+        # old prices: no suggested amount; you type what you put in
+        self.suggested = 0 if warning else rec.stake_cents
 
     def compose(self) -> ComposeResult:
         r = self.rec
         with Vertical(id="confirm-box"):
             if r.kind == "pp_entry":  # no price or contracts on PrizePicks: the amount you put in
                 which = f"PrizePicks entry #{r.id}" if r.id is not None else "this PrizePicks entry"
-                amount = f"{d.money(r.stake_cents)}, " if r.stake_cents > 0 else ""
+                amount = f"{d.money(self.suggested)}, " if self.suggested > 0 else ""
                 yield Static(f"Did you place {which} ({amount}{d.structure_text(r.structure)})?", id="confirm-title")
                 yield Static(Text(d.bet_text(r, self.names)), id="legs")
                 if self.warning:
                     yield Static(Text(f"Warning: {self.warning}"), id="confirm-warning")
                 yield Label("Amount you put in, in dollars (e.g. 10)")
-                yield Input(value=f"{r.stake_cents / 100:.2f}" if r.stake_cents > 0 else "", id="stake")
+                yield Input(value=f"{self.suggested / 100:.2f}" if self.suggested > 0 else "", id="stake")
             else:
                 yield Static(f"Did you place bet idea #{r.id}?  Bet {d.money(r.stake_cents)} at {d.price_text(r)}",
                              id="confirm-title")
@@ -58,8 +60,8 @@ class ConfirmScreen(ModalScreen[tuple[float | None, int | None, int | None] | No
         if self.rec.kind == "pp_entry":
             raw = self.query_one("#stake", Input).value.strip().lstrip("$").replace(",", "")
             if not raw:
-                if self.rec.stake_cents > 0:
-                    return None, None, self.rec.stake_cents
+                if self.suggested > 0:
+                    return None, None, self.suggested
                 raise ValueError("Type the amount you put in, in dollars (e.g. 10)")
             try:
                 cents = round(float(raw) * 100)
@@ -114,7 +116,7 @@ class AskScreen(ModalScreen[bool]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="confirm-box"):
-            yield Static(Text(self.text), id="ask-text")
+            yield Static(Text(f"{self.text} (press y or n)"), id="ask-text")
             with Horizontal(id="buttons"):
                 yield Button(self.labels[0], id="yes", variant="success")
                 yield Button(self.labels[1], id="no")

@@ -147,6 +147,28 @@ async def test_confirm_modal_prizepicks_stake_is_editable_and_checked():
         assert app.result == (None, None, 1250)
 
 
+async def test_confirm_modal_prizepicks_with_old_prices_suggests_no_amount():
+    leg = Leg(venue="prizepicks", description="x", side="over", price=0.0, p_fair=0.6, game_id="g",
+              player="Jalen Hurts", stat="pass_tds", line=1.5, team="PHI")
+    pp = Recommendation(id=None, kind="pp_entry", legs=[leg] * 3, stake_cents=1000, qty=None, ev=0.05,
+                        p_win=0.2, structure="3-power", snapshot_ts=T0, expires_at=T0 + timedelta(hours=1))
+    app = Harness()
+    async with app.run_test() as pilot:
+        app.push_screen(ConfirmScreen(pp, warning="Prices are 7 hours old and may have moved."),
+                        lambda r: setattr(app, "result", r))
+        await pilot.pause(0.3)
+        title = str(app.screen.query_one("#confirm-title").render())
+        assert title == "Did you place this PrizePicks entry (3-pick Power Play)?"
+        assert app.screen.query_one("#stake", Input).value == ""
+        await pilot.click("#ok")  # old prices: you must type the amount
+        await pilot.pause(0.3)
+        assert app.result == "unset" and app.screen.query_one("#error").display
+        app.screen.query_one("#stake", Input).value = "7"
+        await pilot.click("#ok")
+        await pilot.pause(0.3)
+        assert app.result == (None, None, 700)
+
+
 async def test_confirm_modal_rejects_bad_price():
     app = Harness()
     async with app.run_test() as pilot:

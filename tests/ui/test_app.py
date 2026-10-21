@@ -673,6 +673,7 @@ async def test_prizepicks_old_lines_can_still_be_picked_and_recorded(services_mo
         await pilot.pause()
         assert isinstance(app.screen, ConfirmScreen)
         assert warn in str(app.screen.query_one("#confirm-warning", Static).render())
+        assert app.screen.query_one("#stake", Input).value == ""  # no amount suggested from old prices
         app.screen.query_one("#stake", Input).value = "5"
         await pilot.click("#ok")
         await pilot.pause()
@@ -726,6 +727,7 @@ async def test_prizepicks_r_asks_before_loading_lines(services_mocked):
         await pilot.pause()
         assert isinstance(app.screen, AskScreen)
         assert "3 Odds API credits" in app.screen.text
+        assert str(app.screen.query_one("#ask-text", Static).render()).endswith("(press y or n)")
         await pilot.click("#no")
         await pilot.pause()
         await app.workers.wait_for_complete()

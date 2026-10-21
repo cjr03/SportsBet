@@ -457,7 +457,8 @@ class GridironApp(App):
         """Record a PrizePicks entry you placed yourself: the confirm modal, then a pp_entry idea and bet."""
         view, ev = self._pp_view, self._pp_eval
         if view is None or ev is None or not ev.picks:
-            self.log_event("error", pp_ui.WAIT_FOR_LINES if self._pp_selected else pp_ui.EMPTY_ENTRY)
+            self.log_event("error", pp_ui.WAIT_FOR_LINES if self._pp_selected
+                           else pp_ui.empty_entry_text(self.services.settings))
             return
         if not ev.ready:
             self.log_event("error", ev.problems[0] if ev.problems else "This entry can't be worked out.")

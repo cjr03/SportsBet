@@ -288,10 +288,14 @@ def board_sections(view: PPView, now: datetime, names: d.Names = d.DEFAULT_NAMES
     n_clear = sum(_clears(ln, view.settings, best) for _, lines in groups for ln in lines)
     summary = [f"Lines as of {d.when(max(stamps), now)} PT - {n} line{'s' * (n != 1)} for "
                f"{len(groups)} game{'s' * (len(groups) != 1)}. " + _next_text(view, now),
-               needed_text(view.settings),
-               _entry_text(view),
-               clear_text(n_clear, n).capitalize() + "."]
+               needed_text(view.settings)]
     old = old_lines_text(view, now)
+    if not (old and view.blocker is not None and view.blocker[0] == "stale"):  # the old-lines line says why
+        summary.append(_entry_text(view))
+    one = one_game_text(view)
+    if one:  # before the last two lines: with picks chosen, YOUR ENTRY repeats it and the summary keeps 2
+        summary.append(one)
+    summary.append(clear_text(n_clear, n).capitalize() + ".")
     if old:
         summary.append(old)
     top = [f"{i}. {best_pick_text(ln, view, names, best)}" for i, ln in enumerate(best_picks(view), 1)]
@@ -335,6 +339,26 @@ def status_line(view: PPView, now: datetime, names: d.Names = d.DEFAULT_NAMES) -
 PickKey = tuple[str, str, float, str]  # (player, stat, line, side): survives view refreshes
 MIN_PICKS, MAX_PICKS = 2, 6
 _LEAGUE_WORDS = {"nfl": "NFL", "cfb": "college football"}
+
+
+def min_picks(s: Settings) -> int:
+    """The fewest picks any entry type we use takes (PrizePicks itself allows 2)."""
+    sizes = [st[0] for st in allowed_structures(s)]
+    return max(MIN_PICKS, min(sizes)) if sizes else MIN_PICKS
+
+
+def one_game_text(view: PPView) -> str | None:
+    """When the loaded games can't fill even the smallest entry under the per-game cap: say so, and what to do."""
+    games = {ln.game_id for ln in pickable(view).values()}
+    need, cap = min_picks(view.settings), view.settings.pp_max_per_game
+    if not games or len(games) * cap >= need:
+        return None
+    k = len(games)
+    has = f"Only {k} game{' has' if k == 1 else 's have'} lines"
+    per_game = -(-need // k)
+    fix = f", or type: set pp_max_per_game {per_game}" if per_game <= 3 else "."
+    return (f"{has}, and an entry needs {need} picks with at most {cap} from one game. Wait for more games to "
+            f"load{fix}")
 
 
 def pick_key(ln: PPLine) -> PickKey:
@@ -390,8 +414,13 @@ def add_problem(chosen: list[PPLine], ln: PPLine, view: PPView, names: d.Names =
     if same >= cap:
         g = view.games.get(ln.game_id)
         where = _matchup(g, names) if g is not None else "that game"
-        return (f"Your entry already has {same} pick{'s' * (same != 1)} from {where}; we allow at most {cap} "
-                "from one game.")
+        why = (f"Your entry already has {same} pick{'s' * (same != 1)} from {where}; we allow at most {cap} "
+               "from one game.")
+        if one_game_text(view):
+            k = len({x.game_id for x in pickable(view).values()})
+            why += (f" Only {k} game{' has' if k == 1 else 's have'} lines right now, so wait for more games "
+                    "to load.")
+        return why
     return None
 
 
@@ -440,8 +469,9 @@ def evaluate_entry(picks: list[PPLine], view: PPView, names: d.Names = d.DEFAULT
     n = len(picks)
     old = [ln.fetched_at for ln in picks if not ln.fresh]
     out.old_since = min(old) if old else None
-    if n < MIN_PICKS:
-        out.problems.append(f"Pick at least {MIN_PICKS} lines; a PrizePicks entry needs {MIN_PICKS} to "
+    least = min_picks(s)
+    if n < least:
+        out.problems.append(f"Pick at least {least} lines; the entry types we use need {least} to "
                             f"{MAX_PICKS} picks.")
     if n > MAX_PICKS:
         out.problems.append(f"A PrizePicks entry holds at most {MAX_PICKS} picks; remove {n - MAX_PICKS}.")
@@ -473,7 +503,7 @@ def evaluate_entry(picks: list[PPLine], view: PPView, names: d.Names = d.DEFAULT
                 for ln in picks]  # type: ignore[arg-type]
     out.linked = len({ln.game_id for ln in picks}) < n
     cands = [st for st in allowed_structures(s) if st[0] == n and st in table and table[st].get(n, 0) > 1]
-    if n >= MIN_PICKS and not cands:
+    if n >= least and not cands:
         sizes = sorted({st[0] for st in allowed_structures(s)})
         out.problems.append(f"None of the entry types we use has {n} picks (we use entries of "
                             f"{', '.join(map(str, sizes))} picks).")
@@ -563,9 +593,10 @@ def entry_lines(ev: EntryEval, view: PPView, names: d.Names = d.DEFAULT_NAMES, w
                 "Your 1 pick is kept, but its line isn't loaded right now; the entry is worked out again when "
                 "it comes back.")
         return [kept, "x clears it. We never place bets for you."]
+    one = one_game_text(view)
     if not ev.picks:
-        return [f"No picks yet. Highlight a line below and press Enter to add it ({MIN_PICKS} to {MAX_PICKS} "
-                "picks, at least 2 teams)."]
+        return [f"No picks yet. Highlight a line below and press Enter to add it ({min_picks(view.settings)} to "
+                f"{MAX_PICKS} picks, at least 2 teams).", *([one] if one else [])]
     s = view.settings
     out = []
     for i, ln in enumerate(ev.picks, 1):
@@ -598,6 +629,8 @@ def entry_lines(ev: EntryEval, view: PPView, names: d.Names = d.DEFAULT_NAMES, w
     note = _list_type_note(ev, s)
     if note:
         out.append(note)
+    if one and not ev.ready:
+        out.append(one)
     tail = "Press c after you place it on PrizePicks to record it" if ev.ready else "Fix the above to record it"
     out.append(f"{tail}; x clears it. We never place bets for you.")
     return out
@@ -619,12 +652,15 @@ def _list_type_note(ev: EntryEval, s: Settings) -> str | None:
 
 # -- what tab 5 writes to the log ---------------------------------------------------------------
 CANT_PICK = "That line can't be picked right now."
-EMPTY_ENTRY = "Your PrizePicks entry is empty: pick 2 to 6 lines with Enter first."
 WAIT_FOR_LINES = "Your picks' lines aren't loaded right now; wait for them to come back before recording."
 CLEARED = "Cleared your PrizePicks entry."
 ALREADY_EMPTY = "Your PrizePicks entry is already empty."
 NOT_RECORDED = "PrizePicks entry not recorded."
 ONLY_PP_OPENS = "Only PrizePicks entries can be opened on the PrizePicks tab."
+
+
+def empty_entry_text(s: Settings) -> str:
+    return f"Your PrizePicks entry is empty: pick {min_picks(s)} to {MAX_PICKS} lines with Enter first."
 
 
 def added_text(ln: PPLine, n: int) -> str:

@@ -168,13 +168,16 @@ def test_evaluate_entry_matches_the_builder_on_the_same_picks():
 def test_entry_rules_give_plain_messages_not_errors():
     v = sized([])
     one = ppv.evaluate_entry(entry(THREE[0]), v)
-    assert not one.ready and one.problems == ["Pick at least 2 lines; a PrizePicks entry needs 2 to 6 picks."]
+    assert not one.ready and one.problems == ["Pick at least 3 lines; the entry types we use need 3 to 6 picks."]
     same_team = ppv.evaluate_entry(entry(("A", 0.62, NE_CHI, "CHI", "pass_yds"),
                                          ("B", 0.62, DAL_PHI, "CHI", "rush_yds")), v)
     assert "All your picks are on one team (Bears); PrizePicks needs picks from at least 2 different teams." \
         in same_team.problems
     two = ppv.evaluate_entry(entry(THREE[0], THREE[2]), v)  # only 3- to 6-pick entries are allowed
-    assert two.problems == ["None of the entry types we use has 2 picks (we use entries of 3, 4, 5, 6 picks)."]
+    assert two.problems == ["Pick at least 3 lines; the entry types we use need 3 to 6 picks."]
+    gap = replace(v, settings=replace(Settings(), pp_structures=("3-power", "5-flex")))
+    four = ppv.evaluate_entry(entry(*THREE, ("Saquon Barkley", 0.62, DAL_PHI, "PHI", "rush_yds")), gap)
+    assert four.problems == ["None of the entry types we use has 4 picks (we use entries of 3, 5 picks)."]
     crowded = ppv.evaluate_entry(entry(("A", 0.62, NE_CHI, "CHI", "pass_yds"), ("B", 0.62, NE_CHI, "NE", "pass_tds"),
                                        ("C", 0.62, NE_CHI, "CHI", "rush_yds")), v)
     assert "3 picks from Patriots at Bears; we allow at most 2 from one game." in crowded.problems
@@ -358,3 +361,42 @@ def test_nothing_to_pick_says_why_and_what_to_do():
     assert "pp add" in ppv.nothing_to_pick_text(view([]))
     unpriced = ppv.nothing_to_pick_text(view([line("C", None)], refresh_games=1))
     assert unpriced.startswith("No line can be picked yet: none of the loaded lines has a sportsbook price")
+
+
+def test_pick_counts_follow_the_entry_types_in_use():
+    s = Settings()
+    assert ppv.min_picks(s) == 3
+    assert ppv.min_picks(replace(s, pp_structures=("2-power", "3-power"))) == 2
+    assert "(3 to 6 picks, at least 2 teams)" in ppv.entry_lines(ppv.evaluate_entry([], view([])), view([]))[0]
+    assert ppv.empty_entry_text(s) == "Your PrizePicks entry is empty: pick 3 to 6 lines with Enter first."
+    two = replace(view([]), settings=replace(s, pp_structures=("2-power",)))
+    assert "(2 to 6 picks" in ppv.entry_lines(ppv.evaluate_entry([], two), two)[0]
+
+
+def test_one_game_loaded_says_why_no_entry_can_be_built():
+    lines = [line("Caleb Williams", 0.62), line("Drake Maye", 0.63, team="NE", stat="pass_tds"),
+             line("Rhamondre Stevenson", 0.6, team="NE", stat="rush_yds")]
+    v = view(lines)
+    note = ("Only 1 game has lines, and an entry needs 3 picks with at most 2 from one game. Wait for more "
+            "games to load, or type: set pp_max_per_game 3")
+    assert ppv.one_game_text(v) == note
+    summary, _, _ = ppv.board_sections(v, NOW)
+    assert note in summary
+    assert note in ppv.entry_lines(ppv.evaluate_entry([], v), v)
+    chosen = [lines[0], lines[1]]
+    assert note in ppv.entry_lines(ppv.evaluate_entry(chosen, v), v)
+    refused = ppv.add_problem(chosen, lines[2], v)
+    assert refused == ("Your entry already has 2 picks from Patriots at Bears; we allow at most 2 from one game. "
+                       "Only 1 game has lines right now, so wait for more games to load.")
+    assert ppv.one_game_text(view(lines + [line("Jalen Hurts", 0.6, game=DAL_PHI, team="PHI")])) is None
+    assert ppv.one_game_text(replace(v, settings=replace(Settings(), pp_max_per_game=3))) is None
+    assert ppv.one_game_text(view([])) is None
+
+
+def test_old_lines_summary_says_why_once():
+    old = NOW - timedelta(hours=7)
+    stale = [replace(line("A", 0.6), fetched_at=old, fresh=False),
+             replace(line("B", 0.6, game=DAL_PHI, team="PHI"), fetched_at=old, fresh=False)]
+    summary, _, _ = ppv.board_sections(view(stale, ("stale", {"seconds": 10800}), refresh_games=2), NOW)
+    assert not any(s.startswith("No entry yet") for s in summary), summary
+    assert summary[-1].startswith("These lines are 7 hours old, past the 3 hours we trust for texted entries")

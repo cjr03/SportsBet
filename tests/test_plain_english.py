@@ -417,7 +417,7 @@ def test_prizepicks_tab_log_messages_are_plain():
     ln = PPLine(GID, "Jalen Hurts", "PHI", "rush_yds", 34.5, "over", 0.55, True, NOW, True)
     view = ppv.PPView([ln], {GID: GAME}, None, 0, Settings(), {"nfl": True})
     msgs = [ppv.added_text(ln, 1), ppv.added_text(ln, 3), ppv.removed_text(ppv.pick_words(ln)),
-            ppv.same_picks_text(12), ppv.opened_text(12), ppv.CANT_PICK, ppv.EMPTY_ENTRY, ppv.CLEARED,
+            ppv.same_picks_text(12), ppv.opened_text(12), ppv.CANT_PICK, ppv.empty_entry_text(Settings()), ppv.CLEARED,
             ppv.ALREADY_EMPTY, ppv.NOT_RECORDED, ppv.ONLY_PP_OPENS, ppv.WAIT_FOR_LINES,
             ppv.dropped_text(ppv.pick_key(ln))]
     crowded = [PPLine(GID, f"P{i}", "PHI", "rush_yds", 34.5, "over", 0.6, True, NOW, True) for i in range(2)]
