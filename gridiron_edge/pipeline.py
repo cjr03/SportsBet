@@ -48,9 +48,9 @@ from gridiron_edge.strategy.prizepicks import (
     Pick,
     allowed_structures,
     build_best_entry,
-    hit_distribution,
-    kelly_entry,
     payout_table,
+    robust_kelly,
+    worst_distribution,
 )
 from gridiron_edge.types import Game, KalshiMarket, Leg, PropQuote, Quote, Recommendation
 
@@ -683,9 +683,8 @@ def _pp_picks(snap: Snapshot, s: Settings, projector: Projector) -> list[Pick]:
 
 
 def _pp_rec(legs: list[Pick], st: tuple, ev: float, stake: int, observe: bool, table: dict,
-            snap: Snapshot) -> Recommendation:
-    ps = [pk.p for pk in legs]
-    dist = hit_distribution(ps)
+            snap: Snapshot, rho: float = 0.0) -> Recommendation:
+    dist = worst_distribution(legs, st, table, rho)  # same-game picks: the correlation we fear most
     p_win = sum(dist[k] for k, mult in table[st].items() if mult > 1)
     out_legs = [Leg("prizepicks", f"{pk.player} {pk.side} {pk.line} {pk.stat}", pk.side, 0.0, pk.p,
                     pk.game_id, player=pk.player, stat=pk.stat, line=pk.line, team=pk.team,
@@ -699,7 +698,8 @@ def _pp_rec(legs: list[Pick], st: tuple, ev: float, stake: int, observe: bool, t
 
 def pp_entry_candidates(snap: Snapshot, s: Settings, projector: Projector,
                         budget: Budget | None = None) -> list[Recommendation]:
-    """PrizePicks entries with no shared game or player, best Kelly growth first, until nothing
+    """PrizePicks entries with no game or player shared between entries (an entry itself may hold
+    up to pp_max_per_game picks from one game), best Kelly growth first, until nothing
     qualifies, pp_max_entries is reached or the caps run out. Stakes come from the available
     bankroll, shrunk per pick source and while the payout table is unverified.
 
@@ -724,7 +724,7 @@ def pp_entry_candidates(snap: Snapshot, s: Settings, projector: Projector,
                       for g in games)
         stake = 0
         if not observe:
-            f, _ = kelly_entry([pk.p for pk in legs], st, table)
+            f, _ = robust_kelly(legs, st, table, s.copula_rho)
             mult = s.kelly_fraction * min(s.shrink_prop_anchored if pk.anchored else s.shrink_prop_model
                                           for pk in legs)
             if not s.pp_payouts_verified:
@@ -736,7 +736,7 @@ def pp_entry_candidates(snap: Snapshot, s: Settings, projector: Projector,
                 break
             daily_left -= stake
             budget.charge(stake, {pk.game_id for pk in legs})
-        out.append(_pp_rec(legs, st, ev, stake, observe, table, snap))
+        out.append(_pp_rec(legs, st, ev, stake, observe, table, snap, s.copula_rho))
         used_games = {pk.game_id for pk in legs}
         used_players = {normalize_name(pk.player) for pk in legs}
         pool = [pk for pk in pool if pk.game_id not in used_games and normalize_name(pk.player) not in used_players]
@@ -744,7 +744,7 @@ def pp_entry_candidates(snap: Snapshot, s: Settings, projector: Projector,
         found = build_best_entry(picks, s, allowed, payouts=table, brute=s.pp_brute_force)
         if found is not None:  # projector legs, unproven: log it, stake nothing
             legs, st, ev, _ = found
-            out.append(_pp_rec(legs, st, ev, 0, True, table, snap))
+            out.append(_pp_rec(legs, st, ev, 0, True, table, snap, s.copula_rho))
     return out
 
 

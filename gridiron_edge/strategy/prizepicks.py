@@ -1,10 +1,13 @@
 """PrizePicks math: payout tables, EV, Kelly, entry builder, and the DNP/tie revert ladder."""
 import itertools
 import math
+from collections import Counter
 from dataclasses import dataclass
 from typing import Literal
 
+import numpy as np
 from scipy.optimize import brentq, minimize_scalar
+from scipy.stats import norm
 
 from gridiron_edge.config import Settings, parse_pp_payouts, parse_pp_structure
 
@@ -85,53 +88,206 @@ def breakeven(structure: Structure, payouts=PAYOUTS) -> float:
 
 def kelly_entry(ps: list[float], structure: Structure, payouts=PAYOUTS) -> tuple[float, float]:
     """(f*, G*): bankroll fraction maximizing expected log growth, and that growth."""
-    dist = hit_distribution(ps)
-    table = payouts[structure]
+    return _kelly([hit_distribution(ps)], payouts[structure])
 
-    def neg_growth(f: float) -> float:
+
+def _kelly(dists: list[list[float]], table: dict[int, float]) -> tuple[float, float]:
+    """Fraction maximizing the worst expected log growth over several hit distributions."""
+
+    def growth(f: float, dist: list[float]) -> float:
         # Hit counts outside the table pay 0, losing the whole stake (log(1 - f)).
-        g = sum(q * math.log(1.0 + f * (table.get(k, 0.0) - 1.0)) for k, q in enumerate(dist) if q > 0)
-        return -g
+        return sum(q * math.log(1.0 + f * (table.get(k, 0.0) - 1.0)) for k, q in enumerate(dist) if q > 0)
 
-    res = minimize_scalar(neg_growth, bounds=(0.0, _MAX_FRACTION), method="bounded")
+    res = minimize_scalar(lambda f: -min(growth(f, d) for d in dists), bounds=(0.0, _MAX_FRACTION),
+                          method="bounded")
     f, g = float(res.x), float(-res.fun)
     if g <= 0:
         return 0.0, 0.0
     return f, g
 
 
-def _valid(legs) -> bool:
-    return len({p.game_id for p in legs}) == len(legs) and len({p.team for p in legs}) >= 2
+# -- same-game correlation: Gaussian copula, scored at the worst of rho in {-|r|, 0, +|r|} --------
+_GL_X, _GL_W = np.polynomial.legendre.leggauss(24)  # fixed nodes: exact and deterministic
+_RHO_CLIP = 0.95
 
 
-def _greedy(qual: list[Pick], n: int) -> list[list[Pick]]:
-    """Candidate entries that contain the optimum for n legs.
+def corr_sign(a: Pick, b: Pick) -> int:
+    """Sign of the correlation between two picks' hits: +1 same team leaning the same way (a QB
+    and his own receiver included), -1 opposite directions in one game, 0 otherwise."""
+    if a.game_id != b.game_id:
+        return 0
+    if a.side != b.side:
+        return -1
+    return 1 if a.team == b.team else 0
 
-    Payouts never fall with more hits, so growth rises with every pick's p: the top n per-game
-    bests dominate any valid entry. If they are one team, the optimum is some pick x plus the
-    top n-1 per-game bests from other games; try every x.
-    """
-    per_game: dict[str, Pick] = {}
+
+def _phi2(x: float, y: float, r: float) -> float:
+    q = 1.0 - r * r
+    return math.exp(-(x * x - 2 * r * x * y + y * y) / (2 * q)) / (2 * math.pi * math.sqrt(q))
+
+
+def mvn_cdf(a: list[float], r: list[list[float]]) -> float:
+    """P(Z_i < a_i for all i), Z standard normal with correlation r, for 1-3 dimensions.
+
+    Plackett's identity integrated along r(t) = t*r with Gauss-Legendre nodes: dP/dr_ij is the
+    pair's density times the third variable's conditional CDF."""
+    n = len(a)
+    base = math.prod(norm.cdf(x) for x in a)
+    if n == 1:
+        return base
+    if n > 3:
+        raise ValueError("at most 3 correlated picks per game")
+    total = 0.0
+    for x, w in zip(_GL_X, _GL_W):
+        t = 0.5 * (x + 1.0)
+        d = 0.0
+        for i, j in itertools.combinations(range(n), 2):
+            rij = r[i][j]
+            if rij == 0.0:
+                continue
+            term = rij * _phi2(a[i], a[j], t * rij)
+            if n == 3:
+                k = 3 - i - j
+                ri, rj, r_ij = t * r[k][i], t * r[k][j], t * rij
+                det = 1.0 - r_ij * r_ij
+                bi, bj = (ri - r_ij * rj) / det, (rj - r_ij * ri) / det  # s @ inverse(pair block)
+                var = max(1.0 - (bi * ri + bj * rj), 1e-12)
+                term *= norm.cdf((a[k] - (bi * a[i] + bj * a[j])) / math.sqrt(var))
+            d += term
+        total += 0.5 * w * d
+    return base + total
+
+
+def _corr_matrix(block: list[Pick], rho: float) -> list[list[float]]:
+    r = [[1.0 if i == j else rho * corr_sign(a, b) for j, b in enumerate(block)] for i, a in enumerate(block)]
+    while np.linalg.eigvalsh(np.array(r)).min() < 1e-6:  # mixed signs at large rho: shrink to valid
+        r = [[v if i == j else 0.9 * v for j, v in enumerate(row)] for i, row in enumerate(r)]
+    return r
+
+
+def _block_distribution(block: list[Pick], rho: float) -> list[float]:
+    """Hit-count distribution of one game's picks, by inclusion-exclusion over joint hit CDFs."""
+    m = len(block)
+    a = [norm.ppf(min(max(pk.p, 1e-9), 1 - 1e-9)) for pk in block]
+    r = _corr_matrix(block, rho)
+    all_hit = {(): 1.0}
+    for size in range(1, m + 1):
+        for sub in itertools.combinations(range(m), size):
+            all_hit[sub] = mvn_cdf([a[i] for i in sub], [[r[i][j] for j in sub] for i in sub])
+    dist = [0.0] * (m + 1)
+    for size in range(m + 1):
+        for hit in itertools.combinations(range(m), size):
+            rest = [i for i in range(m) if i not in hit]
+            q = sum((-1) ** extra * all_hit[tuple(sorted(hit + more))]
+                    for extra in range(len(rest) + 1) for more in itertools.combinations(rest, extra))
+            dist[size] += max(q, 0.0)
+    tot = sum(dist)
+    return [q / tot for q in dist]
+
+
+def correlated_hit_distribution(legs: list[Pick], rho: float) -> list[float]:
+    """Hit-count distribution with same-game pairs correlated at rho * corr_sign; games independent."""
+    rho = max(-_RHO_CLIP, min(_RHO_CLIP, rho))
+    by_game: dict[str, list[Pick]] = {}
+    for pk in legs:
+        by_game.setdefault(pk.game_id, []).append(pk)
+    dist = [1.0]
+    for block in by_game.values():
+        if len(block) == 1 or rho == 0.0 or not any(
+                corr_sign(x, y) for x, y in itertools.combinations(block, 2)):
+            part = hit_distribution([pk.p for pk in block])
+        else:
+            part = _block_distribution(block, rho)
+        nxt = [0.0] * (len(dist) + len(part) - 1)
+        for i, q in enumerate(dist):
+            for j, w in enumerate(part):
+                nxt[i + j] += q * w
+        dist = nxt
+    return dist
+
+
+def robust_distributions(legs: list[Pick], rho: float) -> list[list[float]]:
+    """The hit distributions at rho in {-|r|, 0, +|r|}: we don't know the sign or size well."""
+    r = abs(rho)
+    if r == 0.0 or not any(corr_sign(x, y) for x, y in itertools.combinations(legs, 2)):
+        return [hit_distribution([pk.p for pk in legs])]
+    return [correlated_hit_distribution(legs, x) for x in (-r, 0.0, r)]
+
+
+def _ev(dist: list[float], table: dict[int, float]) -> float:
+    return sum(dist[k] * m for k, m in table.items() if k < len(dist)) - 1.0
+
+
+def worst_distribution(legs: list[Pick], structure: Structure, payouts=PAYOUTS, rho: float = 0.0) -> list[float]:
+    """The hit distribution (over the robust rho set) with the lowest EV."""
+    return min(robust_distributions(legs, rho), key=lambda d: _ev(d, payouts[structure]))
+
+
+def robust_ev(legs: list[Pick], structure: Structure, payouts=PAYOUTS, rho: float = 0.0) -> float:
+    return _ev(worst_distribution(legs, structure, payouts, rho), payouts[structure])
+
+
+def robust_kelly(legs: list[Pick], structure: Structure, payouts=PAYOUTS, rho: float = 0.0
+                 ) -> tuple[float, float]:
+    """(f, G): the fraction maximizing the worst-case growth over the robust rho set, and that growth."""
+    return _kelly(robust_distributions(legs, rho), payouts[structure])
+
+
+def _valid(legs, max_per_game: int = 1) -> bool:
+    """One pick per player, at most max_per_game from one game, and at least two teams."""
+    games = Counter(p.game_id for p in legs)
+    return (len({p.player for p in legs}) == len(legs) and max(games.values()) <= max_per_game
+            and len({p.team for p in legs}) >= 2)
+
+
+def _top(qual: list[Pick], n: int, cap: int, taken: tuple[Pick, ...] = ()) -> list[Pick] | None:
+    """Best n picks (qual is sorted by p, descending) with at most cap per game, after `taken`."""
+    counts = Counter(pk.game_id for pk in taken)
+    out: list[Pick] = []
     for pk in qual:
-        if pk.game_id not in per_game or pk.p > per_game[pk.game_id].p:
-            per_game[pk.game_id] = pk
-    ranked = sorted(per_game.values(), key=lambda pk: pk.p, reverse=True)
-    top = ranked[:n]
-    if len(top) == n and _valid(top):
-        return [top]
-    out = []
-    for x in qual:
-        rest = [pk for pk in ranked if pk.game_id != x.game_id][:n - 1]
-        if len(rest) == n - 1 and _valid([x, *rest]):
-            out.append([x, *rest])
+        if pk in taken or counts[pk.game_id] >= cap:
+            continue
+        out.append(pk)
+        counts[pk.game_id] += 1
+        if len(out) == n:
+            return out
+    return None
+
+
+def _greedy(qual: list[Pick], n: int, max_per_game: int = 1) -> list[list[Pick]]:
+    """Candidate entries that contain the optimum for n legs under independent picks.
+
+    At most cap picks per game is a partition matroid, so greedy by p gives the set whose sorted
+    p's dominate every valid set; growth rises with every pick's p, so it is optimal. If it is one
+    team, the optimum is some other-team pick x plus the greedy n-1 after x; try every x. Smaller
+    caps are tried too: their spread-out entries may win once same-game correlation is priced in.
+    """
+    out: list[list[Pick]] = []
+    for cap in range(1, max_per_game + 1):
+        top = _top(qual, n, cap)
+        if top is None:
+            continue
+        if _valid(top, cap):
+            out.append(top)
+            continue
+        team = top[0].team
+        for x in qual:
+            if x.team == team:
+                continue
+            rest = _top(qual, n - 1, cap, (x,))
+            if rest is not None and _valid([x, *rest], cap):
+                out.append([x, *rest])
     return out
 
 
 def build_best_entry(picks: list[Pick], s: Settings, allowed=ALLOWED, max_brute: int = 25,
                      payouts: Payouts = PAYOUTS, brute: bool = False
                      ) -> tuple[list[Pick], Structure, float, float] | None:
-    """Best entry by full-Kelly growth: (legs, structure, EV, growth). Greedy per structure
-    (exact under independent picks); brute=True enumerates combinations instead."""
+    """Best entry by full-Kelly growth: (legs, structure, EV, growth). Up to s.pp_max_per_game
+    picks per game; EV and growth are the worst case over the same-game correlation (copula_rho
+    with either sign, or none). Greedy per structure (exact under independent picks); brute=True
+    enumerates combinations instead."""
+    cap = s.pp_max_per_game
     best_per_player: dict[str, Pick] = {}
     for pk in picks:
         cur = best_per_player.get(pk.player)
@@ -149,25 +305,18 @@ def build_best_entry(picks: list[Pick], s: Settings, allowed=ALLOWED, max_brute:
         if len(qual) < n:
             continue
         if not brute:
-            candidates = _greedy(qual, n)
+            candidates = _greedy(qual, n, cap)
         elif math.comb(len(qual), n) > _COMBO_LIMIT:
-            chosen: list[Pick] = []
-            games: set[str] = set()
-            for pk in qual:  # already sorted by p descending
-                if pk.game_id not in games:
-                    chosen.append(pk)
-                    games.add(pk.game_id)
-                if len(chosen) == n:
-                    break
-            candidates = [chosen] if len(chosen) == n and _valid(chosen) else []
+            chosen = _top(qual, n, cap)
+            candidates = [chosen] if chosen is not None and _valid(chosen, cap) else []
         else:
-            candidates = (list(c) for c in itertools.combinations(qual, n) if _valid(c))
+            candidates = (list(c) for c in itertools.combinations(qual, n) if _valid(c, cap))
         for legs in candidates:
-            ps = [pk.p for pk in legs]
-            ev = entry_ev(ps, st, payouts)
+            dists = robust_distributions(legs, s.copula_rho)
+            ev = min(_ev(d, payouts[st]) for d in dists)
             if ev <= 0:
                 continue
-            _, g = kelly_entry(ps, st, payouts)
+            _, g = _kelly(dists, payouts[st])
             if best is None or g > best[3]:
                 best = (legs, st, ev, g)
     return best
