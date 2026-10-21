@@ -119,3 +119,29 @@ def test_middles_cost_just_over_a_dollar(mk):
     mids = kalshi_middles(ladder, 0.10)
     assert len(mids) == 1 and mids[0].kind == "ladder_middle" and mids[0].cost > mids[0].qty
     assert kalshi_middles(ladder, 0.0) == []
+
+
+# -- plain-English contract text (texts and dashboard) ---------------------------------------
+
+def test_contract_text_describes_the_yes_outcome():
+    from gridiron_edge.strategy.arb import contract_text
+    assert contract_text("spread", "PHI", 3.5, "DAL", "PHI") == "Eagles win by 4 or more points"
+    assert contract_text("spread", "PHI", 3.0, "DAL", "PHI") == "Eagles win by 4 or more points"
+    assert contract_text("ml", "BUF", None, "MIA", "BUF") == "Bills win"
+    assert contract_text("total", None, 44.5, "DAL", "PHI") == "Cowboys vs Eagles total over 44.5 points"
+    assert contract_text("total", None, 44.0, "DAL", "PHI") == "Cowboys vs Eagles total 45 or more points"
+    assert contract_text("spread", "Alabama", 6.5, "Auburn", "Alabama") == "Alabama win by 7 or more points"
+
+
+def test_middle_window_text():
+    from gridiron_edge.strategy.arb import middle_window
+    from gridiron_edge.types import Leg
+    lo = Leg("kalshi", "x", "yes", 0.5, 0.5, "g", ticker="A", line=2.5, team="PHI")
+    hi = Leg("kalshi", "x", "no", 0.5, 0.5, "g", ticker="B", line=6.5, team="PHI")
+    assert middle_window([lo, hi]) == "the Eagles win by 3 to 6 points"
+    tl = Leg("kalshi", "x", "yes", 0.5, 0.5, "g", ticker="C", line=41.5)
+    th = Leg("kalshi", "x", "no", 0.5, 0.5, "g", ticker="D", line=44.5)
+    assert middle_window([th, tl]) == "the total lands between 42 and 44 points"
+    a = Leg("kalshi", "x", "no", 0.5, 0.5, "g", ticker="E", line=3.5, team="PHI")
+    b = Leg("kalshi", "x", "no", 0.5, 0.5, "g", ticker="F", line=6.5, team="DAL")
+    assert middle_window([a, b]) == "the final margin is between the Cowboys by 6 and the Eagles by 3 (a tie counts)"

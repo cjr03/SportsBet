@@ -270,3 +270,14 @@ def test_live_middles_are_sized(mk, settings):
     snap = _middle_snap(mk, EmpiricalMarginModel(resid, NFL_SPREAD_SIGMA))
     (r,) = middle_candidates(snap, replace(settings, middles_live=True), Budget.from_snap(snap, settings))
     assert not r.observe_only and 0 < r.stake_cents <= settings.cap_bet * BANKROLL and r.qty >= 1
+
+
+def test_arb_and_middle_legs_read_as_outcomes(mk, settings):
+    (r,) = arb_candidates(snap_with(kalshi=_pair(mk)), settings, NFL)
+    assert {leg.description for leg in r.legs} == {"H1 win", "A1 win"}
+    resid = np.concatenate([np.full(300, 0), np.full(80, 4), np.full(80, -4), np.arange(-20, 21).repeat(4)])
+    (m,) = middle_candidates(_middle_snap(mk, EmpiricalMarginModel(resid, NFL_SPREAD_SIGMA)), settings)
+    assert [leg.description for leg in m.legs] == ["H1 win by 3 or more points", "H1 win by 4 or more points"]
+    first, second = m.legs
+    assert first.worst_price == first.price and second.worst_price is not None
+    assert second.worst_price >= second.price

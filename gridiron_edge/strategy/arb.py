@@ -1,11 +1,15 @@
 """Arbitrage detection: Kalshi ML pairs, spread/total ladders, cross-team spreads, cross-venue;
 plus ladder middles (pairs costing a little over $1 that pay $2 when the score lands between)."""
 
+import json
+import math
 import re
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
+from functools import cache
+from pathlib import Path
 from typing import Literal
 
 from gridiron_edge.strategy.kalshi_pricing import effective_price
@@ -29,6 +33,45 @@ class Arb:
     roi: float
     tie_risk: bool
     fetched_at: datetime | None = None  # oldest quote among the legs
+
+
+@cache
+def _nfl_names() -> dict[str, str]:
+    teams = json.loads((Path(__file__).parent.parent / "data" / "nfl_teams.json").read_text())
+    return {abbr: info["names"][1] if len(info["names"]) > 1 else info["names"][0] for abbr, info in teams.items()}
+
+
+def team_label(team: str | None) -> str:
+    """NFL abbreviation -> nickname ("PHI" -> "Eagles"); anything else (CFB school names) as is."""
+    return _nfl_names().get(team or "", team or "")
+
+
+def contract_text(market_type: str, team: str | None, line: float | None, away: str, home: str) -> str:
+    """Plain-English outcome a Kalshi contract's "Yes" pays on ("Eagles win by 4 or more points")."""
+    t = team_label(team)
+    if market_type == "ml" or line is None:
+        return f"{t} win"
+    if market_type == "total" or team is None:
+        over = f"over {line:g} points" if line % 1 else f"{math.floor(line) + 1} or more points"
+        return f"{team_label(away)} vs {team_label(home)} total {over}"
+    k = math.floor(line) + 1  # "wins by more than line" = wins by k or more
+    if k >= 1:
+        return f"{t} win by {k} or more points"
+    return f"{t} win or tie" if k == 0 else f"{t} win, tie, or lose by {-k} or fewer points"
+
+
+def middle_window(legs: list[Leg]) -> str:
+    """Where both legs of a middle pay, in plain English ("the Eagles win by 3 to 6 points")."""
+    yes = [leg for leg in legs if leg.side == "yes"]
+    if yes and legs[0].line is not None and legs[1].line is not None:  # ladder: YES low + NO high
+        lo, hi = yes[0], next(leg for leg in legs if leg is not yes[0])
+        a, b = math.floor(lo.line) + 1, math.floor(hi.line)
+        if lo.team is None:
+            return f"the total lands on exactly {a} points" if a == b else f"the total lands between {a} and {b} points"
+        return f"the {team_label(lo.team)} win by {a}" + (" points" if a == b else f" to {b} points")
+    x, y = legs  # cross: NO on each team's spread; margin between -floor(y) and floor(x)
+    return (f"the final margin is between the {team_label(y.team)} by {math.floor(y.line or 0)} "
+            f"and the {team_label(x.team)} by {math.floor(x.line or 0)} (a tie counts)")
 
 
 def has_tie_split(rules: str) -> bool:

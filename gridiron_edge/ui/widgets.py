@@ -231,7 +231,8 @@ class OpportunityBoard(TabbedContent):
             for r in (x for x in self._recs if x.kind == kind):
                 cells = [
                     str(r.id),
-                    " + ".join(leg.description for leg in r.legs),
+                    " + ".join(f"{leg.side.title()}: {leg.description}" if r.kind in ("arb", "middle")
+                               else leg.description for leg in r.legs),
                     "/".join(f"{leg.price:.2f}" for leg in r.legs),
                     "/".join(f"{leg.p_fair:.2f}" for leg in r.legs),
                     f"{r.ev * 100:+.1f}%",

@@ -213,3 +213,15 @@ async def test_quota_low_class_and_header():
         assert h.target_cents == 123456
         await pilot.pause(0.9)
         assert "$1,234.56" in h.text and "-$5.00 today" in h.text
+
+
+async def test_middle_and_arb_rows_say_which_side_in_plain_english():
+    app = Harness(OpportunityBoard())
+    async with app.run_test() as pilot:
+        board = app.query_one(OpportunityBoard)
+        legs = [Leg("kalshi", "Eagles win by 3 or more points", "yes", 0.52, 0.6, "g", ticker="KXNFLSPREAD-A"),
+                Leg("kalshi", "Eagles win by 7 or more points", "no", 0.50, 0.6, "g", ticker="KXNFLSPREAD-B")]
+        board.set_recs([Recommendation(9, "middle", legs, 0, 20, 0.03, 0.18, None, T0, T0 + timedelta(hours=1))])
+        await pilot.pause()
+        what = str(board.query_one("#tab-middle", DataTable).get_row_at(0)[1])
+        assert what == "Yes: Eagles win by 3 or more points + No: Eagles win by 7 or more points"

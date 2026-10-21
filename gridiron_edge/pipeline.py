@@ -12,6 +12,7 @@ from gridiron_edge.models import Prediction
 from gridiron_edge.models.blend import blend, default_weight
 from gridiron_edge.strategy.arb import (
     Arb,
+    contract_text,
     filter_arbs,
     kalshi_cross_spreads,
     kalshi_ladders,
@@ -460,6 +461,26 @@ def pp_entry_candidates(snap: Snapshot, s: Settings, projector: Projector,
     return out
 
 
+def _plain_legs(legs: list[Leg], snap: Snapshot, g: Game) -> list[Leg]:
+    """Describe each Kalshi leg as the outcome its "Yes" pays on, not by ticker."""
+    mtype = {m.ticker: m.market_type for m in snap.kalshi}
+    return [replace(leg, description=contract_text(mtype.get(leg.ticker or "", "spread"), leg.team, leg.line,
+                                                   g.away, g.home)) for leg in legs]
+
+
+def _middle_legging(legs: list[Leg], qty: int, p_mid: float, depth: dict[tuple[str, str], float]) -> list[Leg]:
+    """Thinnest leg first; the other's worst price keeps the expected payout at or above the cost."""
+    first, second = sorted(legs, key=lambda leg: depth.get((leg.ticker or "", leg.side), 0.0))
+    paid = qty * first.price + taker_fee(qty, first.price, first.fee_multiplier)
+    worst = second.price
+    for cents in range(99, round(second.price * 100), -1):
+        w = cents / 100
+        if paid + qty * w + taker_fee(qty, w, second.fee_multiplier) <= qty * (1.0 + p_mid) + 1e-9:
+            worst = w
+            break
+    return [replace(first, worst_price=first.price), replace(second, worst_price=worst)]
+
+
 def _legging(legs: list[Leg], qty: int, depth: dict[tuple[str, str], float]) -> list[Leg]:
     """Order legs thinnest-first (fill the scarce side before the other moves) and give the
     second leg the worst price that still pays back at least the cost."""
@@ -501,7 +522,8 @@ def arb_candidates(snap: Snapshot, s: Settings, league_of: Callable[[KalshiMarke
         roi = qty / cost - 1
         if roi <= 0 or roi < s.arb_min_roi:
             continue
-        rec = Recommendation(None, "arb", _legging(a.legs, qty, depth), round(cost * 100), qty, roi, 1.0,
+        rec = Recommendation(None, "arb", _plain_legs(_legging(a.legs, qty, depth), snap, g), round(cost * 100),
+                             qty, roi, 1.0,
                              a.kind, snap.now, g.kickoff, tie_risk=a.tie_risk)
         if rec.leg_key in snap.open_leg_keys:  # this arb is already placed
             continue
@@ -535,7 +557,7 @@ def _middle_rec(a: Arb, snap: Snapshot, s: Settings) -> Recommendation | None:
     ev = a.qty * (1.0 + p_mid) / a.cost - 1.0
     if ev < s.kalshi_min_ev:
         return None
-    legs = [replace(leg, p_fair=p) for leg, p in zip(a.legs, ps)]
+    legs = _plain_legs([replace(leg, p_fair=p) for leg, p in zip(a.legs, ps)], snap, g)
     observe = not s.middles_live or snap.gates.get((g.league, mtype), False)
     return Recommendation(None, "middle", legs, 0, a.qty, ev, p_mid, a.kind, snap.now, g.kickoff,
                           observe_only=observe)
@@ -576,12 +598,14 @@ def middle_candidates(snap: Snapshot, s: Settings, budget: Budget | None = None)
         if gid not in best or rec.ev > best[gid].ev:
             best[gid] = rec
     budget = budget or Budget.from_snap(snap, s)
+    depth = {k: v for m in snap.kalshi for k, v in (((m.ticker, "yes"), m.yes_ask_size),
+                                                    ((m.ticker, "no"), m.no_ask_size))}
     out = []
     for rec in best.values():
         if not rec.observe_only:
             rec = _size_middle(rec, snap, s, budget)
         if rec is not None:
-            out.append(rec)
+            out.append(replace(rec, legs=_middle_legging(rec.legs, rec.qty or 0, rec.p_win, depth)))
     return out
 
 
