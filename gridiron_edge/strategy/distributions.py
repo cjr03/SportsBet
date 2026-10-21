@@ -143,10 +143,28 @@ def implied_mean(model: MarginModel, x: float, p: float, width: float = 80.0) ->
         return None
 
 
-# Dispersion (sd / mean) of yardage around a sharp book line; yardage is right-skewed, so a gamma with
-# its median set by the line replaces the old Normal(sd = 0.6*mean + 5). Priors: tune by backtest.
-PROP_CV = {"reception_yds": 0.55, "rush_yds": 0.50, "pass_yds": 0.30}
+# Dispersion (sd / mean) of yardage around a sharp book line L. Yardage is right-skewed, so a gamma with
+# its median set by the line is used. The spread falls with the median: a 10-yard tight end catches
+# nothing in ~20% of games yet clears 3x his line in ~13%, while a 75-yard WR1 rarely doubles it.
+# CV(L) = a * (max(L, PROP_CV_FLOOR) / ref) ** b, capped at PROP_CV_MAX (a CV above 1 puts the gamma's
+# mode at 0, which is the zero-catch game). Fitted by models.props.fit_prop_cv on nflverse 2024-25
+# player-games (week 5 on) and checked against Kalshi's own yardage ladders; frozen here.
+PROP_CV_FIT = {"reception_yds": (0.835, 20.0, -0.41), "rush_yds": (0.67, 40.0, -0.5)}
+PROP_CV_FIXED = {"pass_yds": 0.30}
+PROP_CV_FLOOR = 3.0
+PROP_CV_MAX = 1.6
 DEFAULT_YARDS_CV = 0.50
+
+
+def prop_cv(stat: str | None, line: float) -> float:
+    """sd / mean of the stat for a player whose median (book line) is `line`."""
+    if stat in PROP_CV_FIXED:
+        return PROP_CV_FIXED[stat]
+    fit = PROP_CV_FIT.get(stat or "")
+    if fit is None:
+        return DEFAULT_YARDS_CV
+    a, ref, b = fit
+    return min(a * (max(line, PROP_CV_FLOOR) / ref) ** b, PROP_CV_MAX)
 
 
 def prop_p_over(
@@ -155,11 +173,13 @@ def prop_p_over(
     kind: Literal["yards", "count"],
     sd: float | None = None,
     stat: str | None = None,
+    anchor: float | None = None,
 ) -> float:
-    """P(value > line). Yards: gamma (sd given, else the stat's CV). Counts: Poisson, or negative
-    binomial when sd shows overdispersion; an integer line's push is not an over."""
+    """P(value > line). Yards: gamma (sd given, else the stat's CV at the anchor book line, which
+    defaults to `line`). Counts: Poisson, or negative binomial when sd shows overdispersion; an integer
+    line's push is not an over."""
     if kind == "yards":
-        sd = PROP_CV.get(stat or "", DEFAULT_YARDS_CV) * mean if sd is None else sd
+        sd = prop_cv(stat, line if anchor is None else anchor) * mean if sd is None else sd
         k = (mean / sd) ** 2
         return float(gamma.sf(line, k, scale=mean / k))
     x = math.floor(line)

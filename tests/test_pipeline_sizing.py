@@ -98,7 +98,7 @@ def test_direction_keys(settings):
 
 def test_same_direction_legs_share_one_cap(mk, settings):
     ml = mk("E1-H1", "E1", "ml", "H1", yes_ask=0.40, game_id="g1")
-    prop = replace(mk("P1", "EP", "prop", line=49.5, yes_ask=0.40, no_ask=0.65, game_id="g1"),
+    prop = replace(mk("P1", "EP", "prop", line=52.5, yes_ask=0.52, game_id="g1"),
                    player="Player 1", stat="rush_yds")
     props = [PropQuote("odds_api", "draftkings", "g1", "Player 1", "rush_yds", "over", 52.5, 1.60, NOW),
              PropQuote("odds_api", "draftkings", "g1", "Player 1", "rush_yds", "under", 52.5, 2.40, NOW)]
@@ -145,7 +145,7 @@ def test_fee_odds_reoptimised_at_final_qty(mk, settings, monkeypatch):
 
 
 def test_kalshi_prop_leg_carries_player_team_and_fee_multiplier(mk, settings):
-    m = replace(mk("P1", "EP", "prop", line=49.5, yes_ask=0.45, no_ask=0.60, game_id="g1"),
+    m = replace(mk("P1", "EP", "prop", line=49.5, yes_ask=0.52, game_id="g1"),
                 player="Player 1", stat="rush_yds", fee_multiplier=0.5)
     props = [PropQuote("odds_api", "draftkings", "g1", "Player 1", "rush_yds", "over", 52.5, 1.70, NOW),
              PropQuote("odds_api", "draftkings", "g1", "Player 1", "rush_yds", "under", 52.5, 2.25, NOW)]

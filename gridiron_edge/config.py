@@ -92,8 +92,11 @@ class Settings:
     stale_seconds: int = 2100
     # props are pulled once near kickoff, so their anchors age from fetch time over a longer window
     props_stale_seconds: int = 10800
-    # furthest a prop is repriced from the book's point (yards / pass yards / counts)
+    # furthest a prop is repriced from the book's point L (yards / pass yards / counts); rushing and
+    # receiving yards also stay within max(props_min_shift_yds, props_max_shift_frac * L) of it
     props_max_shift_yds: float = 15.0
+    props_min_shift_yds: float = 5.0
+    props_max_shift_frac: float = 0.5
     props_max_shift_pass_yds: float = 30.0
     props_max_shift_count: float = 1.0
     # projector inputs: nflverse snap counts / injury reports (free), usage x efficiency mean

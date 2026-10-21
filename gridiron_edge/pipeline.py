@@ -471,9 +471,9 @@ def _kalshi_rec(kind: Literal["kalshi_game", "kalshi_prop"], m: KalshiMarket, g:
 
 
 def _model_gated(snap: Snapshot, league: str) -> bool:
-    """Projector-only (non-anchored) props stake only once the projector passed its calibration check
-    (snap.projector_live); an explicit (league, "prop_model") gate overrides that either way."""
-    return snap.gates.get((league, "prop_model"), not snap.projector_live)
+    """Projector-only (non-anchored) PrizePicks legs stake only once the projector passed its calibration
+    check (snap.projector_live). Projector-only Kalshi props are always observe-only."""
+    return not snap.projector_live
 
 
 def kalshi_game_candidates(snap: Snapshot, s: Settings) -> list[Recommendation]:
@@ -515,10 +515,14 @@ def _stat_kind(stat: str) -> Literal["yards", "count"]:
     return "yards" if stat.endswith("_yds") else "count"
 
 
-def _max_shift(stat: str, s: Settings) -> float:
+def _max_shift(stat: str, s: Settings, point: float) -> float:
+    """Furthest a prop is repriced from the book's point: relative for rushing / receiving yards (a
+    9.5-yard line says little about 25+), fixed for pass yards and counts."""
     if stat == "pass_yds":
         return s.props_max_shift_pass_yds
-    return s.props_max_shift_yds if _stat_kind(stat) == "yards" else s.props_max_shift_count
+    if _stat_kind(stat) != "yards":
+        return s.props_max_shift_count
+    return min(s.props_max_shift_yds, max(s.props_min_shift_yds, s.props_max_shift_frac * point))
 
 
 def _prop_fresh(q: PropQuote, snap: Snapshot, s: Settings) -> bool:
@@ -534,6 +538,23 @@ def _book_quotes(snap: Snapshot, s: Settings, game_id: str, player: str, stat: s
             and normalize_name(q.player) == key and _prop_fresh(q, snap, s)]
 
 
+def _book_pairs(snap: Snapshot, s: Settings, game_id: str, player: str,
+                stat: str) -> dict[tuple[str, float], dict[str, PropQuote]]:
+    """{(book, point): {"over": q, "under": q}} for every book quoting both sides (newest quote each)."""
+    pairs: dict[tuple[str, float], dict[str, PropQuote]] = {}
+    for q in _book_quotes(snap, s, game_id, player, stat):
+        sides = pairs.setdefault((q.book, q.point), {})
+        if q.side not in sides or q.last_update > sides[q.side].last_update:
+            sides[q.side] = q
+    return {k: v for k, v in pairs.items() if "over" in v and "under" in v}
+
+
+def _book_point(snap: Snapshot, s: Settings, game_id: str, player: str, stat: str, line: float) -> float | None:
+    """The two-sided book point nearest the line (the anchor _book_p_sides prices from)."""
+    points = {pt for _, pt in _book_pairs(snap, s, game_id, player, stat)}
+    return min(points, key=lambda pt: (abs(pt - line), pt)) if points else None
+
+
 def _book_p_sides(snap: Snapshot, s: Settings, game_id: str, player: str, stat: str,
                   line: float) -> tuple[float, float] | None:
     """(P(over), P(under)) at the line from the consensus of books at the point nearest it.
@@ -542,16 +563,11 @@ def _book_p_sides(snap: Snapshot, s: Settings, game_id: str, player: str, stat: 
     across books of each side (so P(over) + P(under) <= 1). Each side is then shifted to the line
     through its own implied mean, never further than the stat's max shift.
     """
-    pairs: dict[tuple[str, float], dict[str, PropQuote]] = {}
-    for q in _book_quotes(snap, s, game_id, player, stat):
-        sides = pairs.setdefault((q.book, q.point), {})
-        if q.side not in sides or q.last_update > sides[q.side].last_update:
-            sides[q.side] = q
-    both = {k: v for k, v in pairs.items() if "over" in v and "under" in v}
+    both = _book_pairs(snap, s, game_id, player, stat)
     if not both:
         return None
     point = min({pt for _, pt in both}, key=lambda pt: (abs(pt - line), pt))
-    if abs(line - point) > _max_shift(stat, s):
+    if abs(line - point) > _max_shift(stat, s, point):
         return None
     overs, unders = [], []
     for (_, pt), sides in both.items():
@@ -568,8 +584,9 @@ def _book_p_sides(snap: Snapshot, s: Settings, game_id: str, player: str, stat: 
         mean_under = implied_mean_from_line(point, 1.0 - p_under_at_point, kind, stat=stat)
     except ValueError:  # no mean reproduces this probability
         return None
-    return (prop_p_over(line, mean_over, kind, stat=stat),
-            1.0 - prop_p_over(line, mean_under, kind, stat=stat))
+    # the spread belongs to the book's line (the player's median), not to the strike
+    return (prop_p_over(line, mean_over, kind, stat=stat, anchor=point),
+            1.0 - prop_p_over(line, mean_under, kind, stat=stat, anchor=point))
 
 
 def _game_context(snap: Snapshot, projector: Projector, g: Game, player: str) -> dict:
@@ -582,7 +599,7 @@ def _game_context(snap: Snapshot, projector: Projector, g: Game, player: str) ->
     margin = fair_spread_mean(quotes, now=snap.now,
                               model=_margin_model(snap, g.league, "spread"))  # expected home margin
     total = fair_total_mean(quotes, now=snap.now)
-    ctx: dict = {"opponent": g.away if home else g.home}
+    ctx: dict = {"opponent": g.away if home else g.home, "team": team}
     if margin is not None:
         ctx["team_spread"] = -margin if home else margin
         if total is not None:
@@ -594,8 +611,9 @@ def _model_p_over(projector: Projector, g: Game, player: str, stat: str, line: f
                   ctx: dict | None = None) -> float | None:
     if g.week is None:
         return None
-    if ctx and "opponent" in inspect.signature(projector.project).parameters:
-        proj = projector.project(player, stat, g.season, g.week, **ctx)
+    params = inspect.signature(projector.project).parameters
+    if ctx and "opponent" in params:  # pass what this projector accepts (team picks among shared names)
+        proj = projector.project(player, stat, g.season, g.week, **{k: v for k, v in ctx.items() if k in params})
     else:
         proj = projector.project(player, stat, g.season, g.week)
     if proj is None:
@@ -616,10 +634,45 @@ def _prop_p_sides(snap: Snapshot, s: Settings, projector: Projector, g: Game, pl
     return None if p is None else (p, 1.0 - p, False)
 
 
+# Kalshi props: how much of our number to keep against the Kalshi mid (the rest is the mid). Book and
+# Kalshi agree within ~1.3pp at the same strike, so the mid is a strong prior; a translated strike leans
+# on the yardage curve and a projector-only number on a model never checked against a market.
+PROP_W_EXACT = 0.8      # book line == strike
+PROP_W_SHIFT = 0.5      # translated: PROP_W_SHIFT * exp(-|K - L| / L)
+PROP_W_MODEL = 0.25     # projector only
+PROP_MID_MAX_SPREAD = 0.06  # the mid is only trusted on a tight, two-sided Kalshi book
+PROP_MAX_GAP = 0.10     # our number this far from a liquid mid is our error, not an edge
+
+
+def _kalshi_mid(m: KalshiMarket) -> float | None:
+    """Mid of the YES book, or None when it is wide or one-sided."""
+    if m.yes_bid <= 0 or m.yes_ask <= 0 or m.yes_ask_size <= 0 or m.no_ask_size <= 0:
+        return None
+    if m.yes_ask - m.yes_bid > PROP_MID_MAX_SPREAD + 1e-9:
+        return None
+    return (m.yes_bid + m.yes_ask) / 2
+
+
+def _shrink_to_market(p_over: float, p_under: float, m: KalshiMarket, w: float) -> tuple[float, float] | None:
+    """Each side pulled toward the Kalshi mid: w * ours + (1 - w) * mid. None when there is no usable mid."""
+    mid = _kalshi_mid(m)
+    if mid is None:
+        return None
+    return w * p_over + (1 - w) * mid, w * p_under + (1 - w) * (1 - mid)
+
+
+def _prop_weight(anchored: bool, strike: float, point: float | None) -> float:
+    if not anchored or point is None:
+        return PROP_W_MODEL
+    if strike == point:
+        return PROP_W_EXACT
+    return PROP_W_SHIFT * math.exp(-abs(strike - point) / max(point, 1.0))
+
+
 def kalshi_prop_candidates(snap: Snapshot, s: Settings, projector: Projector) -> list[Recommendation]:
-    """Best Kalshi prop recommendation per player (unsized). Projector-only picks are observe-only
-    until the projector passes its backtest (snap.projector_live)."""
-    best: dict[str, tuple[KalshiMarket, Game, _Side, bool]] = {}
+    """Best Kalshi prop recommendation per player (unsized). Our number is shrunk toward the Kalshi mid
+    and dropped when it sits implausibly far from a liquid one; projector-only picks are observe-only."""
+    best: dict[str, tuple[KalshiMarket, Game, _Side, bool, dict, float | None]] = {}
     for m in snap.kalshi:
         if m.market_type != "prop" or m.player is None or m.stat is None or m.line is None:
             continue
@@ -633,16 +686,27 @@ def kalshi_prop_candidates(snap: Snapshot, s: Settings, projector: Projector) ->
         if got is None:
             continue
         p_over, p_under, anchored = got
+        mid = _kalshi_mid(m)
+        # our two-sided centre (each side is a worst case, so they sum below 1) against the mid
+        if mid is None or abs((p_over + 1 - p_under) / 2 - mid) > PROP_MAX_GAP:
+            continue
+        point = _book_point(snap, s, g.game_id, m.player, m.stat, m.line) if anchored else None
+        w = _prop_weight(anchored, m.line, point)
+        p_yes, p_no = _shrink_to_market(p_over, p_under, m, w)
         extra = 0.0 if anchored else s.pp_margin_model - s.pp_margin_market
-        sd = _best_side(m, p_over, snap, s, extra, p_no=p_under)
+        sd = _best_side(m, p_yes, snap, s, extra, p_no=p_no)
         if sd is not None and (key not in best or sd.ev > best[key][2].ev):
-            best[key] = (m, g, sd, anchored)
+            why = {"kalshi_mid": mid, "weight": w, "p_ours": p_over if sd.side == "yes" else p_under,
+                   "book_line": point}
+            # books priced this exact strike: their devigged side is a market probability; a translated
+            # strike or a projection is not
+            p_mkt = (p_over if sd.side == "yes" else p_under) if anchored and point == m.line else None
+            best[key] = (m, g, sd, anchored, why, p_mkt)
     out = []
-    for m, g, sd, anchored in best.values():
-        # anchored props are priced from devigged books (market-derived) so sd.p is the market's p
+    for m, g, sd, anchored, why, p_mkt in best.values():
         out.append(_kalshi_rec("kalshi_prop", m, g, sd, f"{m.player} {m.stat} over {m.line}", snap, "prop",
-                               False, observe=(not anchored and _model_gated(snap, g.league)) or None,
-                               team=_player_team(snap, projector, m.player), p_mkt=sd.p if anchored else None))
+                               False, why=why, observe=True if not anchored else None,
+                               team=_player_team(snap, projector, m.player), p_mkt=p_mkt))
     return out
 
 

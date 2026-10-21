@@ -320,6 +320,16 @@ def model_share_text(why: dict) -> str | None:
             f"{w * 100:.0f}% of our number")
 
 
+def kalshi_mid_text(why: dict, side: str = "yes") -> str | None:
+    """'Kalshi traders say 25%; our own estimate (30%) counts for 50% of our number, theirs for the rest.'"""
+    mid, ours, w = why.get("kalshi_mid"), why.get("p_ours"), why.get("weight")
+    if mid is None or ours is None or w is None:
+        return None
+    theirs = mid if side == "yes" else 1 - mid
+    return (f"Kalshi traders say {pct(theirs)}; our own estimate ({pct(ours)}) counts for {w * 100:.0f}% "
+            "of our number and theirs for the rest")
+
+
 def _tie_text(why: dict) -> str | None:
     tie = why.get("tie_prob")
     if not tie:
@@ -351,7 +361,8 @@ def why_lines(rec: Recommendation, now: datetime, names: Names = DEFAULT_NAMES,
         leg = rec.legs[0]
         out.append(f"Our chance: {pct(leg.p_fair)}. The price implies {pct(leg.price)}.")
     out.append("Where our number came from: " + (source_text(why) or _default_source(rec)) + ".")
-    for extra_line in (model_share_text(why), _tie_text(why)):
+    for extra_line in (model_share_text(why), kalshi_mid_text(why, rec.legs[0].side if rec.legs else "yes"),
+                       _tie_text(why)):
         if extra_line:
             out.append(extra_line + ".")
     if rec.kind not in ("pp_entry", "arb", "middle"):

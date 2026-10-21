@@ -5,6 +5,10 @@ usage columns, the weighted mean shrunk toward a position prior; then an opponen
 script factor. sd = per-player CV shrunk toward the stat's pooled CV. Games with a low snap share are
 dropped from the history, games for a previous team are down-weighted, and players listed Out are
 skipped.
+
+Players are keyed by nflverse player_id (two players can share a display name: the MIN WR and the CLE LB
+named Justin Jefferson); a name resolves to the id whose position fits the stat and, when known, whose
+latest team is the one in the game.
 """
 import math
 from dataclasses import dataclass
@@ -49,6 +53,9 @@ GATE_TOLERANCE = 0.01
 
 _GATE_POSITIONS = {"passing_yards": {"QB"}, "rushing_yards": {"RB", "QB"},
                    "receiving_yards": {"WR", "TE", "RB"}}
+# positions that can own a stat, for resolving a shared name (receptions follow receiving yards)
+_STAT_POSITIONS = {**_GATE_POSITIONS, "receptions": _GATE_POSITIONS["receiving_yards"]}
+_SKILL_POSITIONS = {"QB", "RB", "FB", "WR", "TE"}
 
 
 def _team_col(df: pl.DataFrame) -> str | None:
@@ -90,28 +97,54 @@ def _histories(df: pl.DataFrame) -> dict[str, _Hist]:
     return out
 
 
+def _name_expr(col: str) -> pl.Expr:
+    return pl.col(col).map_elements(normalize_name, return_dtype=pl.Utf8)
+
+
+def _join_snaps(df: pl.DataFrame, snaps: pl.DataFrame) -> pl.DataFrame:
+    """Left-join the offensive snap share on (name, team, season, week); on name alone when either frame
+    has no team column (a shared name on another team never lends its snaps)."""
+    tcol = _team_col(df)
+    on = ["_name", "season", "week"]
+    cols = [_name_expr("player").alias("_name"), pl.col("season").cast(pl.Int64), pl.col("week").cast(pl.Int64),
+            pl.col("offense_pct").cast(pl.Float64).alias("_snap")]
+    if tcol is not None and "team" in snaps.columns:
+        on.append("_snap_team")
+        cols.append(pl.col("team").cast(pl.Utf8).alias("_snap_team"))
+        df = df.with_columns(pl.col(tcol).cast(pl.Utf8).alias("_snap_team"))
+    share = snaps.select(cols).group_by(on).agg(pl.col("_snap").max())
+    df = df.with_columns(pl.col("season").cast(pl.Int64), pl.col("week").cast(pl.Int64)).join(
+        share, on=on, how="left")
+    # snap share may be a fraction or a percentage
+    df = df.with_columns(pl.when(pl.col("_snap") > 1).then(pl.col("_snap") / 100)
+                         .otherwise(pl.col("_snap")).alias("_snap"))
+    return df.drop("_snap_team") if "_snap_team" in df.columns else df
+
+
 class PropProjector:
     def __init__(self, weekly: pl.DataFrame, snaps: pl.DataFrame | None = None,
                  injuries: pl.DataFrame | None = None, usage_model: bool = True):
-        df = weekly.with_columns(
-            pl.col("player_display_name").map_elements(normalize_name, return_dtype=pl.Utf8).alias("_key"))
+        df = weekly.with_columns(_name_expr("player_display_name").alias("_name"))
+        by_id = "player_id" in df.columns
+        key = pl.coalesce(pl.col("player_id").cast(pl.Utf8), pl.col("_name")) if by_id else pl.col("_name")
+        df = df.with_columns(key.alias("_key"))
         if snaps is not None and {"player", "season", "week", "offense_pct"} <= set(snaps.columns):
-            share = (snaps.select(pl.col("player").map_elements(normalize_name, return_dtype=pl.Utf8).alias("_key"),
-                                  pl.col("season").cast(pl.Int64), pl.col("week").cast(pl.Int64),
-                                  pl.col("offense_pct").cast(pl.Float64).alias("_snap"))
-                     .group_by(["_key", "season", "week"]).agg(pl.col("_snap").max()))
-            df = df.with_columns(pl.col("season").cast(pl.Int64), pl.col("week").cast(pl.Int64)).join(
-                share, on=["_key", "season", "week"], how="left")
-            # snap share may be a fraction or a percentage
-            df = df.with_columns(pl.when(pl.col("_snap") > 1).then(pl.col("_snap") / 100)
-                                 .otherwise(pl.col("_snap")).alias("_snap"))
+            df = _join_snaps(df, snaps)
         self._weekly = df
         self._hist = _histories(df)
+        self._ids: dict[str, list[str]] = {}
+        for k, name in df.select("_key", "_name").unique().iter_rows():
+            if k is not None and name is not None:
+                self._ids.setdefault(name, []).append(k)
+        # Out lists: by gsis_id (= player_id) when both frames carry it, else by name
         self._out: set[tuple[str, int, int]] = set()
         if injuries is not None and {"full_name", "season", "week", "report_status"} <= set(injuries.columns):
-            for name, season, week, status in injuries.select("full_name", "season", "week", "report_status").iter_rows():
+            ids = injuries["gsis_id"].to_list() if by_id and "gsis_id" in injuries.columns else None
+            rows = injuries.select("full_name", "season", "week", "report_status").iter_rows()
+            for i, (name, season, week, status) in enumerate(rows):
                 if name and status and status.strip().lower() in _OUT:
-                    self._out.add((normalize_name(name), int(season), int(week)))
+                    who = ids[i] if ids is not None and ids[i] else self._resolve(name)
+                    self._out.add((who or normalize_name(name), int(season), int(week)))
         self.usage_model = usage_model
         self.unmatched: set[str] = set()
         self._cache: dict[tuple, float | None] = {}
@@ -191,9 +224,30 @@ class PropProjector:
             f += SCRIPT_FAV.get(col, 0.0) * -team_spread
         return float(np.clip(f, *SCRIPT_CLIP))
 
+    # -- identity ------------------------------------------------------------
+    def _resolve(self, player: str, col: str | None = None, team: str | None = None) -> str | None:
+        """The history key for a display name. A shared name goes to the id whose position can own the
+        stat (any skill position without one) and, when given, whose latest team is `team`; None when
+        that still leaves more than one."""
+        ids = self._ids.get(normalize_name(player), [])
+        if len(ids) <= 1:
+            return ids[0] if ids else None
+        positions = _STAT_POSITIONS.get(col, _SKILL_POSITIONS) if col else _SKILL_POSITIONS
+        cands = [k for k in ids if self._hist.get(k) is not None
+                 and (self._hist[k].position is None or self._hist[k].position in positions)]
+        if team is not None and len(cands) > 1:
+            cands = [k for k in cands if self._latest_team(k) == team] or cands
+        return cands[0] if len(cands) == 1 else None
+
+    def _latest_team(self, key: str) -> str | None:
+        h = self._hist.get(key)
+        if h is None or h.team is None:
+            return None
+        return next((t for t in h.team if t is not None), None)
+
     # -- projection ----------------------------------------------------------
     def is_out(self, player: str, season: int, week: int) -> bool:
-        return (normalize_name(player), season, week) in self._out
+        return (self._resolve(player) or normalize_name(player), season, week) in self._out
 
     def _window(self, h: "_Hist", col: str, season: int, asof_week: int) -> np.ndarray:
         """Indices (newest first) of usable games before asof_week, at most MAX_GAMES."""
@@ -204,16 +258,21 @@ class PropProjector:
         return np.flatnonzero(mask)[:MAX_GAMES]
 
     def project(self, player: str, stat: str, season: int, asof_week: int, *, opponent: str | None = None,
-                team_total: float | None = None, team_spread: float | None = None) -> tuple[float, float] | None:
-        """(mean, sd) of the stat for the player's game in asof_week, or None."""
+                team_total: float | None = None, team_spread: float | None = None,
+                team: str | None = None) -> tuple[float, float] | None:
+        """(mean, sd) of the stat for the player's game in asof_week, or None (also for an ambiguous name)."""
         col = STAT_COLUMNS.get(stat)
         if col is None or col not in self._weekly.columns:
             return None
-        key = normalize_name(player)
-        h = self._hist.get(key)
-        if h is None:
+        key = self._resolve(player, col, team)
+        if key is None:
             self.unmatched.add(player)
             return None
+        return self._project_key(key, col, season, asof_week, opponent, team_total, team_spread)
+
+    def _project_key(self, key: str, col: str, season: int, asof_week: int, opponent: str | None = None,
+                     team_total: float | None = None, team_spread: float | None = None) -> tuple[float, float] | None:
+        h = self._hist[key]
         if (key, season, asof_week) in self._out:
             return None
         idx = self._window(h, col, season, asof_week)
@@ -260,12 +319,10 @@ class PropProjector:
             return raw
         return (n_eff * raw + SHRINK_K * prior) / (n_eff + SHRINK_K)
 
-    def team_of(self, player: str) -> str | None:
-        """The player's latest team from the weekly stats."""
-        h = self._hist.get(normalize_name(player))
-        if h is None or h.team is None:
-            return None
-        return next((t for t in h.team if t is not None), None)
+    def team_of(self, player: str, stat: str | None = None) -> str | None:
+        """The player's latest team from the weekly stats (None for an unresolvable shared name)."""
+        key = self._resolve(player, STAT_COLUMNS.get(stat or ""))
+        return None if key is None else self._latest_team(key)
 
     # -- gate ----------------------------------------------------------------
     def calibration_backtest(self, season: int, margin: float, max_games: int = 4000) -> dict:
@@ -292,7 +349,7 @@ class PropProjector:
                 if np.isnan(actual) or len(past) < MIN_GAMES or np.median(h.cols[col][past]) < 10:
                     continue
                 line = math.floor(float(np.median(h.cols[col][past]))) + 0.5
-                proj = self.project(key, stat, season, week)
+                proj = self._project_key(key, col, season, week)
                 if proj is None:
                     continue
                 p = prop_p_over(line, proj[0], "yards", proj[1])
@@ -307,3 +364,65 @@ class PropProjector:
         lower = rate - 1.645 * math.sqrt(max(rate * (1 - rate), 1e-9) / n)
         return {"n": n, "claimed": c, "hit": rate,
                 "live": n >= GATE_MIN_PICKS and lower >= c - GATE_TOLERANCE}
+
+
+# -- yardage spread by median (frozen into strategy.distributions.PROP_CV_FIT) -----------------------------
+
+CV_FIT_REF = {"reception_yds": 20.0, "rush_yds": 40.0, "pass_yds": 250.0}
+
+
+def fit_prop_cv(weekly: pl.DataFrame, window: int = 8, first_week: int = 5, bins: int = 10,
+                min_line: float = 3.0, forecast: dict[str, str] | None = None) -> dict[str, tuple[float, float, float]]:
+    """Fit CV(L) = a * (L / ref) ** b for each yardage stat from nflverse weekly stats.
+
+    Each player-game from first_week on is forecast by the player's trailing `window`-game median L (at
+    least MIN_GAMES games, positions that own the stat); player-games are binned by L, each bin's CV is
+    sd / mean of the outcomes, and log CV is regressed on log(L / ref) weighted by bin size. Returns
+    {stat: (a, ref, b)}; strategy.distributions.PROP_CV_FIT holds the frozen result.
+
+    forecast maps a stat to a column holding a better pre-game median (the projector's, or a book line)
+    to use instead of the trailing median. A trailing median is a noisy forecast, which inflates the
+    spread at high lines: on 2024-25 it gives receiving (0.94, -0.31) where the projector forecast gives
+    the frozen (0.835, -0.41), and Kalshi's own ladders imply (0.80, -0.30).
+    """
+    df = weekly
+    key = "player_id" if "player_id" in df.columns else "player_display_name"
+    out: dict[str, tuple[float, float, float]] = {}
+    for stat, ref in CV_FIT_REF.items():
+        col = STAT_COLUMNS[stat]
+        if col not in df.columns:
+            continue
+        d = df.drop_nulls(col)
+        if "position" in d.columns:
+            d = d.filter(pl.col("position").is_in(list(_GATE_POSITIONS[col])))
+        d = d.sort([key, "season", "week"])
+        keys, weeks, vals = d[key].to_numpy(), d["week"].to_numpy(), d[col].cast(pl.Float64).to_numpy()
+        fcol = (forecast or {}).get(stat)
+        given = d[fcol].cast(pl.Float64).to_numpy() if fcol else None
+        lines, xs = [], []
+        bounds = np.flatnonzero(np.r_[True, keys[1:] != keys[:-1], True])
+        for a, b in zip(bounds[:-1], bounds[1:]):
+            for i in range(a + MIN_GAMES, b):
+                if weeks[i] < first_week:
+                    continue
+                line = float(given[i]) if given is not None else float(np.median(vals[max(a, i - window):i]))
+                if line >= min_line:
+                    lines.append(line)
+                    xs.append(vals[i])
+        if len(lines) < bins * 20:
+            continue
+        lines_a, xs_a = np.asarray(lines), np.asarray(xs)
+        edges = np.unique(np.quantile(lines_a, np.linspace(0, 1, bins + 1)))
+        which = np.clip(np.searchsorted(edges, lines_a, side="right") - 1, 0, len(edges) - 2)
+        lx, ly, wt = [], [], []
+        for j in range(len(edges) - 1):
+            x = xs_a[which == j]
+            if len(x) >= 20 and x.mean() > 0:
+                lx.append(math.log(float(np.median(lines_a[which == j])) / ref))
+                ly.append(math.log(float(x.std(ddof=1) / x.mean())))
+                wt.append(math.sqrt(len(x)))
+        if len(lx) < 3:
+            continue
+        b_, log_a = np.polyfit(lx, ly, 1, w=wt)
+        out[stat] = (float(math.exp(log_a)), ref, float(b_))
+    return out

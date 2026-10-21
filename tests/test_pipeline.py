@@ -207,7 +207,7 @@ def test_arb_rec(mk, settings):
 
 
 def test_kalshi_prop_anchored_to_book(mk, settings):
-    m = replace(mk("P1", "EP", "prop", line=49.5, yes_ask=0.45, no_ask=0.60, game_id="g1"),
+    m = replace(mk("P1", "EP", "prop", line=49.5, yes_ask=0.52, game_id="g1"),
                 player="Player 1", stat="rush_yds")
     props = [PropQuote("odds_api", "draftkings", "g1", "Player 1", "rush_yds", "over", 52.5, 1.70, NOW),
              PropQuote("odds_api", "draftkings", "g1", "Player 1", "rush_yds", "under", 52.5, 2.25, NOW),
@@ -216,17 +216,26 @@ def test_kalshi_prop_anchored_to_book(mk, settings):
     recs = kalshi_prop_candidates(snap_with(kalshi=[m], props=props), settings, StubProjector())
     assert len(recs) == 1 and recs[0].kind == "kalshi_prop" and recs[0].legs[0].side == "yes"
     # nearest book is draftkings at 52.5; shifted down to 49.5 the over is likelier than at 52.5
-    assert recs[0].legs[0].p_fair > 0.57
+    assert recs[0].why["book_line"] == 52.5 and recs[0].why["p_ours"] > 0.57
+    # then pulled toward the Kalshi mid (0.515)
+    assert 0.515 < recs[0].legs[0].p_fair < recs[0].why["p_ours"]
 
 
 def test_kalshi_prop_model_fallback_needs_extra_margin(mk, settings):
     m = replace(mk("P1", "EP", "prop", line=49.5, yes_ask=0.50, no_ask=0.60, game_id="g1"),
                 player="Player 1", stat="rush_yds")
     strong = StubProjector({("Player 1", "rush_yds"): (75.0, 20.0)})
-    weak = StubProjector({("Player 1", "rush_yds"): (52.1, 30.0)})
-    assert len(kalshi_prop_candidates(snap_with(kalshi=[m]), settings, strong)) == 1
-    assert kalshi_prop_candidates(snap_with(kalshi=[m]), settings, weak) == []
+    near = StubProjector({("Player 1", "rush_yds"): (52.1, 30.0)})
+    # far from a liquid mid is our error; near it, a quarter-weight projection never clears fees
+    assert kalshi_prop_candidates(snap_with(kalshi=[m]), settings, strong) == []
+    assert kalshi_prop_candidates(snap_with(kalshi=[m]), settings, near) == []
     assert kalshi_prop_candidates(snap_with(kalshi=[m]), settings, StubProjector()) == []
+    # the projector's extra margin still applies on top of the minimum EV
+    (r,) = kalshi_prop_candidates(snap_with(kalshi=[m]), replace(settings, kalshi_min_ev=-1.0, kalshi_min_edge=-1.0),
+                                  near)
+    margin = settings.pp_margin_model - settings.pp_margin_market
+    assert kalshi_prop_candidates(snap_with(kalshi=[m]), replace(settings, kalshi_min_ev=r.ev - margin + 1e-4,
+                                                                 kalshi_min_edge=-1.0), near) == []
 
 
 def test_slate_caps_hold(mk, settings):
@@ -319,7 +328,7 @@ def test_open_bet_on_game_blocks_new_kalshi_game_rec(mk, settings):
 
 
 def test_open_bet_on_player_blocks_new_kalshi_prop_rec(mk, settings):
-    m = replace(mk("P1", "EP", "prop", line=49.5, yes_ask=0.45, no_ask=0.60, game_id="g1"),
+    m = replace(mk("P1", "EP", "prop", line=49.5, yes_ask=0.52, game_id="g1"),
                 player="Player 1", stat="rush_yds")
     props = [PropQuote("odds_api", "draftkings", "g1", "Player 1", "rush_yds", "over", 52.5, 1.70, NOW),
              PropQuote("odds_api", "draftkings", "g1", "Player 1", "rush_yds", "under", 52.5, 2.25, NOW)]
@@ -466,22 +475,30 @@ def _prop_market(mk, yes_ask=0.50):
 
 
 def test_projector_only_kalshi_prop_is_observe_only(mk, settings):
-    strong = StubProjector({("Player 1", "rush_yds"): (75.0, 20.0)})
+    near = StubProjector({("Player 1", "rush_yds"): (52.1, 30.0)})
+    settings = replace(settings, kalshi_min_ev=-1.0, kalshi_min_edge=-1.0)  # let any edge through
     snap = snap_with(kalshi=[_prop_market(mk)])
-    recs = kalshi_prop_candidates(snap, settings, strong)
+    recs = kalshi_prop_candidates(snap, settings, near)
     assert len(recs) == 1 and recs[0].observe_only and recs[0].legs[0].p_mkt is None
-    assert [r.stake_cents for r in scan(snap, settings, strong, lambda m: "nfl")] == [0]
-    live = kalshi_prop_candidates(replace(snap, gates={("nfl", "prop_model"): False}), settings, strong)
-    assert not live[0].observe_only
+    assert [r.stake_cents for r in scan(snap, settings, near, lambda m: "nfl")] == [0]
+    # neither a passed projector check nor a gate override makes a projection textable
+    for s2 in (replace(snap, gates={("nfl", "prop_model"): False}), replace(snap, projector_live=True)):
+        assert kalshi_prop_candidates(s2, settings, near)[0].observe_only
 
 
 def test_anchored_kalshi_prop_stays_live_and_keeps_market_p(mk, settings):
+    from gridiron_edge.strategy.devig import devig_worst
     props = [PropQuote("odds_api", "draftkings", "g1", "Player 1", "rush_yds", "over", 52.5, 1.70, NOW),
              PropQuote("odds_api", "draftkings", "g1", "Player 1", "rush_yds", "under", 52.5, 2.25, NOW)]
-    recs = kalshi_prop_candidates(snap_with(kalshi=[_prop_market(mk, 0.45)], props=props), settings,
-                                  StubProjector())
-    assert not recs[0].observe_only and recs[0].legs[0].p_mkt == recs[0].legs[0].p_fair
-    assert recs[0].p_mkt == recs[0].legs[0].p_mkt
+    exact = replace(_prop_market(mk, 0.51), line=52.5)
+    recs = kalshi_prop_candidates(snap_with(kalshi=[exact], props=props), settings, StubProjector())
+    # the books priced this exact line: p_mkt is their devigged side (our p_fair is shrunk to the mid)
+    assert not recs[0].observe_only and recs[0].legs[0].p_mkt == pytest.approx(devig_worst([1.70, 2.25], 0))
+    assert recs[0].p_mkt == recs[0].legs[0].p_mkt != recs[0].legs[0].p_fair
+    # a strike translated from another line has no market probability
+    moved = kalshi_prop_candidates(snap_with(kalshi=[_prop_market(mk, 0.52)], props=props), settings,
+                                   StubProjector())
+    assert not moved[0].observe_only and moved[0].p_mkt is None and moved[0].legs[0].p_mkt is None
 
 
 def test_pp_entry_with_projector_leg_is_observe_only(settings):

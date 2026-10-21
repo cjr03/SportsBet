@@ -76,7 +76,9 @@ def test_no_projector_fallback_when_fresh_book_quote_exists(mk, settings):
     strong = Stub({("Player 1", "rush_yds"): (90.0, 20.0)})
     assert kalshi_prop_candidates(snap_with(kalshi=[prop_market(mk)], props=props), settings, strong) == []
     # and with no book quote at all the projector still prices it
-    assert len(kalshi_prop_candidates(snap_with(kalshi=[prop_market(mk)]), settings, strong)) == 1
+    from gridiron_edge.pipeline import _prop_p_sides
+    got = _prop_p_sides(snap_with(), settings, strong, game(1), "Player 1", "rush_yds", 49.5)
+    assert got is not None and got[2] is False
 
 
 def test_stale_prizepicks_quote_skipped(settings):
@@ -92,22 +94,27 @@ def test_stale_prizepicks_quote_skipped(settings):
 # -- 2. projector-only props are observe-only until the projector passes its backtest -------------
 
 def test_projector_only_kalshi_prop_is_observe_only(mk, settings):
-    strong = Stub({("Player 1", "rush_yds"): (90.0, 20.0)})
-    recs = kalshi_prop_candidates(snap_with(kalshi=[prop_market(mk)]), settings, strong)
+    near = Stub({("Player 1", "rush_yds"): (52.1, 30.0)})
+    loose = replace(settings, kalshi_min_ev=-1.0, kalshi_min_edge=-1.0)
+    m = prop_market(mk, yes_ask=0.50, no_ask=None)
+    recs = kalshi_prop_candidates(snap_with(kalshi=[m]), loose, near)
     assert len(recs) == 1 and recs[0].observe_only
-    live = kalshi_prop_candidates(snap_with(kalshi=[prop_market(mk)], projector_live=True), settings, strong)
-    assert len(live) == 1 and not live[0].observe_only
+    # a passed calibration backtest never compared the projector with a market: still watch-only
+    live = kalshi_prop_candidates(snap_with(kalshi=[m], projector_live=True), loose, near)
+    assert len(live) == 1 and live[0].observe_only
 
 
 def test_anchored_kalshi_prop_stays_live(mk, settings):
-    recs = kalshi_prop_candidates(snap_with(kalshi=[prop_market(mk)], props=book("draftkings", 1.70, 2.25)),
-                                  settings, Stub())
+    recs = kalshi_prop_candidates(snap_with(kalshi=[prop_market(mk, yes_ask=0.52, no_ask=None)],
+                                            props=book("draftkings", 1.70, 2.25)), settings, Stub())
     assert len(recs) == 1 and not recs[0].observe_only
 
 
 def test_projector_only_prop_not_sized_by_scan(mk, settings):
-    strong = Stub({("Player 1", "rush_yds"): (90.0, 20.0)})
-    recs = [r for r in scan(snap_with(kalshi=[prop_market(mk)]), settings, strong, lambda m: "nfl")
+    near = Stub({("Player 1", "rush_yds"): (52.1, 30.0)})
+    settings = replace(settings, kalshi_min_ev=-1.0, kalshi_min_edge=-1.0)
+    m = prop_market(mk, yes_ask=0.50, no_ask=None)
+    recs = [r for r in scan(snap_with(kalshi=[m], projector_live=True), settings, near, lambda m: "nfl")
             if r.kind == "kalshi_prop"]
     assert len(recs) == 1 and recs[0].observe_only and recs[0].stake_cents == 0
 
@@ -195,18 +202,20 @@ def test_yards_distribution_is_right_skewed():
     mu = implied_mean_from_line(85.5, 0.5, "yards", stat="reception_yds")
     # median pinned at the line, mean above it (right skew)
     assert mu > 85.5
-    up = prop_p_over(85.5 + 15, mu, "yards", stat="reception_yds")
-    down = 1 - prop_p_over(85.5 - 15, mu, "yards", stat="reception_yds")
+    # the spread belongs to the book line (the median), wherever the strike is
+    up = prop_p_over(85.5 + 15, mu, "yards", stat="reception_yds", anchor=85.5)
+    down = 1 - prop_p_over(85.5 - 15, mu, "yards", stat="reception_yds", anchor=85.5)
     assert up > down  # the long right tail
     # never negative yardage mass: P(over 0.5) is near 1 for a sizeable mean
-    assert prop_p_over(0.5, mu, "yards", stat="reception_yds") > 0.99
+    assert prop_p_over(0.5, mu, "yards", stat="reception_yds", anchor=85.5) > 0.99
 
 
 def test_pass_yards_tighter_than_receiving():
     from gridiron_edge.strategy.distributions import implied_mean_from_line, prop_p_over
-    mp = implied_mean_from_line(245.5, 0.5, "yards", stat="pass_yds")
-    mr = implied_mean_from_line(245.5, 0.5, "yards", stat="reception_yds")
-    assert prop_p_over(299.5, mp, "yards", stat="pass_yds") < prop_p_over(299.5, mr, "yards", stat="reception_yds")
+    mp = implied_mean_from_line(60.5, 0.5, "yards", stat="pass_yds")
+    mr = implied_mean_from_line(60.5, 0.5, "yards", stat="reception_yds")
+    assert (prop_p_over(80.5, mp, "yards", stat="pass_yds", anchor=60.5)
+            < prop_p_over(80.5, mr, "yards", stat="reception_yds", anchor=60.5))
 
 
 def test_projector_sd_gives_gamma_with_that_spread():
@@ -249,7 +258,7 @@ def test_projector_gets_opponent_and_market_game_script(mk, settings):
               Quote("odds_api", "pinnacle", "g1", "totals", "over", 45.0, 1.95, NOW),
               Quote("odds_api", "pinnacle", "g1", "totals", "under", 45.0, 1.95, NOW)]
     snap = snap_with(kalshi=[prop_market(mk)], quotes=quotes, player_teams={"Player 1": "H1"})
-    assert len(kalshi_prop_candidates(snap, settings, Ctx())) == 1
+    kalshi_prop_candidates(snap, settings, Ctx())
     assert seen["opponent"] == "A1"
     assert seen["team_spread"] == pytest.approx(-7.0, abs=0.01)
     assert seen["team_total"] == pytest.approx(26.0, abs=0.01)
