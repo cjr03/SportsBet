@@ -62,3 +62,12 @@ async def test_set_pp_mode_updates_settlement_table(services_mocked):
     svc = services_mocked()
     svc.set_setting("pp_mode", "arena")
     assert svc.settler.payouts[(5, "flex")] == {5: 10}
+
+
+async def test_bad_prizepicks_setting_is_not_saved(services_mocked):
+    import pytest
+    svc = services_mocked()
+    with pytest.raises(ValueError):
+        svc.set_setting("pp_payouts_json", "{bad")
+    assert svc._get("set.pp_payouts_json") is None
+    assert svc.settings.pp_payouts_json == ""

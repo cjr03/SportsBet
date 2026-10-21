@@ -1,4 +1,6 @@
 """Settings: strategy defaults, behaviour flags, secrets from .env."""
+import json
+import math
 import os
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
@@ -110,6 +112,44 @@ def _coerce(name: str, raw: str, default):
         raise ValueError(f"invalid value for {name}: {raw!r}") from None
 
 
+def parse_pp_structure(text: str) -> tuple[int, str]:
+    """'5-flex' -> (5, 'flex'); 2-6 picks, power or flex."""
+    try:
+        n, kind = text.strip().lower().split("-")
+        size = int(n)
+    except ValueError:
+        raise ValueError(f"bad PrizePicks structure {text!r} (use e.g. 5-flex or 3-power)") from None
+    if kind not in ("power", "flex") or not 2 <= size <= 6:
+        raise ValueError(f"bad PrizePicks structure {text!r} (use e.g. 5-flex or 3-power)")
+    return size, kind
+
+
+def parse_pp_payouts(raw: str) -> dict[tuple[int, str], dict[int, float]]:
+    """pp_payouts_json -> {(n, kind): {hits: multiplier}}; tiers 0..n, multipliers finite and >= 0."""
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        raise ValueError("pp_payouts_json is not valid JSON") from None
+    if not isinstance(data, dict):
+        raise ValueError('pp_payouts_json must look like {"5-flex": {"5": 10, "4": 2}}')
+    out: dict[tuple[int, str], dict[int, float]] = {}
+    for key, tiers in data.items():
+        st = parse_pp_structure(str(key))
+        if not isinstance(tiers, dict):
+            raise ValueError(f"pp_payouts_json {key}: tiers must be an object of hits -> payout")
+        table = {}
+        for k, v in tiers.items():
+            try:
+                hits, mult = int(k), float(v)
+            except (TypeError, ValueError):
+                raise ValueError(f"pp_payouts_json {key}: {k!r}: {v!r} is not a number") from None
+            if not 0 <= hits <= st[0] or not math.isfinite(mult) or mult < 0:
+                raise ValueError(f"pp_payouts_json {key}: {k!r}: {v!r} out of range")
+            table[hits] = mult
+        out[st] = table
+    return out
+
+
 def _validate(s: Settings) -> None:
     for name in _FRACTIONS:
         v = getattr(s, name)
@@ -125,6 +165,10 @@ def _validate(s: Settings) -> None:
         raise ValueError("arb_stale_seconds and pp_max_entries must be >= 0, clv_throttle_window >= 1")
     if len(s.quiet_hours) != 2 or not all(0 <= h <= 23 for h in s.quiet_hours):
         raise ValueError(f"quiet_hours must be two hours 0-23, got {s.quiet_hours}")
+    for st in s.pp_structures:
+        parse_pp_structure(st)
+    if s.pp_payouts_json:
+        parse_pp_payouts(s.pp_payouts_json)
 
 
 def load_settings(env_file: Path | None = None, overrides: dict[str, str] | None = None) -> Settings:

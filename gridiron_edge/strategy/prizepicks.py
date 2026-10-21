@@ -1,13 +1,12 @@
 """PrizePicks math: payout tables, EV, Kelly, entry builder, and the DNP/tie revert ladder."""
 import itertools
-import json
 import math
 from dataclasses import dataclass
 from typing import Literal
 
 from scipy.optimize import brentq, minimize_scalar
 
-from gridiron_edge.config import Settings
+from gridiron_edge.config import Settings, parse_pp_payouts, parse_pp_structure
 
 Structure = tuple[int, Literal["power", "flex"]]
 
@@ -30,10 +29,7 @@ Payouts = dict[Structure, dict[int, float]]
 
 
 def _parse_structure(text: str) -> Structure:
-    n, kind = text.strip().lower().split("-")
-    if kind not in ("power", "flex"):
-        raise ValueError(f"bad PrizePicks structure {text!r}")
-    return int(n), kind  # type: ignore[return-value]
+    return parse_pp_structure(text)  # type: ignore[return-value]
 
 
 def payout_table(s: Settings) -> Payouts:
@@ -41,8 +37,7 @@ def payout_table(s: Settings) -> Payouts:
     mode only a perfect card pays (the group prize for a non-perfect card is unknowable)."""
     table = {st: dict(tiers) for st, tiers in PAYOUTS.items()}
     if s.pp_payouts_json:
-        for key, tiers in json.loads(s.pp_payouts_json).items():
-            table[_parse_structure(key)] = {int(k): float(v) for k, v in tiers.items()}
+        table.update(parse_pp_payouts(s.pp_payouts_json))  # type: ignore[arg-type]
     if s.pp_mode == "arena":
         table = {(n, kind): {n: tiers[n]} if n in tiers else {} for (n, kind), tiers in table.items()}
     return table
