@@ -320,3 +320,25 @@ def test_place_now_texted_stays_with_time_left_when_wrapped():
         assert all(ln.strip() != "texted" for ln in lines), (width, lines)
         assert any("59 min left" in ln and "texted" in ln for ln in lines), (width, lines)
     assert "texted" not in Text().join(Text(str(x)) for x in place_now_segments(rec(5), cells)).plain
+
+
+async def test_place_now_and_watching_rows_lead_with_their_rank_and_end_with_the_idea_number():
+    from dataclasses import replace
+
+    from gridiron_edge.ui.widgets import PlaceNowList, WatchList
+    place = PlaceNowList()
+    app = Harness(place)
+    async with app.run_test(size=(120, 40)) as pilot:
+        place.set_recs([replace(rec(12), stake_cents=2000), rec(7)], T0, {})  # in rank order, as home.actionable
+        await pilot.pause()
+        rows = [place.get_option_at_index(i).prompt.plain for i in range(place.option_count)]
+        assert rows[0].startswith("1. Kalshi  ") and "idea #12" in rows[0]
+        assert rows[1].startswith("2. Kalshi  ") and "idea #7" in rows[1]
+        assert place.get_option_at_index(0).id == "12"  # Enter still confirms idea #12
+    watch = WatchList()
+    app = Harness(watch)
+    async with app.run_test(size=(120, 40)) as pilot:
+        watch.set_rows([(12, "1. Kalshi  KC ML", "    47 cents · idea #12"), (7, "2. Kalshi  BUF ML", "    idea #7")])
+        await pilot.pause()
+        assert watch.get_option_at_index(1).prompt.plain.startswith("2. Kalshi  BUF ML")
+        assert watch.get_option_at_index(1).id == "7"

@@ -1,4 +1,4 @@
-"""PrizePicks tab and Home status line: every loaded line in plain English, and why no entry. Pure."""
+"""The PrizePicks boxes on Home: every loaded line in plain English, and why no entry. Pure."""
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -9,16 +9,13 @@ from gridiron_edge.config import Settings
 from gridiron_edge.matching import normalize_name
 from gridiron_edge.pipeline import PPLine, pp_stake
 from gridiron_edge.strategy.prizepicks import (
-    Pick, Structure, allowed_structures, breakeven, payout_table, robust_kelly, worst_distribution,
+    Pick, Structure, allowed_structures, breakeven, payout_table, robust_kelly, top_entries, worst_distribution,
 )
 from gridiron_edge.types import Game, Leg, PropQuote
 
-SEE_TAB = "See tab 5."
-
-
 @dataclass
 class PPView:
-    """What the PrizePicks tab shows; built by Services.pp_view."""
+    """What the PrizePicks boxes on Home show; built by Services.pp_view."""
     lines: list[PPLine]
     games: dict[str, Game]
     blocker: tuple[str, dict] | None  # pipeline.pp_blocker
@@ -191,7 +188,7 @@ def old_lines_text(view: PPView, now: datetime) -> str | None:
 
 
 def nothing_to_pick_text(view: PPView | None) -> str:
-    """Why Enter or Down on tab 5 finds no line to pick, and what to do."""
+    """Why Enter or Down on Home finds no line to pick, and what to do."""
     if view is not None and "prizepicks" not in view.settings.venues:
         return "PrizePicks is turned off. To turn it on, type: set venues kalshi,prizepicks"
     cost = view.refresh_cost if view is not None else 3
@@ -205,15 +202,15 @@ def nothing_to_pick_text(view: PPView | None) -> str:
             f"model, or we don't know the player's team. Wait for new lines, or {what}.")
 
 
-BEST_EMPTY = "No pick clears its needed chance yet."
+PLAYS_EMPTY = "No play shows an expected profit with the fresh lines yet."
 
 
-def best_empty_text(view: PPView) -> str:
-    """BEST PICKS NOW when it is empty: only fresh lines are listed here."""
+def plays_empty_text(view: PPView) -> str:
+    """SUGGESTED PLAYS when it is empty: plays are built from fresh lines only."""
     if any(not ln.fresh and ln.p is not None for ln in view.lines if ln.game_id in view.games):
-        return ("No fresh line clears its needed chance. Older lines are in ALL LINES below with our chance "
-                "from their older prices.")
-    return BEST_EMPTY
+        return ("No play from fresh lines shows an expected profit. Older lines are in ALL LINES below; press r "
+                "to load new ones.")
+    return PLAYS_EMPTY
 
 
 def _entry_text(view: PPView) -> str:
@@ -273,7 +270,7 @@ def best_pick_text(ln: PPLine, view: PPView, names: d.Names = d.DEFAULT_NAMES, b
 
 def board_sections(view: PPView, now: datetime, names: d.Names = d.DEFAULT_NAMES
                    ) -> tuple[list[str], list[str], list[str]]:
-    """The PrizePicks tab as its three boxes: (summary, best picks now, every line by game)."""
+    """The PrizePicks boxes: (summary, best picks now, every line by game)."""
     if "prizepicks" not in view.settings.venues:
         return ["PrizePicks is turned off. To turn it on, type: set venues kalshi,prizepicks"], [], []
     groups = _by_game(view)
@@ -310,7 +307,7 @@ def board_sections(view: PPView, now: datetime, names: d.Names = d.DEFAULT_NAMES
 
 
 def board_lines(view: PPView, now: datetime, names: d.Names = d.DEFAULT_NAMES) -> list[str]:
-    """The PrizePicks tab, line by line (all three boxes in order)."""
+    """The PrizePicks boxes, line by line (all three in order)."""
     summary, top, lines = board_sections(view, now, names)
     out = list(summary)
     if top:
@@ -320,22 +317,7 @@ def board_lines(view: PPView, now: datetime, names: d.Names = d.DEFAULT_NAMES) -
     return out
 
 
-def status_line(view: PPView, now: datetime, names: d.Names = d.DEFAULT_NAMES) -> str:
-    """One Home line, e.g. 'PrizePicks: 43 lines loaded for 1 game (Patriots at Bears). No entry yet:
-    need good picks from at least 2 teams. More lines load ... See tab 5.'"""
-    if "prizepicks" not in view.settings.venues:
-        return "PrizePicks: turned off (type: set venues kalshi,prizepicks)."
-    groups = _by_game(view)
-    if not groups:
-        return f"PrizePicks: no lines loaded yet. {_next_text(view, now)} {SEE_TAB}"
-    n = sum(len(lines) for _, lines in groups)
-    which = f" ({', '.join(_matchup(g, names) for g, _ in groups)})" if len(groups) <= 2 else ""
-    head = f"PrizePicks: {n} line{'s' * (n != 1)} loaded for {len(groups)} game{'s' * (len(groups) != 1)}{which}."
-    tail = "" if view.active else f" {_next_text(view, now)}"
-    return f"{head} {_entry_text(view)}{tail} {SEE_TAB}"
-
-
-# -- your own entry: pick lines on tab 5 ----------------------------------------------------------
+# -- your own entry: pick lines on Home ----------------------------------------------------------
 PickKey = tuple[str, str, float, str]  # (player, stat, line, side): survives view refreshes
 MIN_PICKS, MAX_PICKS = 2, 6
 _LEAGUE_WORDS = {"nfl": "NFL", "cfb": "college football"}
@@ -650,13 +632,93 @@ def _list_type_note(ev: EntryEval, s: Settings) -> str | None:
             f"({be + s.pp_margin_model:.1%} for model-only picks).")
 
 
-# -- what tab 5 writes to the log ---------------------------------------------------------------
+# -- suggested plays: the best few entries of each size, ranked ---------------------------------------
+PLAYS_PER_SIZE, PLAYS_LIMIT = 3, 10
+
+
+def suggested_plays(view: PPView) -> list[EntryEval]:
+    """Up to PLAYS_LIMIT 2- to 6-pick plays from the fresh lines (up to PLAYS_PER_SIZE of each size),
+    ranked by long-run growth of the bankroll; each worked out like YOUR ENTRY, so its buy-in is the
+    amount YOUR ENTRY would suggest."""
+    s = view.settings
+    lines = {(ln.player, ln.stat, ln.line, ln.side): ln for ln in pickable(view).values() if ln.fresh}
+    picks = [Pick(ln.player, ln.team or "", ln.game_id, ln.stat, ln.line, ln.side, ln.p, ln.anchored)
+             for ln in lines.values()]  # type: ignore[arg-type]
+    try:
+        table = payout_table(s)
+        found = top_entries(picks, s, allowed_structures(s), payouts=table, brute=s.pp_brute_force,
+                            per_size=PLAYS_PER_SIZE, limit=PLAYS_LIMIT)
+    except ValueError:  # a bad payout override: no plays rather than a broken tab
+        return []
+    out = []
+    for legs, *_ in found:
+        ev = evaluate_entry([lines[(pk.player, pk.stat, pk.line, pk.side)] for pk in legs], view)
+        if ev.ready:
+            out.append(ev)
+    return out
+
+
+_SUFFIXES = {"jr", "sr", "ii", "iii", "iv"}
+
+
+def _last_name(player: str) -> str:
+    parts = [w for w in player.split() if w.rstrip(".").lower() not in _SUFFIXES]
+    return parts[-1] if parts else player
+
+
+def play_row_text(ev: EntryEval, rank: int) -> str:
+    """'1. 3-pick Power Play - buy in $5.00, expect +$1.10 (+22.0%), profit chance 24.1% - Mahomes, Hurts, Kelce'."""
+    n, kind = ev.structure  # type: ignore[misc]
+    buy = f"buy in {d.money(ev.stake_cents)}" if ev.stake_cents > 0 else "no buy-in"
+    gain = (f"expect {'+' if ev.expected_profit_cents >= 0 else ''}{d.money(ev.expected_profit_cents)} "
+            f"({ev.ev:+.1%})" if ev.stake_cents > 0 else f"expect {ev.ev:+.1%} per $1")
+    who = ", ".join(_last_name(ln.player) for ln in ev.picks)
+    return f"{rank}. {_structure_words(n, kind)} - {buy}, {gain}, profit chance {ev.p_profit:.1%} - {who}"
+
+
+ONE_AT_A_TIME = ("Each buy-in assumes it is the only play you make; if you play more than one, use smaller "
+                 "amounts, since they all come out of the same bankroll and today's limit.")
+
+
+def plays_note(plays: list[EntryEval]) -> str | None:
+    """Why no play has a buy-in (once), or, when more than one has one, that each is worked out alone.
+    A play without a buy-in among others says 'no buy-in' on its own row."""
+    staked = sum(p.stake_cents > 0 for p in plays)
+    notes = [p.stake_note for p in plays if p.stake_cents <= 0 and p.stake_note]
+    if plays and not staked and notes:
+        return f"No buy-in: {_lower_first(notes[0])}"
+    out = [ONE_AT_A_TIME] if staked > 1 else []
+    if notes:
+        out.append(f"Plays marked no buy-in: {_lower_first(notes[0])}")
+    return " ".join(out) or None
+
+
+OLD_NOT_IN_PLAYS = "old prices, so not in a play"
+
+
+def pick_amount_text(ln: PPLine, plays: list[EntryEval]) -> str:
+    """Where a pick is used: 'play #2, $15.32 buy-in' for the best suggested play holding it."""
+    key = pick_key(ln)
+    for rank, ev in enumerate(plays, 1):
+        if key in {pick_key(x) for x in ev.picks}:
+            buy = f"{d.money(ev.stake_cents)} buy-in" if ev.stake_cents > 0 else "no buy-in"
+            return f"play #{rank}, {buy}"
+    return OLD_NOT_IN_PLAYS if not ln.fresh else "in no play"
+
+
+def opened_play_text(rank: int, ev: EntryEval) -> str:
+    n, kind = ev.structure  # type: ignore[misc]
+    buy = f" Suggested buy-in {d.money(ev.stake_cents)}." if ev.stake_cents > 0 else ""
+    return f"Opened suggested play #{rank} ({_structure_words(n, kind)}) in YOUR ENTRY.{buy}"
+
+
+# -- what picking writes to the log ---------------------------------------------------------------
 CANT_PICK = "That line can't be picked right now."
 WAIT_FOR_LINES = "Your picks' lines aren't loaded right now; wait for them to come back before recording."
 CLEARED = "Cleared your PrizePicks entry."
 ALREADY_EMPTY = "Your PrizePicks entry is already empty."
 NOT_RECORDED = "PrizePicks entry not recorded."
-ONLY_PP_OPENS = "Only PrizePicks entries can be opened on the PrizePicks tab."
+ONLY_PP_OPENS = "Only PrizePicks entries can be opened in YOUR ENTRY."
 
 
 def empty_entry_text(s: Settings) -> str:
@@ -676,7 +738,7 @@ def same_picks_text(rec_id: int) -> str:
 
 
 def opened_text(rec_id: int) -> str:
-    return f"Opened PrizePicks idea #{rec_id} in YOUR ENTRY on tab 5."
+    return f"Opened PrizePicks idea #{rec_id} in YOUR ENTRY."
 
 
 @dataclass(frozen=True)
@@ -702,41 +764,48 @@ def pick_row_text(ln: PPLine, view: PPView, best=None, gated: bool = True, match
     return f"{pick_words(ln)} - our chance {ln.p:.1%}{needs} {_source(ln, gated, now)}{where}"
 
 
-def best_rows(view: PPView, chosen: set[PickKey], names: d.Names = d.DEFAULT_NAMES) -> list[PickRow]:
-    """BEST PICKS NOW as selectable rows."""
-    best = best_structure(view.settings)
-    rows = []
-    for i, ln in enumerate(best_picks(view), 1):
-        g = view.games[ln.game_id]
-        k = pick_key(ln)
-        text = pick_row_text(ln, view, best, view.model_gated.get(g.league, True), _matchup(g, names))
-        rows.append(PickRow(f"{_mark(k in chosen)}{i}. {text}", k, k in chosen))
-    return rows
-
-
 NO_TEAM = "team unknown, can't be picked yet"
 
 
-def all_rows(view: PPView, chosen: set[PickKey], now: datetime, names: d.Names = d.DEFAULT_NAMES
-             ) -> list[PickRow]:
-    """ALL LINES as rows: a heading per game, then each line (lines we can't price are not pickable)."""
+NOT_RANKED = "Not ranked (no price or no team yet)"
+
+
+def ranked_lines(view: PPView) -> list[PPLine]:
+    """Every pickable line, best first: the most room between our chance and the chance it needs,
+    lines with fresh prices before older ones (suggested plays use fresh lines only)."""
+    best = best_structure(view.settings)
+
+    def room(ln: PPLine) -> float:
+        need = needed_chance(ln, view.settings, best)
+        return (ln.p or 0.0) - (need or 0.0)
+
+    return sorted(pickable(view).values(), key=lambda ln: (not ln.fresh, -room(ln), ln.player, ln.stat, ln.line))
+
+
+def all_rows(view: PPView, chosen: set[PickKey], now: datetime, names: d.Names = d.DEFAULT_NAMES,
+             plays: list[EntryEval] | None = None) -> list[PickRow]:
+    """ALL LINES as rows: every pickable line ranked best first, each with its game and the suggested
+    play it is in; then, under a heading, the lines we can't price or whose team we don't know."""
     best = best_structure(view.settings)
     rows: list[PickRow] = []
+    for rank, ln in enumerate(ranked_lines(view), 1):
+        g = view.games[ln.game_id]
+        gated = view.model_gated.get(g.league, True)
+        key = pick_key(ln)
+        text = pick_row_text(ln, view, best, gated, _matchup(g, names), now)
+        rows.append(PickRow(f"{_mark(key in chosen)}#{rank} {text} - {pick_amount_text(ln, plays or [])}", key,
+                            key in chosen))
+    rest = []
     for g, lines in _by_game(view):
-        k = sum(_clears(ln, view.settings, best) for ln in lines)
-        rows.append(PickRow(f"{_matchup(g, names)} - kickoff {d.when(g.kickoff, now)} PT - "
-                            f"{clear_text(k, len(lines))}", heading=True))
         gated = view.model_gated.get(g.league, True)
         for ln in lines:
             if ln.p is None or ln.side is None:
-                rows.append(PickRow(f"    {line_text(ln, gated, now)}"))
-                continue
-            if ln.team is None:
-                rows.append(PickRow(f"    {pick_row_text(ln, view, best, gated, now=now)} - {NO_TEAM}"))
-                continue
-            key = pick_key(ln)
-            rows.append(PickRow(_mark(key in chosen) + pick_row_text(ln, view, best, gated, now=now), key,
-                                key in chosen))
+                rest.append(PickRow(f"    {line_text(ln, gated, now)} - {_matchup(g, names)}"))
+            elif ln.team is None:
+                rest.append(PickRow(f"    {pick_row_text(ln, view, best, gated, _matchup(g, names), now)} - "
+                                    f"{NO_TEAM}"))
+    if rest:
+        rows += [PickRow(NOT_RANKED, heading=True), *rest]
     return rows
 
 

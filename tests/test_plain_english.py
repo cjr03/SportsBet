@@ -186,8 +186,8 @@ def test_info_line_and_open_summary_are_plain():
         clean(line)
     assert "$12.40 of today's $35.80 limit left" in segs and "next check 10:04 AM PT" in segs
     assert "no player lines yet" in segs and "Kalshi prices 1 min old" in segs
-    assert home.watch_summary(0, 0) == "Nothing on the watch list."
-    sentence(home.watch_summary(8, 9))
+    assert home.watch_summary(0) == "Nothing on the watch list."
+    sentence(home.watch_summary(9))
 
 
 def test_open_bets_and_empty_reasons_are_plain():
@@ -211,7 +211,7 @@ def test_open_bets_and_empty_reasons_are_plain():
         sentence(home.empty_reason(NOW, **{**args, **kw}))
 
 
-def test_prizepicks_tab_and_status_are_plain():
+def test_prizepicks_boxes_are_plain():
     ne_chi = Game("nfl:20261025:NE@CHI", "nfl", 2026, 8, NOW + timedelta(hours=5), "CHI", "NE")
     lines = [PPLine(ne_chi.game_id, "Caleb Williams", "CHI", "pass_yds", 249.5, "over", 0.56, True, NOW, True),
              PPLine(ne_chi.game_id, "D'Andre Swift", "CHI", "rush_yds", 60.5, "under", 0.58, False, NOW, True),
@@ -223,14 +223,15 @@ def test_prizepicks_tab_and_status_are_plain():
         for line in ppv.board_lines(view, NOW, NAMES):
             if line:
                 sentence(line.strip())
-        sentence(ppv.status_line(view, NOW, NAMES))
-    sentence(ppv.status_line(ppv.PPView([], games, ("no_lines", {}), 0, Settings()), NOW, NAMES))
+    for line in ppv.board_lines(ppv.PPView([], games, ("no_lines", {}), 0, Settings()), NOW, NAMES):
+        if line:
+            sentence(line.strip())
     from dataclasses import replace
     old = [replace(ln, fetched_at=NOW - timedelta(hours=7), fresh=False) for ln in lines]
     for refresh in (None, 0, 2):
         view = ppv.PPView(old, games, ("stale", {"seconds": 10800}), 0, Settings(), {"nfl": True},
                           refresh_games=refresh)
-        for line in [*ppv.board_lines(view, NOW, NAMES), ppv.nothing_to_pick_text(view), ppv.best_empty_text(view),
+        for line in [*ppv.board_lines(view, NOW, NAMES), ppv.nothing_to_pick_text(view), ppv.plays_empty_text(view),
                      *(r.text for r in ppv.all_rows(view, set(), NOW, NAMES))]:
             if line.strip():
                 sentence(line.strip().removeprefix("[ ] "))
@@ -375,7 +376,7 @@ async def test_texts_not_set_up_line_has_no_setting_names(services_mocked):
 
 
 def test_prizepicks_entry_rows_and_why_are_plain():
-    """Tab 5's pick lists, YOUR ENTRY box, rule messages and 'Why this pick?' panel."""
+    """Home's pick lists, YOUR ENTRY box, rule messages and 'Why this pick?' panel."""
     from gridiron_edge.pipeline import Budget, Snapshot
     from gridiron_edge.types import PropQuote
     ne_chi = Game("nfl:20261025:NE@CHI", "nfl", 2026, 8, NOW + timedelta(hours=5), "CHI", "NE")
@@ -391,9 +392,10 @@ def test_prizepicks_entry_rows_and_why_are_plain():
     view = ppv.PPView(lines, games, None, 0, Settings(), {"nfl": True}, props=props,
                       budget=Budget.from_snap(snap, Settings()), daily_left=10_000, watch_only={"nfl": True})
     chosen = {ppv.pick_key(lines[0])}
-    for row in ppv.all_rows(view, chosen, NOW, NAMES) + ppv.best_rows(view, chosen, NAMES):
+    for row in ppv.all_rows(view, chosen, NOW, NAMES):
         clean(row.text)
-        assert " PT " in row.text or not row.heading
+        assert row.text == ppv.NOT_RANKED or not row.heading
+        assert row.heading or " at " in row.text  # every line names its game
     for picks in ([], lines[:1], lines[:3], [lines[0], lines[0]], [lines[0], lines[2]]):
         ev = ppv.evaluate_entry(picks, view, NAMES)
         for text in ppv.entry_lines(ev, view, NAMES):
@@ -413,7 +415,7 @@ SETTING_NAME = re.compile(r"\b[a-z]+_[a-z_]+\b")
 
 
 def test_prizepicks_tab_log_messages_are_plain():
-    """What tab 5 writes to the log and status line: picks in and out, clearing, opening and recording."""
+    """What picking on Home writes to the log and status line: picks in and out, clearing, opening and recording."""
     ln = PPLine(GID, "Jalen Hurts", "PHI", "rush_yds", 34.5, "over", 0.55, True, NOW, True)
     view = ppv.PPView([ln], {GID: GAME}, None, 0, Settings(), {"nfl": True})
     msgs = [ppv.added_text(ln, 1), ppv.added_text(ln, 3), ppv.removed_text(ppv.pick_words(ln)),
@@ -455,6 +457,6 @@ async def test_confirm_screen_amount_errors_are_plain(typed):
 def test_keys_help_names_the_prizepicks_and_place_now_keys():
     keys = dict(HELP)["keys"]
     clean(keys)
-    for part in ("e opens a PrizePicks idea on tab 5", "Enter or space adds or removes a pick",
+    for part in ("e opens a PrizePicks idea in your entry", "Enter or space adds or removes a pick",
                  "x clears your entry", "c records an entry you placed"):
         assert part in keys

@@ -46,9 +46,10 @@ it in the app so the ledger matches.
   Kalshi's own price the further the line is from the sportsbooks'.
 - **Team and player models:** NFL and college ratings plus a player-yardage projector, blended in only
   after they beat the market in walk-forward backtests (until then their ideas are shown, not texted).
-- **PrizePicks builder:** loads lines for every game about 3 hours before kickoff and builds the best
-  Power or Flex entry, scoring same-game picks at the worst case for how they move together. You can
-  also pick lines yourself and see the entry's chances.
+- **PrizePicks (on Home):** loads lines for every game about 3 hours before kickoff and suggests
+  the best 2- to 6-pick Power or Flex play of each size, ranked by long-run bankroll growth, each with
+  a suggested buy-in from your bankroll limits. Same-game picks are scored at the worst case for how
+  they move together. You can also pick lines yourself and see the entry's chances.
 - **Locked profit and middles:** Kalshi pairs that pay back at least what they cost whatever the score,
   checked against every final score.
 - **Risk controls:** quarter Kelly with per-bet, per-game, per-slate and daily caps; markets pause
@@ -62,13 +63,13 @@ it in the app so the ledger matches.
 
 Screenshots use sample data.
 
-**Home:** bets to place now, open bets, and the watch list
+**Home:** bets to place now, PrizePicks plays and lines, open bets, and the watch list
 <img src="docs/screenshots/1-home.svg" width="800px">
 
 **"Why this bet?"** (press `d` on a bet)
 <img src="docs/screenshots/1-home-why.svg" width="800px">
 
-**PrizePicks:** every loaded line, the best picks, and your own entry
+**PrizePicks:** ranked suggested plays with a buy-in, your own entry, and every loaded line
 <img src="docs/screenshots/5-prizepicks.svg" width="800px">
 
 **Performance:** bankroll, returns by bet type, and how often our chances came true
@@ -197,9 +198,9 @@ uv run pytest -q
 
 ## Usage
 
-- Keys `1`-`5` switch tabs: Home, Performance, Scores, Log, PrizePicks.
+- Keys `1`-`4` switch tabs: Home (opens first, with PrizePicks), Performance, Scores, Log.
 - On a bet: `Enter` confirms you placed it, `s` skips it, `d` shows "Why this bet?".
-- On the PrizePicks tab: `Enter` adds or removes a pick from your entry, `x` clears it, `c` confirms it, `r` loads new lines (asks first with the credit cost). Lines older than 3 hours can still be picked for your own entry; their chance comes from the older sportsbook prices, with a warning, and they are never texted.
+- On Home's PrizePicks boxes: `Enter` on a suggested play opens it in your entry; on a line, `Enter` adds or removes a pick from your entry, `x` clears it, `c` confirms it, `r` loads new lines (asks first with the credit cost). Lines older than 3 hours can still be picked for your own entry; their chance comes from the older sportsbook prices, with a warning, and they are never texted.
 - Type commands in the bar at the bottom; it autocompletes.
 
 | Command | What it does |

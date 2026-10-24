@@ -137,7 +137,7 @@ def test_projector_only_pp_entry_is_observe_only(settings):
     recs = pp_entry_candidates(_pp_snap(books=False), settings, proj)
     assert len(recs) == 1 and recs[0].observe_only and recs[0].stake_cents == 0
     live = pp_entry_candidates(_pp_snap(books=False, projector_live=True), settings, proj)
-    assert len(live) == 1 and not live[0].observe_only and live[0].stake_cents > 0
+    assert live and all(not r.observe_only and r.stake_cents > 0 for r in live)
 
 
 def test_pp_entry_prefers_anchored_legs_for_a_live_entry(settings):
@@ -287,8 +287,8 @@ def test_pp_blocker_reasons(settings):
     old = NOW - timedelta(seconds=settings.props_stale_seconds + 60)
     aged = [replace(q, fetched_at=old, last_update=old) for q in snap.props]
     assert pp_blocker(replace(snap, props=aged), settings, Stub())[0] == "stale"
-    code, info = pp_blocker(_pp_snap(n=2), settings, Stub())
-    assert code == "few_lines" and info == {"priced": 2, "need": 3, "no_team": 0}
+    code, info = pp_blocker(_pp_snap(n=1), settings, Stub())
+    assert code == "few_lines" and info == {"priced": 1, "need": 2, "no_team": 0}
     one_team = replace(snap, player_teams={p: "KC" for p in snap.player_teams})
     assert pp_blocker(one_team, settings, Stub())[0] == "one_team"
     assert pp_blocker(replace(snap, gates={("nfl", "pp"): True}), settings, Stub())[0] == "watch_only"
@@ -303,4 +303,4 @@ def test_pp_blocker_too_few_good_picks(settings):
     # sportsbooks make every line a coin flip: nothing clears the needed chance
     flat = [replace(q, decimal=1.95) if q.book == "draftkings" else q for q in snap.props]
     code, info = pp_blocker(replace(snap, props=flat), settings, Stub())
-    assert code == "few_good" and info["good"] == 0 and info["need"] == 3
+    assert code == "few_good" and info["good"] == 0 and info["need"] == 2

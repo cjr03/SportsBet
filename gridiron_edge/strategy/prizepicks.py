@@ -1,4 +1,5 @@
 """PrizePicks math: payout tables, EV, Kelly, entry builder, and the DNP/tie revert ladder."""
+import heapq
 import itertools
 import math
 from collections import Counter
@@ -25,7 +26,8 @@ PAYOUTS: dict[Structure, dict[int, float]] = {
     (5, "flex"): {5: 10, 4: 2, 3: 0.4},
     (6, "flex"): {6: 25, 5: 2, 4: 0.4},
 }
-ALLOWED: list[Structure] = [(3, "power"), (4, "flex"), (5, "flex"), (6, "flex"), (5, "power"), (6, "power")]
+ALLOWED: list[Structure] = [(3, "power"), (4, "flex"), (5, "flex"), (6, "flex"), (5, "power"), (6, "power"),
+                            (2, "power"), (4, "power"), (3, "flex")]
 
 _COMBO_LIMIT = 200_000
 Payouts = dict[Structure, dict[int, float]]
@@ -255,6 +257,41 @@ def _top(qual: list[Pick], n: int, cap: int, taken: tuple[Pick, ...] = ()) -> li
     return None
 
 
+_SHORTLIST_COMBOS = 3_000  # pick sets looked at per number of picks, strongest picks first
+_SHORTLIST = 30  # of those, how many get the full same-game scoring
+
+
+def _shortlist(qual: list[Pick], n: int, cap: int) -> list[list[Pick]]:
+    """Valid n-pick sets of the strongest picks, highest sum of log chances first (the order of
+    power-play growth for independent picks; for flex plays only roughly). The pool keeps the
+    best cap + 1 picks of each game before the strongest picks are taken, so lines bunched in a
+    few games can't crowd out every valid set; it keeps the count of sets under _SHORTLIST_COMBOS."""
+    per_game: Counter = Counter()
+    spread = []
+    for pk in qual:
+        if per_game[pk.game_id] <= cap:
+            spread.append(pk)
+            per_game[pk.game_id] += 1
+    if len(spread) < n:
+        return []
+    m = n
+    while m < len(spread) and math.comb(m + 1, n) <= _SHORTLIST_COMBOS:
+        m += 1
+    top = spread[:m]
+    games, teams = [pk.game_id for pk in top], [pk.team for pk in top]
+    logs = [math.log(pk.p) for pk in top]
+    heap: list[tuple[float, tuple[int, ...]]] = []  # the _SHORTLIST best (sum of logs, indices) so far
+    for idx in itertools.combinations(range(m), n):  # indices keep the order (top is sorted by chance)
+        if len({teams[i] for i in idx}) < 2 or max(Counter(games[i] for i in idx).values()) > cap:
+            continue
+        item = (sum(logs[i] for i in idx), tuple(-i for i in idx))
+        if len(heap) < _SHORTLIST:
+            heapq.heappush(heap, item)
+        elif item > heap[0]:
+            heapq.heapreplace(heap, item)
+    return [[top[-i] for i in neg] for _, neg in sorted(heap, reverse=True)]
+
+
 def _greedy(qual: list[Pick], n: int, max_per_game: int = 1) -> list[list[Pick]]:
     """Candidate entries that contain the optimum for n legs under independent picks.
 
@@ -281,13 +318,15 @@ def _greedy(qual: list[Pick], n: int, max_per_game: int = 1) -> list[list[Pick]]
     return out
 
 
-def build_best_entry(picks: list[Pick], s: Settings, allowed=ALLOWED, max_brute: int = 25,
-                     payouts: Payouts = PAYOUTS, brute: bool = False
-                     ) -> tuple[list[Pick], Structure, float, float] | None:
-    """Best entry by full-Kelly growth: (legs, structure, EV, growth). Up to s.pp_max_per_game
-    picks per game; EV and growth are the worst case over the same-game correlation (copula_rho
-    with either sign, or none). Greedy per structure (exact under independent picks); brute=True
-    enumerates combinations instead."""
+_KEEP_PER_STRUCTURE = 60  # scored entries kept per structure for top_entries to choose among
+
+
+def _scored_per_structure(picks: list[Pick], s: Settings, allowed, max_brute: int, payouts: Payouts, brute: bool
+                          ) -> list[list[tuple[list[Pick], Structure, float, float]]]:
+    """For each allowed structure, its profitable candidate entries, best growth first (at most
+    _KEEP_PER_STRUCTURE): (legs, structure, EV, growth), EV and growth at the worst case over the
+    same-game correlation. Candidates are the greedy sets plus the strongest-picks shortlist (the
+    greedy sets are only exact for independent picks), or every combination with brute=True."""
     cap = s.pp_max_per_game
     best_per_player: dict[str, Pick] = {}
     for pk in picks:
@@ -296,31 +335,117 @@ def build_best_entry(picks: list[Pick], s: Settings, allowed=ALLOWED, max_brute:
             best_per_player[pk.player] = pk
     pool = sorted(best_per_player.values(), key=lambda pk: pk.p, reverse=True)[:max_brute]
 
-    best: tuple[list[Pick], Structure, float, float] | None = None
+    out: list[list[tuple[list[Pick], Structure, float, float]]] = []
+    dists_of: dict[frozenset, list[list[float]]] = {}  # 3-power and 3-flex share their pick sets
+    shortlists: dict[tuple, list[list[Pick]]] = {}
     for st in allowed:
         n = st[0]
         if st not in payouts or n not in payouts[st] or payouts[st][n] <= 1:
             continue
-        be = breakeven(st, payouts)
+        try:
+            be = breakeven(st, payouts)
+        except ValueError:  # an override that never breaks even between 30% and 90% per pick
+            continue
         qual = [pk for pk in pool if pk.p >= be + (s.pp_margin_market if pk.anchored else s.pp_margin_model)]
         if len(qual) < n:
             continue
         if not brute:
-            candidates = _greedy(qual, n, cap)
+            key = (n, tuple(qual))  # 4-flex and 4-power often qualify the same picks
+            if key not in shortlists:
+                shortlists[key] = _shortlist(qual, n, cap)
+            candidates = [*_greedy(qual, n, cap), *shortlists[key]]
         elif math.comb(len(qual), n) > _COMBO_LIMIT:
             chosen = _top(qual, n, cap)
             candidates = [chosen] if chosen is not None and _valid(chosen, cap) else []
         else:
             candidates = (list(c) for c in itertools.combinations(qual, n) if _valid(c, cap))
+        seen: set[frozenset] = set()
+        scored: list[tuple[list[Pick], Structure, float, float]] = []
         for legs in candidates:
-            dists = robust_distributions(legs, s.copula_rho)
+            key = frozenset(legs)
+            if not brute:  # greedy and shortlist sets overlap; combinations never repeat
+                if key in seen:
+                    continue
+                seen.add(key)
+                if key not in dists_of:
+                    dists_of[key] = robust_distributions(legs, s.copula_rho)
+                dists = dists_of[key]
+            else:
+                dists = robust_distributions(legs, s.copula_rho)
             ev = min(_ev(d, payouts[st]) for d in dists)
             if ev <= 0:
                 continue
             _, g = _kelly(dists, payouts[st])
-            if best is None or g > best[3]:
-                best = (legs, st, ev, g)
-    return best
+            scored.append((legs, st, ev, g))
+            if len(scored) > 4 * _KEEP_PER_STRUCTURE:  # brute force: keep memory bounded
+                scored = _ranked(scored)[:_KEEP_PER_STRUCTURE]
+        if scored:
+            out.append(_ranked(scored)[:_KEEP_PER_STRUCTURE])
+    return out
+
+
+def _ranked(entries):
+    """Best growth first; ties by the players' names, so the order never depends on input order."""
+    return sorted(entries, key=lambda e: (-e[3], sorted(pk.player for pk in e[0])))
+
+
+def _best_per_structure(picks: list[Pick], s: Settings, allowed, max_brute: int, payouts: Payouts, brute: bool
+                        ) -> list[tuple[list[Pick], Structure, float, float]]:
+    """The best entry of each allowed structure that shows a profit: (legs, structure, EV, growth)."""
+    return [found[0] for found in _scored_per_structure(picks, s, allowed, max_brute, payouts, brute)]
+
+
+def build_best_entry(picks: list[Pick], s: Settings, allowed=ALLOWED, max_brute: int = 25,
+                     payouts: Payouts = PAYOUTS, brute: bool = False
+                     ) -> tuple[list[Pick], Structure, float, float] | None:
+    """Best entry by full-Kelly growth: (legs, structure, EV, growth). Up to s.pp_max_per_game
+    picks per game; EV and growth are the worst case over the same-game correlation (copula_rho
+    with either sign, or none). Per structure, the greedy sets (exact under independent picks) and a
+    shortlist of the strongest valid sets are scored; brute=True enumerates combinations instead."""
+    found = _best_per_structure(picks, s, allowed, max_brute, payouts, brute)
+    return max(found, key=lambda e: e[3]) if found else None
+
+
+def best_by_size(picks: list[Pick], s: Settings, allowed=ALLOWED, max_brute: int = 25,
+                 payouts: Payouts = PAYOUTS, brute: bool = False
+                 ) -> list[tuple[list[Pick], Structure, float, float]]:
+    """The best entry for each number of picks (2 to 6), ranked by full-Kelly growth, best first."""
+    by_n: dict[int, tuple[list[Pick], Structure, float, float]] = {}
+    for e in _best_per_structure(picks, s, allowed, max_brute, payouts, brute):
+        n = e[1][0]
+        if n not in by_n or e[3] > by_n[n][3]:
+            by_n[n] = e
+    return sorted(by_n.values(), key=lambda e: -e[3])
+
+
+def top_entries(picks: list[Pick], s: Settings, allowed=ALLOWED, max_brute: int = 25,
+                payouts: Payouts = PAYOUTS, brute: bool = False, per_size: int = 3, limit: int = 10
+                ) -> list[tuple[list[Pick], Structure, float, float]]:
+    """Several good entries, ranked by full-Kelly growth, best first: (legs, structure, EV, growth).
+
+    The same search and scoring as build_best_entry, so the first entry is build_best_entry's. Each
+    pick set appears once, with its best structure. Up to per_size entries per number of picks; with
+    4 or more picks, two entries of the same size differ in at least 2 picks, so they are real
+    alternatives rather than one swapped pick.
+    """
+    best_set: dict[frozenset, tuple[list[Pick], Structure, float, float]] = {}
+    for found in _scored_per_structure(picks, s, allowed, max_brute, payouts, brute):
+        for e in found:
+            key = frozenset(e[0])
+            if key not in best_set or e[3] > best_set[key][3]:
+                best_set[key] = e
+    kept: list[tuple[list[Pick], Structure, float, float]] = []
+    for e in _ranked(best_set.values()):
+        n = len(e[0])
+        same = [k for k in kept if len(k[0]) == n]
+        if len(same) >= per_size:
+            continue
+        if n >= 4 and any(len(set(e[0]) & set(k[0])) > n - 2 for k in same):
+            continue
+        kept.append(e)
+        if len(kept) == limit:
+            break
+    return kept
 
 
 def revert(structure: Structure, dnps: int, ties: int, remaining_teams: int) -> Structure | None:

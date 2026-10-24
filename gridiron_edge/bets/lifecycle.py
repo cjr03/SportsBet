@@ -105,14 +105,14 @@ class Lifecycle:
             return self.get_rec(row["id"]), False
         state = "LOGGED" if rec.observe_only else "RECOMMENDED"
         with self.conn:
-            self.conn.execute(
+            self.conn.execute(  # older copies at other prices, watched ones included, are replaced
                 "UPDATE recommendations SET state='EXPIRED' "
-                "WHERE leg_key=? AND state IN ('RECOMMENDED','PENDING')", (rec.leg_key,))
+                "WHERE leg_key=? AND state IN ('RECOMMENDED','PENDING','LOGGED')", (rec.leg_key,))
             rec_id = self._insert(rec, now, rec.dedupe_key, state)
         return self.get_rec(rec_id), True
 
     def add_manual(self, rec: Recommendation, now: datetime) -> Recommendation:
-        """A bet idea you put together yourself (e.g. a PrizePicks entry picked on tab 5), saved as
+        """A bet idea you put together yourself (e.g. a PrizePicks entry picked on Home), saved as
         RECOMMENDED so confirm can record it. Its own dedupe key, so an earlier skipped or expired
         idea with the same picks never blocks it; other live ideas are left alone."""
         key = hashlib.sha1(f"{rec.dedupe_key}|manual|{now.isoformat()}".encode()).hexdigest()
@@ -195,8 +195,11 @@ class Lifecycle:
                stake_cents: int | None) -> int:
         """Write the bet, take its cost from the bankroll and mark the idea placed. The caller holds
         the transaction."""
-        if rec.state not in ("RECOMMENDED", "PENDING"):
+        watched = rec.observe_only and rec.state == "LOGGED"  # shown, not texted: you placed it anyway
+        if rec.state not in ("RECOMMENDED", "PENDING") and not watched:
             raise LifecycleError("not pending")
+        if watched and (stake_cents if rec.kind == "pp_entry" else qty) is None:  # we never suggested one
+            raise LifecycleError("watched pp needs amount" if rec.kind == "pp_entry" else "watched needs amount")
         if now >= rec.expires_at:
             raise LifecycleError("expired")
 
@@ -222,6 +225,9 @@ class Lifecycle:
         bet_id = cur.lastrowid
         self.ledger.post("stake", -(cost + fee), bet_id=bet_id, note=f"rec {rec.id}")
         self.conn.execute("UPDATE recommendations SET state='PLACED' WHERE id=?", (rec.id,))
+        self.conn.execute(  # other live copies of the same bet can't be recorded a second time
+            "UPDATE recommendations SET state='EXPIRED' "
+            "WHERE leg_key=? AND id!=? AND state IN ('RECOMMENDED','PENDING','LOGGED')", (rec.leg_key, rec.id))
         return bet_id
 
     def _live_successor(self, rec: Recommendation, now: datetime) -> Recommendation | None:

@@ -274,8 +274,7 @@ def test_watching_filters_dedupes_and_ranks():
     assert [r.id for r in out] == [2, 4]
     started = {GID: replace(GAME, status="live")}
     assert home.watching([b], NOW, started) == []
-    assert home.watch_summary(2, 2) is None
-    assert home.watch_summary(8, 11) == "3 more ideas on the watch list not shown."
+    assert home.watch_summary(0) == home.WATCH_EMPTY and home.watch_summary(11) == home.WATCH_HINT
 
 
 def test_watch_reasons():
@@ -296,6 +295,8 @@ def test_watch_reasons():
     assert head == "#9 Kalshi  Eagles win by 4 or more points vs Cowboys"
     assert detail == ("    47 cents · our chance 55% · about 7 cents profit per $1 bet · kickoff 1:20 PM PT"
                       " · not texted: our model is still being tested")
+    head, detail = home.watch_cells(rec(9, ev=0.07), NOW, games, "our model is still being tested", rank=2)
+    assert head == "2. Kalshi  Eagles win by 4 or more points vs Cowboys" and detail.endswith(" · idea #9")
 
 
 def test_open_bet_without_a_buyer_or_a_price():

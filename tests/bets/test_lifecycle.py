@@ -102,11 +102,20 @@ def test_confirm_insufficient_funds_atomic(conn):
     assert ledger.balance() == 500
 
 
-def test_observe_only_logged_not_confirmable(lc):
+def test_watched_idea_records_only_with_the_amount_you_say(lc):
+    """A watch-only idea has no suggested amount: confirm needs your contracts, then it is a real bet."""
     rec, _ = lc.upsert_recommendation(kalshi_rec(observe=True), NOW)
     assert lc.get_rec(rec.id).state == "LOGGED"
-    with pytest.raises(LifecycleError, match="not pending"):
+    with pytest.raises(LifecycleError, match="watched needs amount"):
         lc.confirm(rec.id, NOW)
+    bet_id = lc.confirm(rec.id, NOW, 0.40, 5)
+    bet = lc.conn.execute("SELECT * FROM bets WHERE id=?", (bet_id,)).fetchone()
+    assert bet["qty"] == 5 and bet["stake_cents"] == 200 and lc.get_rec(rec.id).state == "PLACED"
+    with pytest.raises(LifecycleError, match="not pending"):
+        lc.confirm(rec.id, NOW, 0.40, 5)  # once only
+    late, _ = lc.upsert_recommendation(kalshi_rec(observe=True, ticker="L"), NOW)
+    with pytest.raises(LifecycleError, match="expired"):
+        lc.confirm(late.id, late.expires_at, 0.40, 5)
 
 
 def test_expire_due(lc):
@@ -183,7 +192,7 @@ def test_placed_today_filters_by_day_and_skips_cancelled(lc):
 
 
 def test_add_manual_pp_entry_is_never_blocked_by_an_old_skipped_idea(lc):
-    """An entry you pick yourself on tab 5 gets its own idea even when the same picks were skipped."""
+    """An entry you pick yourself on Home gets its own idea even when the same picks were skipped."""
     leg = Leg("prizepicks", "x over 50.5", "over", 0.0, 0.6, "g", player="X", stat="rec_yds", line=50.5)
     rec = Recommendation(None, "pp_entry", [leg], 500, None, 0.1, 0.3, "3-power", NOW, NOW + timedelta(hours=3))
     old, _ = lc.upsert_recommendation(rec, NOW)
@@ -199,7 +208,7 @@ def test_add_manual_pp_entry_is_never_blocked_by_an_old_skipped_idea(lc):
 
 
 def test_record_manual_saves_idea_and_bet_together_or_not_at_all(lc):
-    """Tab 5's c: the self-built idea and its bet go in one transaction, so a failed record never
+    """Home's c: the self-built idea and its bet go in one transaction, so a failed record never
     leaves a stray idea behind in PLACE NOW."""
     leg = Leg("prizepicks", "x over 50.5", "over", 0.0, 0.6, "g", player="X", stat="rec_yds", line=50.5)
     rec = Recommendation(None, "pp_entry", [leg], 500, None, 0.1, 0.3, "3-power", NOW, NOW + timedelta(hours=3))
@@ -215,3 +224,27 @@ def test_record_manual_saves_idea_and_bet_together_or_not_at_all(lc):
     assert lc.get_rec(rec_id).state == "PLACED" and lc.ledger.balance() == 9300
     row = lc.conn.execute("SELECT * FROM bets WHERE id=?", (bet_id,)).fetchone()
     assert row["rec_id"] == rec_id and row["stake_cents"] == 700 and not lc.conn.in_transaction
+
+
+def test_recording_a_watched_idea_retires_its_older_copies(lc):
+    """Each price tick saves another watched copy; once one is recorded, no copy can be recorded again."""
+    old, _ = lc.upsert_recommendation(kalshi_rec(observe=True, price=0.46), NOW)
+    new, _ = lc.upsert_recommendation(kalshi_rec(observe=True, price=0.48), NOW)
+    assert lc.get_rec(old.id).state == "EXPIRED" and lc.get_rec(new.id).state == "LOGGED"
+    lc.conn.execute("UPDATE recommendations SET state='LOGGED' WHERE id=?", (old.id,))  # a copy saved before the fix
+    lc.confirm(new.id, NOW, 0.48, 10)
+    assert lc.get_rec(old.id).state == "EXPIRED"
+    with pytest.raises(LifecycleError, match="not pending"):
+        lc.confirm(old.id, NOW, 0.46, 10)
+    assert len(lc.open_bets()) == 1
+
+
+def test_watched_prizepicks_idea_needs_the_amount_you_put_in(lc):
+    leg = Leg("prizepicks", "x", "over", 0.0, 0.6, "nfl:20261025:DAL@PHI", player="A", stat="pass_yds", line=1.5)
+    rec = Recommendation(None, "pp_entry", [leg, replace(leg, player="B")], 0, None, 0.05, 0.3, "2-power", NOW,
+                         NOW + timedelta(hours=3), observe_only=True)
+    saved, _ = lc.upsert_recommendation(rec, NOW)
+    with pytest.raises(LifecycleError, match="watched pp needs amount"):
+        lc.confirm(saved.id, NOW, 0.5, 10)
+    lc.confirm(saved.id, NOW, None, None, 500)
+    assert lc.open_bets()[0]["stake_cents"] == 500

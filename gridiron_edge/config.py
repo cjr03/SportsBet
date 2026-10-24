@@ -77,7 +77,8 @@ class Settings:
     pp_mode: str = "fixed"
     pp_payouts_verified: bool = False
     pp_unverified_mult: float = 0.5
-    pp_structures: tuple[str, ...] = ("3-power", "4-flex", "5-flex", "6-flex", "5-power", "6-power")
+    pp_structures: tuple[str, ...] = ("3-power", "4-flex", "5-flex", "6-flex", "5-power", "6-power", "2-power",
+                                      "4-power", "3-flex")
     pp_payouts_json: str = ""
     pp_max_entries: int = 3
     pp_brute_force: bool = False

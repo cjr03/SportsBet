@@ -9,40 +9,55 @@ from gridiron_edge import describe as d
 from gridiron_edge.types import Recommendation
 
 
+WATCHED_NOTE = "This idea is on the watch list (not texted), so we suggest no amount: type what you put in."
+
+
 class ConfirmScreen(ModalScreen[tuple[float | None, int | None, int | None] | None]):
     """Confirm a recommendation, optionally overriding the fill price and quantity (Kalshi) or the amount
     put in (PrizePicks). Returns (price, contracts, stake in cents); None means cancelled."""
 
     BINDINGS = [("escape", "cancel", "Cancel")]
 
-    def __init__(self, rec: Recommendation, names: d.Names = d.DEFAULT_NAMES, warning: str | None = None):
+    def __init__(self, rec: Recommendation, names: d.Names = d.DEFAULT_NAMES, warning: str | None = None,
+                 watched: bool = False):
         super().__init__()
         self.rec = rec
         self.names = names
         self.warning = warning  # e.g. the PrizePicks prices are hours old
-        # old prices: no suggested amount; you type what you put in
-        self.suggested = 0 if warning else rec.stake_cents
+        self.watched = watched  # a watch-only idea: we suggest no amount, you say what you put in
+        # old prices or watch-only: no suggested amount; you type what you put in
+        self.suggested = 0 if warning or watched else rec.stake_cents
 
     def compose(self) -> ComposeResult:
         r = self.rec
         with Vertical(id="confirm-box"):
             if r.kind == "pp_entry":  # no price or contracts on PrizePicks: the amount you put in
-                which = f"PrizePicks entry #{r.id}" if r.id is not None else "this PrizePicks entry"
+                which = (f"watched PrizePicks idea #{r.id}" if self.watched else
+                         f"PrizePicks entry #{r.id}" if r.id is not None else "this PrizePicks entry")
                 amount = f"{d.money(self.suggested)}, " if self.suggested > 0 else ""
                 yield Static(f"Did you place {which} ({amount}{d.structure_text(r.structure)})?", id="confirm-title")
                 yield Static(Text(d.bet_text(r, self.names)), id="legs")
                 if self.warning:
                     yield Static(Text(f"Warning: {self.warning}"), id="confirm-warning")
+                elif self.watched:
+                    yield Static(Text(WATCHED_NOTE), id="confirm-warning")
                 yield Label("Amount you put in, in dollars (e.g. 10)")
                 yield Input(value=f"{self.suggested / 100:.2f}" if self.suggested > 0 else "", id="stake")
             else:
-                yield Static(f"Did you place bet idea #{r.id}?  Bet {d.money(r.stake_cents)} at {d.price_text(r)}",
-                             id="confirm-title")
+                title = (f"Did you place watched idea #{r.id}?  At {d.price_text(r)}" if self.watched else
+                         f"Did you place bet idea #{r.id}?  Bet {d.money(r.stake_cents)} at {d.price_text(r)}")
+                yield Static(title, id="confirm-title")
                 yield Static(Text(d.bet_text(r, self.names)), id="legs")
-                yield Label("Price you got, in dollars (e.g. 0.47)")
-                yield Input(value=f"{r.legs[0].price:.2f}", id="price")
+                if self.watched:
+                    yield Static(Text(WATCHED_NOTE), id="confirm-warning")
+                if r.kind in ("arb", "middle"):  # both sides are recorded at the prices shown
+                    prices = " and ".join(f"{round(leg.price * 100)} cents" for leg in r.legs)
+                    yield Static(Text(f"Recorded at {prices} for each pair of contracts."), id="pair-prices")
+                else:
+                    yield Label("Price you got, in dollars (e.g. 0.47)")
+                    yield Input(value=f"{r.legs[0].price:.2f}", id="price")
                 yield Label("How many contracts")
-                yield Input(value="" if r.qty is None else str(r.qty), id="qty")
+                yield Input(value="" if r.qty is None or self.watched else str(r.qty), id="qty")
             yield Static("", id="error")
             with Horizontal(id="buttons"):
                 yield Button("Yes, placed", id="ok", variant="success")
@@ -70,7 +85,8 @@ class ConfirmScreen(ModalScreen[tuple[float | None, int | None, int | None] | No
             if cents < 1:
                 raise ValueError("The amount must be more than $0.00")
             return None, None, cents
-        raw_p = self.query_one("#price", Input).value.strip()
+        prices = self.query("#price")
+        raw_p = prices.first(Input).value.strip() if prices else ""
         raw_q = self.query_one("#qty", Input).value.strip()
         price = None
         if raw_p:
@@ -80,6 +96,8 @@ class ConfirmScreen(ModalScreen[tuple[float | None, int | None, int | None] | No
                 raise ValueError("The price must be a number in dollars between 0 and 1, e.g. 0.47") from None
             if not 0 < price < 1:
                 raise ValueError("The price must be in dollars between 0 and 1, e.g. 0.47")
+        if self.watched and not raw_q:
+            raise ValueError("Type how many contracts you bought (we suggest no amount for watched ideas)")
         qty = None
         if raw_q:
             try:

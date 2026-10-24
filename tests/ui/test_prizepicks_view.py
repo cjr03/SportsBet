@@ -50,21 +50,6 @@ def test_board_groups_by_game_sorted_by_kickoff_and_chance():
     assert not any(w in " ".join(out) for w in JARGON)
 
 
-def test_home_status_line():
-    lines = [line(f"P{i}", 0.55) for i in range(43)]
-    v = view(lines, ("one_team", {}), next_load=NOW + timedelta(hours=1, minutes=23))
-    assert ppv.status_line(v, NOW) == (
-        "PrizePicks: 43 lines loaded for 1 game (Patriots at Bears). No entry yet: all the good picks are on "
-        "one team; PrizePicks needs picks from at least 2 teams. More lines load about 9:25 AM PT, 3 hours before "
-        "kickoff. See tab 5.")
-    ready = ppv.status_line(view(lines, None, active=1), NOW)
-    assert "1 entry ready in PLACE NOW." in ready and "No entry" not in ready
-    assert ppv.status_line(view([]), NOW) == \
-        "PrizePicks: no lines loaded yet. More lines load about 3 hours before each kickoff. See tab 5."
-    off = replace(view([]), settings=replace(Settings(), venues=("kalshi",)))
-    assert "turned off" in ppv.status_line(off, NOW)
-
-
 @pytest.mark.parametrize("code,info", [
     ("no_lines", {}), ("stale", {}), ("no_structures", {}), ("few_lines", {"priced": 1, "need": 3}),
     ("few_good", {"good": 2, "need": 3}), ("few_good", {"good": 0, "need": 3}), ("one_team", {}),
@@ -168,14 +153,14 @@ def test_evaluate_entry_matches_the_builder_on_the_same_picks():
 def test_entry_rules_give_plain_messages_not_errors():
     v = sized([])
     one = ppv.evaluate_entry(entry(THREE[0]), v)
-    assert not one.ready and one.problems == ["Pick at least 3 lines; the entry types we use need 3 to 6 picks."]
+    assert not one.ready and one.problems == ["Pick at least 2 lines; the entry types we use need 2 to 6 picks."]
     same_team = ppv.evaluate_entry(entry(("A", 0.62, NE_CHI, "CHI", "pass_yds"),
                                          ("B", 0.62, DAL_PHI, "CHI", "rush_yds")), v)
     assert "All your picks are on one team (Bears); PrizePicks needs picks from at least 2 different teams." \
         in same_team.problems
-    two = ppv.evaluate_entry(entry(THREE[0], THREE[2]), v)  # only 3- to 6-pick entries are allowed
-    assert two.problems == ["Pick at least 3 lines; the entry types we use need 3 to 6 picks."]
     gap = replace(v, settings=replace(Settings(), pp_structures=("3-power", "5-flex")))
+    two = ppv.evaluate_entry(entry(THREE[0], THREE[2]), gap)  # only 3- and 5-pick entries are allowed
+    assert two.problems == ["Pick at least 3 lines; the entry types we use need 3 to 6 picks."]
     four = ppv.evaluate_entry(entry(*THREE, ("Saquon Barkley", 0.62, DAL_PHI, "PHI", "rush_yds")), gap)
     assert four.problems == ["None of the entry types we use has 4 picks (we use entries of 3, 5 picks)."]
     crowded = ppv.evaluate_entry(entry(("A", 0.62, NE_CHI, "CHI", "pass_yds"), ("B", 0.62, NE_CHI, "NE", "pass_tds"),
@@ -233,20 +218,49 @@ def test_add_problem_and_reconcile():
     assert ppv.dropped_text(keys[2]).startswith("Removed A LESS than 249.5 passing yards from your PrizePicks entry")
 
 
-def test_pick_rows_mark_chosen_and_headings_are_not_pickable():
-    lines = [line("A", 0.52), line("B", 0.61), line("C", None), line("D", 0.59, game=DAL_PHI, team="PHI")]
+def test_pick_rows_ranked_best_first_across_games_with_their_play():
+    lines = [line("A", 0.52), line("B", 0.61), line("C", None), line("D", 0.59, game=DAL_PHI, team="PHI"),
+             line("E", 0.63, team=None)]
     v = view(lines)
     chosen = {ppv.pick_key(lines[1])}
     rows = ppv.all_rows(v, chosen, NOW)
-    assert rows[0].heading and rows[0].key is None and rows[0].text.startswith("Cowboys at Eagles - kickoff")
-    assert rows[1].text == "[ ] D MORE than 249.5 passing yards - our chance 59.0%, needs 56.2% (sportsbooks)"
-    b = next(r for r in rows if r.key == ppv.pick_key(lines[1]))
-    assert b.chosen and b.text.startswith("[x] B MORE")
-    c = next(r for r in rows if "C 249.5" in r.text)
-    assert c.key is None and not c.heading and c.text.endswith(ppv.NO_PRICE)
-    best = ppv.best_rows(v, chosen)
-    assert [r.text[:7] for r in best] == ["[x] 1. ", "[ ] 2. "]
-    assert best[0].text.endswith("(sportsbooks) - Patriots at Bears")
+    assert [r.key[0] for r in rows if r.key] == ["B", "D", "A"]  # most room above the needed chance first
+    assert rows[0].chosen and rows[0].text.startswith("[x] #1 B MORE")
+    assert rows[1].text == ("[ ] #2 D MORE than 249.5 passing yards - our chance 59.0%, needs 56.2% (sportsbooks)"
+                            " - Cowboys at Eagles - in no play")
+    assert rows[2].text.startswith("[ ] #3 A MORE") and "Patriots at Bears" in rows[2].text
+    assert rows[3].heading and rows[3].key is None and rows[3].text == ppv.NOT_RANKED
+    unranked = rows[4:]
+    assert all(r.key is None and not r.heading for r in unranked) and len(unranked) == 2
+    assert any(r.text.endswith(ppv.NO_TEAM) for r in unranked)
+    assert any("C 249.5" in r.text and ppv.NO_PRICE in r.text for r in unranked)
+    plays = ppv.suggested_plays(sized([*lines, line("F", 0.66, game=DAL_PHI, team="DAL")]))  # B pairs with F
+    with_plays = ppv.all_rows(v, set(), NOW, plays=plays)
+    b = next(r for r in with_plays if r.key == ppv.pick_key(lines[1]))
+    rank = next(i for i, ev in enumerate(plays, 1) if "B" in [ln.player for ln in ev.picks])
+    assert b.text.endswith(f"play #{rank}, {ppv.d.money(plays[rank - 1].stake_cents)} buy-in"), b.text
+    bare = ppv.all_rows(v, set(), NOW, plays=ppv.suggested_plays(view([*lines, line("F", 0.66, game=DAL_PHI,
+                                                                                    team="DAL")])))
+    assert next(r for r in bare if r.key == ppv.pick_key(lines[1])).text.endswith("play #1, no buy-in")
+
+
+def test_ranking_is_room_above_the_needed_chance_and_fresh_first():
+    """A model-only line needs more, so a higher chance can still rank lower; old lines come last."""
+    old = NOW - timedelta(hours=7)
+    lines = [line("M", 0.60, anchored=False), line("S", 0.59, game=DAL_PHI, team="PHI"),
+             replace(line("O", 0.75, game=DAL_PHI, team="DAL"), fetched_at=old, fresh=False),
+             line("T2", 0.58, stat="rush_yds"), line("T1", 0.58, stat="rec_yds")]
+    v = view(lines)
+    assert [ln.player for ln in ppv.ranked_lines(v)] == ["S", "M", "T1", "T2", "O"]
+    o = next(r for r in ppv.all_rows(v, set(), NOW) if " O MORE" in r.text)
+    assert o.text.startswith("[ ] #5 ") and o.text.endswith(ppv.OLD_NOT_IN_PLAYS)
+
+
+def test_unranked_lines_come_last_by_game_with_their_matchup():
+    lines = [line("C", None), line("U", None, game=DAL_PHI, team="PHI")]
+    rows = ppv.all_rows(view(lines), set(), NOW)
+    assert rows[0].text == ppv.NOT_RANKED and rows[0].heading
+    assert rows[1].text.endswith(" - Cowboys at Eagles") and rows[2].text.endswith(" - Patriots at Bears")
 
 
 def test_pick_why_lines():
@@ -280,8 +294,7 @@ def test_lines_with_unknown_team_show_but_cannot_be_picked():
     assert ppv.pick_key(lines[1]) not in ppv.pickable(v)
     row = next(r for r in ppv.all_rows(v, set(), NOW) if "NoTeam" in r.text)
     assert row.key is None and not row.heading and row.text.endswith("team unknown, can't be picked yet")
-    assert all(r.key is not None for r in ppv.best_rows(v, set()))
-    assert "NoTeam" not in " ".join(r.text for r in ppv.best_rows(v, set()))
+    assert all("NoTeam" not in [ln.player for ln in ev.picks] for ev in ppv.suggested_plays(v))
 
 
 def test_reconcile_keeps_picks_while_no_lines_are_priced():
@@ -320,7 +333,7 @@ def test_pick_log_messages_are_sentences():
     assert ppv.removed_text("Caleb Williams MORE than 249.5 passing yards") == \
         "Took Caleb Williams MORE than 249.5 passing yards out of your PrizePicks entry."
     assert ppv.same_picks_text(7) == "Same picks as PrizePicks idea #7 in PLACE NOW."
-    assert ppv.opened_text(7) == "Opened PrizePicks idea #7 in YOUR ENTRY on tab 5."
+    assert ppv.opened_text(7) == "Opened PrizePicks idea #7 in YOUR ENTRY."
 
 
 def test_old_lines_stay_pickable_with_their_age():
@@ -330,14 +343,15 @@ def test_old_lines_stay_pickable_with_their_age():
              replace(line("C", None), fetched_at=old, fresh=False)]
     v = view(stale, ("stale", {"seconds": 10800}), refresh_games=2)
     rows = ppv.all_rows(v, set(), NOW)
-    a = next(r for r in rows if r.text.startswith("[ ] A "))
-    assert a.key is not None and a.text.endswith("(sportsbook prices from 7 hr ago)"), a.text
-    b = next(r for r in rows if r.text.startswith("[ ] B "))
-    assert b.key is not None and b.text.endswith("(our model only, line from 7 hr ago)"), b.text
+    a = next(r for r in rows if " A MORE" in r.text)
+    assert a.key is not None and "(sportsbook prices from 7 hr ago) - Patriots at Bears" in a.text, a.text
+    b = next(r for r in rows if " B MORE" in r.text)
+    assert b.key is not None and "(our model only, line from 7 hr ago) - Cowboys at Eagles" in b.text, b.text
     c = next(r for r in rows if "C 249.5" in r.text)
-    assert c.key is None and c.text.endswith(ppv.NO_PRICE)
+    assert c.key is None and ppv.NO_PRICE in c.text
     assert set(ppv.pickable(v)) == {a.key, b.key}
-    assert ppv.best_picks(v) == [] and "Older lines are in ALL LINES" in ppv.best_empty_text(v)
+    assert ppv.best_picks(v) == [] and "Older lines are in ALL LINES" in ppv.plays_empty_text(v)
+    assert ppv.suggested_plays(v) == []  # plays use fresh lines only
     summary, _, _ = ppv.board_sections(v, NOW)
     assert summary[-1] == ("These lines are 7 hours old, past the 3 hours we trust for texted entries: you can "
                            "still pick them, but prices may have moved. To load new ones, press r or type pp "
@@ -365,18 +379,18 @@ def test_nothing_to_pick_says_why_and_what_to_do():
 
 def test_pick_counts_follow_the_entry_types_in_use():
     s = Settings()
-    assert ppv.min_picks(s) == 3
-    assert ppv.min_picks(replace(s, pp_structures=("2-power", "3-power"))) == 2
-    assert "(3 to 6 picks, at least 2 teams)" in ppv.entry_lines(ppv.evaluate_entry([], view([])), view([]))[0]
-    assert ppv.empty_entry_text(s) == "Your PrizePicks entry is empty: pick 3 to 6 lines with Enter first."
-    two = replace(view([]), settings=replace(s, pp_structures=("2-power",)))
-    assert "(2 to 6 picks" in ppv.entry_lines(ppv.evaluate_entry([], two), two)[0]
+    assert ppv.min_picks(s) == 2
+    assert ppv.min_picks(replace(s, pp_structures=("3-power", "5-flex"))) == 3
+    assert "(2 to 6 picks, at least 2 teams)" in ppv.entry_lines(ppv.evaluate_entry([], view([])), view([]))[0]
+    assert ppv.empty_entry_text(s) == "Your PrizePicks entry is empty: pick 2 to 6 lines with Enter first."
+    three = replace(view([]), settings=replace(s, pp_structures=("3-power",)))
+    assert "(3 to 6 picks" in ppv.entry_lines(ppv.evaluate_entry([], three), three)[0]
 
 
 def test_one_game_loaded_says_why_no_entry_can_be_built():
     lines = [line("Caleb Williams", 0.62), line("Drake Maye", 0.63, team="NE", stat="pass_tds"),
              line("Rhamondre Stevenson", 0.6, team="NE", stat="rush_yds")]
-    v = view(lines)
+    v = replace(view(lines), settings=replace(Settings(), pp_structures=("3-power", "5-flex")))
     note = ("Only 1 game has lines, and an entry needs 3 picks with at most 2 from one game. Wait for more "
             "games to load, or type: set pp_max_per_game 3")
     assert ppv.one_game_text(v) == note
@@ -400,3 +414,54 @@ def test_old_lines_summary_says_why_once():
     summary, _, _ = ppv.board_sections(view(stale, ("stale", {"seconds": 10800}), refresh_games=2), NOW)
     assert not any(s.startswith("No entry yet") for s in summary), summary
     assert summary[-1].startswith("These lines are 7 hours old, past the 3 hours we trust for texted entries")
+
+
+def test_suggested_plays_rank_several_plays_per_size_with_a_buy_in():
+    from collections import Counter
+    from gridiron_edge.strategy.prizepicks import Pick, best_by_size, payout_table
+    lines = [line("Caleb Williams", 0.64), line("Drake Maye", 0.63, team="NE", stat="pass_tds"),
+             line("Jalen Hurts", 0.66, game=DAL_PHI, team="PHI", stat="rush_yds"),
+             line("Dak Prescott", 0.62, game=DAL_PHI, team="DAL"),
+             line("D'Andre Swift", 0.4, stat="rush_yds")]  # LESS would be the side; below every needed chance
+    v = sized(lines)
+    plays = ppv.suggested_plays(v)
+    sizes = Counter(ev.structure[0] for ev in plays)
+    assert plays and all(2 <= n <= 4 for n in sizes) and max(sizes.values()) <= ppv.PLAYS_PER_SIZE  # 4 usable
+    assert sizes[2] > 1  # more than one play of a size
+    sets = [frozenset(ppv.pick_key(ln) for ln in ev.picks) for ev in plays]
+    assert len(set(sets)) == len(sets) and len(plays) <= ppv.PLAYS_LIMIT
+    assert all(ev.ready and ev.ev > 0 and ev.stake_cents >= 100 for ev in plays)
+    picks = [Pick(ln.player, ln.team, ln.game_id, ln.stat, ln.line, ln.side, ln.p, ln.anchored)
+             for ln in lines if ln.p >= 0.5]
+    top = best_by_size(picks, v.settings, payouts=payout_table(v.settings))[0]  # the builder's own best
+    assert sets[0] == {(pk.player, pk.stat, pk.line, pk.side) for pk in top[0]}
+    assert all("D'Andre Swift" not in [ln.player for ln in ev.picks] for ev in plays)
+    row = ppv.play_row_text(plays[0], 1)
+    n, kind = plays[0].structure
+    assert row.startswith(f"1. {n}-pick {'Power' if kind == 'power' else 'Flex'} Play - buy in $")
+    assert "profit chance" in row and row.endswith(", ".join(ln.player.split()[-1] for ln in plays[0].picks))
+    assert ppv.plays_note(plays) == ppv.ONE_AT_A_TIME and ppv.plays_note(plays[:1]) is None
+    no_buy = replace(plays[1], stake_cents=0, stake_note="Today's PrizePicks limit is used up.")
+    assert ppv.plays_note([plays[0], no_buy]) == "Plays marked no buy-in: today's PrizePicks limit is used up."
+    assert ppv.plays_note([plays[0], no_buy, plays[2]]) == (ppv.ONE_AT_A_TIME + " Plays marked no buy-in: today's "
+                                                             "PrizePicks limit is used up.")
+    assert ppv.plays_note([no_buy]) == "No buy-in: today's PrizePicks limit is used up."
+    assert not any(w in row for w in JARGON)
+    opened = ppv.opened_play_text(1, plays[0])
+    assert opened.startswith("Opened suggested play #1") and "Suggested buy-in $" in opened
+
+
+def test_suggested_plays_without_a_bankroll_say_why_no_buy_in():
+    lines = [line("Caleb Williams", 0.64), line("Jalen Hurts", 0.66, game=DAL_PHI, team="PHI", stat="rush_yds")]
+    plays = ppv.suggested_plays(view(lines))
+    assert [ev.structure for ev in plays] == [(2, "power")]
+    assert "no buy-in" in ppv.play_row_text(plays[0], 1) and "per $1" in ppv.play_row_text(plays[0], 1)
+    assert ppv.plays_note(plays) == "No buy-in: the bankroll isn't loaded yet, so there is no suggested amount."
+    assert ppv.plays_empty_text(view([])) == ppv.PLAYS_EMPTY
+
+
+def test_suggested_plays_survive_a_payout_override_with_no_break_even():
+    s = replace(Settings(), pp_payouts_json='{"3-power": {"3": 1.2}}')
+    lines = [line("A", 0.64), line("B", 0.66, game=DAL_PHI, team="PHI"), line("C", 0.63, team="NE")]
+    v = replace(sized(lines), settings=s)
+    assert all(ev.structure != (3, "power") for ev in ppv.suggested_plays(v))

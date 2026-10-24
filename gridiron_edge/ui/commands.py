@@ -47,9 +47,10 @@ HELP: list[tuple[str, str]] = [
     ("report", "how the bets have done so far"),
     ("drift reset <nfl|cfb> <ml|spread|total|prop|prizepicks> / drift reset all",
      "turn a paused kind of bet back on after our prices fell behind the market"),
-    ("keys", "1-5 switch tabs; Down arrow goes into the list on screen, Escape back to typing; "
-             "on Home's PLACE NOW: Enter confirms, s skips, d explains it, e opens a PrizePicks idea on tab 5; "
-             "on tab 5: Enter or space adds or removes a pick, d explains it, x clears your entry, "
+    ("keys", "1-4 switch tabs; Down arrow goes into the list on screen, Escape back to typing; "
+             "on PLACE NOW: Enter confirms, s skips, d explains it, e opens a PrizePicks idea in your entry; "
+             "on SUGGESTED PLAYS: Enter opens the play in your entry; "
+             "on its lines: Enter or space adds or removes a pick, d explains it, x clears your entry, "
              "c records an entry you placed, r loads new lines (asks first with the cost)"),
 ]
 

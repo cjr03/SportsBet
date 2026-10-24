@@ -431,7 +431,7 @@ class PlaceNowList(OptionList):
 
     BINDINGS = [Binding("s", "skip", "Skip"), Binding("d", "why", "Why this bet?"),
                 Binding("enter", "select", "Confirm", show=True),
-                Binding("e", "load_entry", "Open in PrizePicks tab")]
+                Binding("e", "load_entry", "Open in YOUR ENTRY")]
     FLASH_S = 1.5
 
     class ConfirmRequested(Message):
@@ -477,17 +477,20 @@ class PlaceNowList(OptionList):
         self.flash_ids.discard(rec_id)
         self._render()
 
-    def prompt(self, r: Recommendation) -> Text:
+    def prompt(self, r: Recommendation, rank: int) -> Text:
+        """Rank first (the list is best first), then where and the bet; the idea number ends the line below."""
         now, games, names = self._args
         rid, where, bet, price, stake, profit, left, kick = place_now_cells(r, now, games, names)
         out = Text()
-        out.append(f"#{rid} ", style=f"bold {ACCENT}")
+        out.append(f"{rank}. ", style=f"bold {ACCENT}")
         out.append(where, style=f"bold {PROFIT}" if r.kind == "arb" else "bold")
         out.append(f"  {bet}")
         width = _list_width(self)
-        append_packed(out, place_now_segments(r, [rid, where, bet, price, stake, profit, left, kick]), width)
-        if self.details.get(r.id):
-            append_packed(out, self.details[r.id].split(SEP), width, style="#94a3b8")
+        segments = place_now_segments(r, [rid, where, bet, price, stake, profit, left, kick])
+        detail = self.details.get(r.id)
+        append_packed(out, segments if detail else [*segments, f"idea #{rid}"], width)
+        if detail:
+            append_packed(out, [*detail.split(SEP), f"idea #{rid}"], width, style="#94a3b8")
         if r.id in self.flash_ids:
             out.stylize(f"on {ACCENT}", 0, len(out))
             out.stylize("#0b0f1a")
@@ -495,7 +498,7 @@ class PlaceNowList(OptionList):
 
     def _render(self) -> None:
         keep = self.highlighted_option.id if self.highlighted_option is not None else None
-        self.set_options(Option(self.prompt(r), id=str(r.id)) for r in self.recs)
+        self.set_options(Option(self.prompt(r, rank), id=str(r.id)) for rank, r in enumerate(self.recs, 1))
         if not self.recs:
             return
         ids = [str(r.id) for r in self.recs]
@@ -519,7 +522,7 @@ class PlaceNowList(OptionList):
             self.post_message(self.WhyRequested(i))
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
-        if action == "load_entry":  # only PrizePicks entries can be opened on tab 5
+        if action == "load_entry":  # only PrizePicks entries can be opened in YOUR ENTRY
             i = self._current()
             return any(r.id == i and r.kind == "pp_entry" for r in self.recs)
         return True
@@ -533,7 +536,7 @@ class PlaceNowList(OptionList):
 
 
 class PickList(OptionList):
-    """A PrizePicks pick list (BEST PICKS NOW, ALL LINES): game headings are disabled rows; Enter or
+    """A PrizePicks pick list (ALL LINES): game headings are disabled rows; Enter or
     space adds/removes the highlighted line in YOUR ENTRY, d explains it."""
 
     BINDINGS = [Binding("enter", "select", "Add/remove pick"), Binding("space", "select", "Add/remove pick",
@@ -616,6 +619,48 @@ class PickList(OptionList):
             self.post_message(self.WhyRequested(k))
 
 
+class PlayList(OptionList):
+    """SUGGESTED PLAYS on Home, best first: Enter opens the highlighted play in YOUR ENTRY."""
+
+    BINDINGS = [Binding("enter", "select", "Open this play"), Binding("space", "select", "Open this play",
+                                                                      show=False)]
+
+    class LoadRequested(Message):
+        def __init__(self, index: int):
+            super().__init__()
+            self.index = index
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.rows: list[str] = []
+
+    def set_rows(self, rows: list[str]) -> None:
+        if rows == self.rows:
+            return
+        keep = self.highlighted
+        self.rows = list(rows)
+        opts = []
+        for r in self.rows:
+            t = Text(r)
+            t.stylize(f"bold {PROFIT}", 0, r.index(".") + 1)
+            opts.append(Option(t))
+        self.set_options(opts)
+        if self.rows:
+            self.highlighted = min(keep or 0, len(self.rows) - 1)
+
+    @property
+    def selectable(self) -> bool:
+        return bool(self.rows)
+
+    def highlight_first(self) -> None:
+        if self.highlighted is None and self.rows:
+            self.highlighted = 0
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        event.stop()
+        self.post_message(self.LoadRequested(event.option_index))
+
+
 class OpenBetsList(OptionList):
     views: list[OpenBetView] = []
 
@@ -652,13 +697,35 @@ class OpenBetsList(OptionList):
 
 
 class WatchList(OptionList):
-    """Watch-only ideas (shown, not texted), two lines each."""
+    """Watch-only ideas (shown, not texted), two lines each; Enter or a click records one you placed
+    anyway, d explains it."""
 
-    rows: list[tuple[str, str]] = []
+    BINDINGS = [Binding("enter", "select", "I placed this"), Binding("d", "why", "Why this bet?")]
 
-    def set_rows(self, rows: list[tuple[str, str]]) -> None:
+    class ConfirmRequested(Message):
+        def __init__(self, rec_id: int):
+            super().__init__()
+            self.rec_id = rec_id
+
+    class WhyRequested(ConfirmRequested):
+        pass
+
+    rows: list[tuple[int, str, str]] = []
+
+    def set_rows(self, rows: list[tuple[int, str, str]]) -> None:
+        """rows: (idea id, headline, detail) from home.watch_cells."""
         self.rows = list(rows)
         self._render()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        event.stop()
+        if event.option.id is not None:
+            self.post_message(self.ConfirmRequested(int(event.option.id)))
+
+    def action_why(self) -> None:
+        opt = self.highlighted_option
+        if opt is not None and opt.id is not None:
+            self.post_message(self.WhyRequested(int(opt.id)))
 
     def on_resize(self) -> None:
         if self.rows:
@@ -666,15 +733,19 @@ class WatchList(OptionList):
 
     def _render(self) -> None:
         width = _list_width(self)
+        keep = self.highlighted_option.id if self.highlighted_option is not None else None
         opts = []
-        for i, (head, detail) in enumerate(self.rows):
+        for rec_id, head, detail in self.rows:
             t = Text()
             num, _, rest = head.partition(" ")
             t.append(f"{num} ", style=f"bold {ACCENT}")
             t.append(rest)
             append_packed(t, detail.strip().split(SEP), width, style="#94a3b8")
-            opts.append(Option(t, id=f"w{i}"))
+            opts.append(Option(t, id=str(rec_id)))
         self.set_options(opts)
+        ids = [o.id for o in opts]
+        if ids:
+            self.highlighted = ids.index(keep) if keep in ids else 0
 
 
 class Packed(Static):

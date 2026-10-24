@@ -536,7 +536,8 @@ def place_now_detail(rec: Recommendation, markets: dict[str, KalshiMarket], game
 
 
 # -- WATCHING ---------------------------------------------------------------------------------------
-WATCH_LIMIT = 8
+WATCH_EMPTY = "Nothing on the watch list."
+WATCH_HINT = "Click an idea or press Enter on it to record that you placed it; d explains it."
 
 
 def watch_reason(rec: Recommendation, games: dict[str, Game], gates: dict, paused: dict,
@@ -576,10 +577,11 @@ def watching(recs: Iterable[Recommendation], now: datetime, games: dict[str, Gam
 
 
 def watch_cells(rec: Recommendation, now: datetime, games: dict[str, Game], reason: str,
-                names: d.Names = d.DEFAULT_NAMES) -> tuple[str, str]:
-    """(headline, detail) for one WATCHING row."""
+                names: d.Names = d.DEFAULT_NAMES, rank: int | None = None) -> tuple[str, str]:
+    """(headline, detail) for one WATCHING row: its rank in the list (best first), or the idea number
+    without one; the detail ends with the idea number."""
     where = "PrizePicks" if rec.kind == "pp_entry" else "Kalshi"
-    head = f"#{rec.id} {where}  {d.bet_text(rec, names)}"
+    head = f"{rank}. {where}  {d.bet_text(rec, names)}" if rank else f"#{rec.id} {where}  {d.bet_text(rec, names)}"
     c = round(rec.ev * 100)
     parts = [] if rec.kind == "pp_entry" else [d.price_text(rec)]
     if rec.kind in ("kalshi_game", "kalshi_prop"):
@@ -589,13 +591,11 @@ def watch_cells(rec: Recommendation, now: datetime, games: dict[str, Game], reas
     if kick is not None:
         parts.append(f"kickoff {d.when(kick, now)} PT")
     parts.append(f"not texted: {reason}")
+    if rank:
+        parts.append(f"idea #{rec.id}")
     return head, "    " + " · ".join(parts)
 
 
-def watch_summary(shown: int, total: int) -> str | None:
-    if total == 0:
-        return "Nothing on the watch list."
-    if total > shown:
-        more = total - shown
-        return f"{_plural(more, 'more idea')} on the watch list not shown."
-    return None
+def watch_summary(total: int) -> str:
+    """The line under WATCHING: why it is empty, or how to record an idea you placed."""
+    return WATCH_EMPTY if total == 0 else WATCH_HINT

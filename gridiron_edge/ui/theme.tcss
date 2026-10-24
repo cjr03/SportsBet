@@ -34,11 +34,9 @@ BankrollHeader {
 #tabs Tabs { background: $bg; }
 #tabs Tab.-active { color: $accent; text-style: bold; }
 
-#home { layout: vertical; }
-#place-box { height: 3fr; }
-#open-box { height: 2fr; }
-#watch-box { height: 2fr; }
-#watch-box.is-empty { height: auto; }
+/* Home scrolls as one page: every box is as tall as its rows, each list capped so the rest stays near */
+#home-scroll { height: 1fr; scrollbar-size-vertical: 1; }
+#place-box, #open-box, #watch-box { height: auto; }
 #watch-box .empty { padding: 0 1; }
 #place-box, #open-box, #watch-box {
     background: $surface;
@@ -51,11 +49,13 @@ BankrollHeader {
 #watch-box:focus-within { border: round $accent; }
 #watch-box { border: round $pending 30%; border-title-color: $pending; }
 PlaceNowList, OpenBetsList, WatchList {
-    height: 1fr;
+    height: auto;
     background: $surface;
     border: none;
     padding: 0;
 }
+#place-now { max-height: 12; }
+#open-bets { max-height: 10; }
 PlaceNowList > .option-list--option { padding: 0 1; }
 OpenBetsList > .option-list--option { padding: 0 1; }
 WatchList > .option-list--option { padding: 0 1; }
@@ -70,36 +70,32 @@ WatchList > .option-list--option { padding: 0 1; }
     color: #94a3b8;
 }
 
-#pp-status {
-    height: auto;
-    padding: 0 2;
-    color: #94a3b8;
-}
-#prizepicks { layout: vertical; }
-#pp-summary-box, #pp-best-box, #pp-entry-box { height: auto; }
-#pp-scroll { height: 1fr; min-height: 6; }
-#pp-summary-box, #pp-best-box, #pp-entry-box, #pp-scroll {
+#pp-summary-box, #pp-plays-box, #pp-entry-box, #pp-scroll { height: auto; }
+#pp-summary-box, #pp-plays-box, #pp-entry-box, #pp-scroll {
     background: $surface;
     border: round $accent 40%;
     border-title-color: $accent;
     border-title-style: bold;
 }
-#pp-best-box { border: round $profit 40%; border-title-color: $profit; }
+#pp-plays-box { border: round $profit 40%; border-title-color: $profit; }
 #pp-entry-box { border: round $pending 40%; border-title-color: $pending; }
 #pp-entry-scroll { height: auto; max-height: 35vh; }
-#prizepicks.-short #pp-entry-scroll { max-height: 25vh; }
+#home.-short #pp-entry-scroll { max-height: 25vh; }
 #pp-entry-keys { height: auto; padding: 0 1; color: $pending; }
 #pp-scroll:focus-within { border: round $accent; }
-#pp-best-box:focus-within { border: round $profit; }
+#pp-plays-box:focus-within { border: round $profit; }
 #pp-entry-box:focus-within { border: round $pending; }
 #pp-summary, #pp-entry { padding: 0 1; }
-#pp-best-empty { padding: 0 1; }
-PickList { background: $surface; border: none; padding: 0; }
-PickList:focus { border: none; }
-#pp-best { height: auto; max-height: 6; }
-#prizepicks.-short #pp-best { max-height: 4; }
-#pp-board { height: 1fr; }
-PickList > .option-list--option { padding: 0 1; }
+#pp-plays-empty, #pp-plays-note { padding: 0 1; }
+#pp-plays-note { height: auto; color: $pending; }
+PickList, PlayList { background: $surface; border: none; padding: 0; }
+PickList:focus, PlayList:focus { border: none; }
+#pp-plays { height: auto; max-height: 10; }
+#home.-short #pp-plays { max-height: 4; }
+#home.-short.-picking #pp-plays { max-height: 2; }
+#home.-short.-picking #pp-board { max-height: 22vh; }
+#pp-board { height: auto; min-height: 4; max-height: 60vh; }
+PickList > .option-list--option, PlayList > .option-list--option { padding: 0 1; }
 PickList > .option-list--option-disabled { padding: 0 1; }
 
 #performance { layout: vertical; }

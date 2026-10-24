@@ -6,7 +6,9 @@ from textual.widgets import Input, Static, TabbedContent
 from gridiron_edge.app import GridironApp
 from gridiron_edge.scheduler import Job
 from gridiron_edge.ui.screens import ConfirmScreen, WhyScreen
-from gridiron_edge.ui.widgets import BankrollHeader, EventLog, InfoLine, OpenBetsList, PickList, PlaceNowList
+from gridiron_edge.ui.widgets import (
+    BankrollHeader, EventLog, InfoLine, OpenBetsList, PickList, PlaceNowList, PlayList, WatchList,
+)
 
 # Five minutes after the fixtures' odds were pulled; Sunday's SEA game is ~31 h away.
 NOW = datetime(2026, 10, 31, 18, 5, tzinfo=UTC)
@@ -275,8 +277,8 @@ async def test_number_keys_switch_tabs_only_when_bar_empty(services_mocked):
     async with app.run_test(size=(100, 30)) as pilot:
         await app.workers.wait_for_complete()
         tabs = app.query_one("#tabs", TabbedContent)
-        assert tabs.active == "home"
-        for key, tab in (("2", "performance"), ("3", "scores"), ("4", "log"), ("5", "prizepicks"), ("1", "home")):
+        assert tabs.active == "home"  # Home, with the PrizePicks boxes, opens first
+        for key, tab in (("2", "performance"), ("3", "scores"), ("4", "log"), ("1", "home")):
             await pilot.press(key)
             await pilot.pause()
             assert tabs.active == tab
@@ -299,7 +301,7 @@ async def test_home_empty_state_explains_itself(services_mocked):
         assert msg and ("Next check" in msg or "Checking now" in msg)
         assert "No open bets" in str(app.query_one("#open-empty", Static).render())
         place = app.query_one("#place-box")
-        assert place.region.height >= 8 and place.region.right <= 100
+        assert empty.region.height >= 1 and place.region.height >= 3 and place.region.right <= 100
         assert app.query_one(BankrollHeader).region.height == 1
         assert str(app.query_one("#watch-empty", Static).render()) == "Nothing on the watch list."
         info = app.query_one(InfoLine)
@@ -319,10 +321,10 @@ async def test_home_place_why_skip_and_open_bets(services_mocked, load):
         app.refresh_views()
         await pilot.pause()
         text = home_text(app)
-        assert "#1 Kalshi  Seahawks beat Bears" in text and "expected profit $" in text
+        assert "1. Kalshi  Seahawks beat Bears" in text and "expected profit $" in text and "idea #1" in text
         assert "our chance " in text and "pays $" in text and " contract" in text
         assert not [w for w in JARGON if w in text], text
-        await pilot.press("down")  # from the empty command bar into the list
+        await pilot.press("1", "down")  # Home, then from the empty command bar into PLACE NOW
         await pilot.press("d")
         await pilot.pause()
         assert isinstance(app.screen, WhyScreen)
@@ -392,29 +394,24 @@ def test_today_profit_counts_bets_settled_today_that_were_placed_yesterday(servi
     assert app._today_profit(NOW) == -100
 
 
-async def test_prizepicks_tab_and_home_status_line(services_mocked):
+async def test_prizepicks_boxes_on_home(services_mocked):
     svc = services_mocked()
     app = GridironApp(svc, clock=lambda: NOW)
     async with app.run_test(size=(120, 40)) as pilot:
         await app.workers.wait_for_complete()  # first run probes one game's props (PrizePicks included)
         app.refresh_views()
         await pilot.pause()
-        status = str(app.query_one("#pp-status", Static).render())
-        assert status.startswith("PrizePicks: ") and "loaded for 1 game (Bears at Seahawks)" in status
-        assert "See tab 5." in status
-        await pilot.press("5")
-        await pilot.pause()
         summary = str(app.query_one("#pp-summary", Static).render())
         board = "\n".join(r.text for r in app.query_one("#pp-board", PickList).rows)
-        assert "Lines as of" in summary and "Bears at Seahawks - kickoff" in board
+        assert "Lines as of" in summary and "- Bears at Seahawks - team unknown" in board
         assert "needs about" in summary and "per pick" in summary
         titles = [app.query_one(f"#{i}").border_title
-                  for i in ("pp-summary-box", "pp-best-box", "pp-entry-box", "pp-scroll")]
-        assert titles == ["PRIZEPICKS", "BEST PICKS NOW", "YOUR ENTRY", "ALL LINES"]
+                  for i in ("pp-summary-box", "pp-plays-box", "pp-entry-box", "pp-scroll")]
+        assert titles == ["PRIZEPICKS", "SUGGESTED PLAYS (best first)", "YOUR ENTRY", "ALL LINES (best first)"]
         assert app.focused is app.query_one("#cmd")  # the command bar keeps typing letters
         await pilot.press("down")
         await pilot.pause()
-        assert isinstance(app.focused, PickList)  # Down goes into the picks on tab 5
+        assert isinstance(app.focused, (PlayList, PickList))  # PLACE NOW is empty: Down goes into the plays and picks
 
 
 def _pp_dump(app) -> str:
@@ -440,7 +437,8 @@ def seed_pp(svc, game_id: str, seen: datetime = NOW - timedelta(minutes=5)) -> N
 
 
 async def test_prizepicks_pick_two_lines_and_record_entry(services_mocked):
-    """Press 5, move, Enter on two picks from different teams, see YOUR ENTRY, c records the bet."""
+    """Press 1, Enter opens the top suggested play, x clears it; Enter on two picks from different teams in
+    ALL LINES, see YOUR ENTRY, c records the bet."""
     svc = services_mocked(pp_structures=("2-power", "3-power", "4-flex", "5-flex", "6-flex"))
     svc.ledger.deposit(100_000)
     app = GridironApp(svc, clock=lambda: NOW)
@@ -450,15 +448,27 @@ async def test_prizepicks_pick_two_lines_and_record_entry(services_mocked):
                           if g.home == "SEA"))
         app.refresh_views()
         await pilot.pause()
-        await pilot.press("5", "down")
+        await pilot.press("1", "down")
         await pilot.pause()
-        best = app.query_one("#pp-best", PickList)
-        assert app.focused is best, _pp_dump(app)
-        rows = best.rows
+        plays = app.query_one("#pp-plays", PlayList)
+        assert app.focused is plays, _pp_dump(app)
+        assert plays.rows[0].startswith("1. 2-pick Power Play - buy in $"), plays.rows
+        await pilot.press("enter")  # open the top play in YOUR ENTRY
+        await pilot.pause()
+        assert len(app._pp_selected) == 2 and "Opened suggested play #1" in log_lines(app)[-1]
+        assert "Suggested amount: $" in str(app.query_one("#pp-entry", Static).render())
+        await pilot.press("x")
+        await pilot.pause()
+        assert app._pp_selected == []
+        best = app.query_one("#pp-board", PickList)
+        best.focus()
+        await pilot.pause()
+        rows = [r for r in best.rows if r.key is not None]
         assert [r.key[0] for r in rows] == ["Geno Smith", "Caleb Williams", "Kenneth Walker"], _pp_dump(app)
         await pilot.press("enter")  # Geno Smith
         await pilot.pause()
-        assert best.rows[0].text.startswith("[x] 1. Geno Smith MORE than 229.5 passing yards - our chance ")
+        assert best.rows[0].text.startswith("[x] #1 Geno Smith MORE than 229.5 passing yards - our chance ")
+        assert best.rows[0].text.endswith("- Bears at Seahawks - play #1, $2.09 buy-in"), best.rows[0].text
         await pilot.press("down", "down", "enter")  # Kenneth Walker: same team, so not ready yet
         await pilot.pause()
         entry = str(app.query_one("#pp-entry", Static).render())
@@ -499,7 +509,9 @@ async def test_prizepicks_why_and_clear_keys(services_mocked):
         seed_pp(svc, next(g.game_id for g in svc.registry.all_since(NOW - timedelta(days=1)) if g.home == "SEA"))
         app.refresh_views()
         await pilot.pause()
-        await pilot.press("5", "down", "enter")
+        await pilot.press("1")
+        app.query_one("#pp-board", PickList).focus()
+        await pilot.press("enter")
         await pilot.pause()
         assert len(app._pp_selected) == 1
         await pilot.press("d")
@@ -510,7 +522,7 @@ async def test_prizepicks_why_and_clear_keys(services_mocked):
         assert "DraftKings, line 229.5: MORE $1.52, LESS $2.58" in text and "Needed chance:" in text and "line pulled at" in text
         await pilot.press("escape")
         await pilot.pause()
-        app.query_one("#pp-best", PickList).focus()
+        app.query_one("#pp-board", PickList).focus()
         await pilot.press("x")
         await pilot.pause()
         assert app._pp_selected == [] and "Cleared your PrizePicks entry." in log_lines(app)[-1]
@@ -547,8 +559,8 @@ async def test_place_now_e_opens_prizepicks_idea_and_c_reuses_its_id(services_mo
         await pilot.pause()
         await pilot.press("e")
         await pilot.pause()
-        assert app.query_one("#tabs", TabbedContent).active == "prizepicks"
-        assert isinstance(app.focused, PickList)  # from a list (not the command bar): straight into the picks
+        assert app.query_one("#tabs", TabbedContent).active == "home"
+        assert isinstance(app.focused, (PlayList, PickList))  # from a list (not the bar): straight into the picks
         assert [k[0] for k in app._pp_selected] == ["Geno Smith", "Caleb Williams"]
         entry = str(app.query_one("#pp-entry", Static).render())
         assert f"Same picks as PrizePicks idea #{saved.id} in PLACE NOW." in entry, entry
@@ -585,7 +597,7 @@ async def test_help_lines_keep_commands_lowercase(services_mocked):
         await submit(app, pilot, "help")
         text = "\n".join(log_lines(app))
         assert "Type: pp add " in text and "Type: confirm <id> [price] [contracts]  -  You placed" in text
-        assert "Pp add" not in text and "Notify test" not in text and "Keys: 1-5 switch tabs" in text
+        assert "Pp add" not in text and "Notify test" not in text and "Keys: 1-4 switch tabs" in text
 
 
 async def test_set_message_uses_plain_words(services_mocked):
@@ -597,8 +609,8 @@ async def test_set_message_uses_plain_words(services_mocked):
         assert log_lines(app)[-1].endswith("Setting changed: bet size (share of the ideal amount) is now 0.2.")
 
 
-async def test_tab5_from_command_bar_keeps_letters_typing(services_mocked):
-    """Pressing 5 in the empty command bar must not turn the next letters into PrizePicks keys."""
+async def test_tab1_from_command_bar_keeps_letters_typing(services_mocked):
+    """Pressing 1 in the empty command bar must not turn the next letters into PrizePicks keys."""
     svc = services_mocked()
     svc.ledger.deposit(100_000)
     app = GridironApp(svc, clock=lambda: NOW)
@@ -608,18 +620,18 @@ async def test_tab5_from_command_bar_keeps_letters_typing(services_mocked):
         app.refresh_views()
         await pilot.pause()
         cmd = app.query_one("#cmd", Input)
-        await pilot.press("5")
+        await pilot.press("2", "1")
         await pilot.pause()
-        assert app.query_one("#tabs", TabbedContent).active == "prizepicks" and app.focused is cmd
+        assert app.query_one("#tabs", TabbedContent).active == "home" and app.focused is cmd
         await pilot.press("c", "o", "n", "f", "i", "r", "m", "space", "1", "3", "x", "d")
         await pilot.pause()
         assert cmd.value == "confirm 13xd" and not isinstance(app.screen, (ConfirmScreen, WhyScreen))
-        assert app._pp_selected == [] and app.query_one("#tabs", TabbedContent).active == "prizepicks"
+        assert app._pp_selected == [] and app.query_one("#tabs", TabbedContent).active == "home"
         cmd.value = ""
         await pilot.press("down")
         await pilot.pause()
-        assert app.query_one("#tabs", TabbedContent).active == "prizepicks"
-        assert isinstance(app.focused, PickList) and app.focused.id == "pp-best"
+        assert app.query_one("#tabs", TabbedContent).active == "home"
+        assert isinstance(app.focused, PlayList) and app.focused.id == "pp-plays"
         await pilot.press("escape")
         await pilot.pause()
         assert app.focused is cmd
@@ -643,7 +655,7 @@ async def test_prizepicks_old_lines_can_still_be_picked_and_recorded(services_mo
         await pilot.pause()
         summary = str(app.query_one("#pp-summary", Static).render())
         assert "7 hours old" in summary and "pp refresh" in summary, summary
-        await pilot.press("5", "down")
+        await pilot.press("1", "down")
         await pilot.pause()
         board = app.query_one("#pp-board", PickList)
         assert app.focused is board, _pp_dump(app)
@@ -691,7 +703,7 @@ async def test_prizepicks_nothing_to_pick_says_why(services_mocked):
         svc.latest["props"] = []
         app.refresh_views()
         await pilot.pause()
-        await pilot.press("5", "down")
+        await pilot.press("1", "down")
         await pilot.pause()
         assert "No line can be picked yet: lines load about 3 hours before kickoff, or type pp refresh" \
             in log_lines(app)[-1], log_lines(app)[-3:]
@@ -723,7 +735,7 @@ async def test_prizepicks_r_asks_before_loading_lines(services_mocked):
         summary = str(app.query_one("#pp-summary", Static).render())
         assert "press r" in summary and "about 3 Odds API credits" in summary, summary
         before = svc.budgets["odds_api"].remaining()
-        await pilot.press("5", "down", "r")
+        await pilot.press("1", "down", "r")
         await pilot.pause()
         assert isinstance(app.screen, AskScreen)
         assert "3 Odds API credits" in app.screen.text
@@ -766,8 +778,9 @@ def seed_pp6(svc, sea_game) -> None:
     svc.latest["props"] = out
 
 
-async def test_prizepicks_tab_fits_at_100_by_30_with_six_picks(services_mocked):
-    """ALL LINES and the 'Press c' line stay on screen with a full entry on a small terminal."""
+async def test_prizepicks_fits_at_100_by_30_with_six_picks(services_mocked):
+    """ALL LINES and the 'Press c' line stay on screen with a full entry on a small terminal: Home scrolls
+    YOUR ENTRY to the top while picking."""
     svc = services_mocked(pp_max_per_game=3)
     svc.ledger.deposit(100_000)
     app = GridironApp(svc, clock=lambda: NOW)
@@ -776,7 +789,7 @@ async def test_prizepicks_tab_fits_at_100_by_30_with_six_picks(services_mocked):
         seed_pp6(svc, next(g for g in svc.registry.all_since(NOW - timedelta(days=1)) if g.home == "SEA"))
         app.refresh_views()
         await pilot.pause()
-        await pilot.press("5")
+        await pilot.press("4")
         await pilot.pause()
         board = app.query_one("#pp-board", PickList)
         board.focus()
@@ -787,9 +800,91 @@ async def test_prizepicks_tab_fits_at_100_by_30_with_six_picks(services_mocked):
             await pilot.press("down", "enter")
             await pilot.pause()
         assert len(app._pp_selected) == 6, log_lines(app)[-3:]
-        pane = app.query_one("#prizepicks").region
+        pane = app.query_one("#home-scroll").region
         keys = app.query_one("#pp-entry-keys", Static)
         assert "Press c after you place it on PrizePicks" in str(keys.render())
-        for w in (keys, board, app.query_one("#pp-entry-box"), app.query_one("#pp-scroll")):
+        for w in (keys, board, app.query_one("#pp-entry-box")):  # Home scrolls on below ALL LINES
             assert w.region.height > 0 and pane.contains_region(w.region), (w.id, w.region, pane)
         assert board.region.height >= 4 and app.focused is board
+
+
+def _watched(svc, n: int) -> list:
+    """n watch-only Kalshi ideas on the SEA game (LOGGED, not texted), as the scan saves them."""
+    from gridiron_edge.types import Leg, Recommendation
+    g = _sea(svc)
+    out = []
+    for i in range(n):
+        leg = Leg("kalshi", f"SEA by {i}.5", "yes", 0.40, 0.47, g.game_id, ticker=f"KXNFLSPREAD-SEA{i}", line=i + 0.5)
+        rec = Recommendation(None, "kalshi_game", [leg], 0, 25, 0.05, 0.47, None, NOW, NOW + timedelta(hours=3),
+                             observe_only=True)
+        out.append(svc.lifecycle.upsert_recommendation(rec, NOW)[0])
+    return out
+
+
+async def test_watching_shows_every_idea_and_records_one_you_placed(services_mocked):
+    svc = services_mocked()
+    svc.ledger.deposit(100_000)
+    app = GridironApp(svc, clock=lambda: NOW)
+    async with app.run_test(size=(120, 50)) as pilot:
+        await app.workers.wait_for_complete()
+        recs = _watched(svc, 11)
+        app.refresh_views()
+        await pilot.pause()
+        watch = app.query_one("#watching", WatchList)
+        assert watch.option_count == 11  # the whole list, not the first 8
+        assert app.query_one("#watch-summary").text == "Click an idea or press Enter on it to record that you " \
+                                                       "placed it; d explains it."
+        await pilot.press("down")  # nothing to place or pick: Down from the command bar lands in WATCHING
+        await pilot.pause()
+        assert app.focused is watch
+        top = watch.highlighted_option.id
+        await pilot.press("d")
+        await pilot.pause()
+        assert isinstance(app.screen, WhyScreen) and app.screen.lines[0].startswith("Watch-only: not texted")
+        await pilot.press("escape", "enter")
+        await pilot.pause()
+        assert isinstance(app.screen, ConfirmScreen) and str(app.screen.rec.id) == top
+        assert app.screen.query_one("#qty", Input).value == ""  # watch-only: we suggest no amount
+        await pilot.click("#ok")
+        await pilot.pause()
+        assert "Type how many contracts" in str(app.screen.query_one("#error", Static).render())
+        app.screen.query_one("#qty", Input).value = "10"
+        await pilot.pause(0.6)  # past the double-click window, so this is a fresh click
+        await pilot.click("#ok")
+        await pilot.pause()
+        (bet,) = svc.lifecycle.open_bets()
+        assert str(bet["rec_id"]) == top and bet["qty"] == 10 and bet["stake_cents"] == 400
+        assert "recorded from idea #" + top in "\n".join(log_lines(app))
+        assert watch.option_count == 10 and app.query_one("#open-bets", OpenBetsList).option_count == 1
+        await pilot.click(watch, offset=(4, 1))  # a click on a row records it too
+        await pilot.pause()
+        assert isinstance(app.screen, ConfirmScreen) and app.screen.rec.id in {r.id for r in recs}
+        await pilot.press("escape")
+        await pilot.pause()
+        assert "not recorded" in log_lines(app)[-1]
+
+
+async def test_watched_pair_records_at_its_leg_prices_without_a_price_box(services_mocked):
+    from gridiron_edge.types import Leg, Recommendation
+    svc = services_mocked()
+    svc.ledger.deposit(100_000)
+    app = GridironApp(svc, clock=lambda: NOW)
+    async with app.run_test(size=(120, 50)) as pilot:
+        await app.workers.wait_for_complete()
+        g = _sea(svc)
+        legs = [Leg("kalshi", "SEA by 3.5", "yes", 0.40, 0.5, g.game_id, ticker="KXA"),
+                Leg("kalshi", "CHI by 2.5", "yes", 0.55, 0.5, g.game_id, ticker="KXB")]
+        rec, _ = svc.lifecycle.upsert_recommendation(Recommendation(
+            None, "middle", legs, 0, 5, 0.03, 0.1, None, NOW, NOW + timedelta(hours=3), observe_only=True), NOW)
+        app.refresh_views()
+        await pilot.pause()
+        app.query_one("#watching", WatchList).focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(app.screen, ConfirmScreen) and not app.screen.query("#price")
+        assert "Recorded at 40 cents and 55 cents" in str(app.screen.query_one("#pair-prices", Static).render())
+        app.screen.query_one("#qty", Input).value = "5"
+        await pilot.click("#ok")
+        await pilot.pause()
+        (bet,) = svc.lifecycle.open_bets()
+        assert bet["rec_id"] == rec.id and bet["stake_cents"] == 475

@@ -1282,8 +1282,9 @@ class Services:
 
     async def _job_scan(self, job: Job, now: datetime):
         what = job.args.get("what", "all")
-        recs = [r for r in pipeline.scan(self.snapshot(now), self.settings, self.projector, _league_of)
-                if self._wanted(r, what)]
+        snap = self.snapshot(now)  # reads the database here; the scan itself is pure, so it runs off the UI loop
+        found = await asyncio.to_thread(pipeline.scan, snap, self.settings, self.projector, _league_of)
+        recs = [r for r in found if self._wanted(r, what)]
         out = []
         families: set[str] = set()  # one text per idea family (e.g. every ladder pair on a game) per scan
         same_family = held = 0
@@ -1373,7 +1374,7 @@ class Services:
                       watch_only=held, **self._pp_refresh_state(now))
 
     def _pp_refresh_state(self, now: datetime) -> dict:
-        """What `pp refresh` (key r on tab 5) could load now, for the PrizePicks summary."""
+        """What `pp refresh` (key r on Home) could load now, for the PrizePicks summary."""
         if self.odds is None or self.odds.disabled:
             return {"refresh_games": None, "refresh_cost": PROPS_COST}
         games, text = self.pp_refresh_plan(now)

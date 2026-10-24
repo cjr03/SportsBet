@@ -104,19 +104,20 @@ def _pk(name, team, game, p, side="over"):
 
 
 def test_two_same_game_picks_allowed(settings):
-    # only two games have lines: a 3-pick Power needs two picks from one of them
+    # only two games have lines: a 3-pick entry needs two picks from one of them
     picks = [_pk("A", "KC", "g1", 0.66), _pk("B", "BUF", "g1", 0.65), _pk("C", "MIA", "g2", 0.64)]
     legs, st, ev, g = build_best_entry(picks, settings)
-    assert st == (3, "power") and {p.player for p in legs} == {"A", "B", "C"} and ev > 0
+    assert st[0] == 3 and {p.player for p in legs} == {"A", "B", "C"} and ev > 0
 
 
 def test_three_same_game_picks_not_allowed_by_default(settings):
     picks = [_pk("A", "KC", "g1", 0.70), _pk("B", "BUF", "g1", 0.70), _pk("C", "KC", "g1", 0.70)]
     assert settings.pp_max_per_game == 2
-    assert build_best_entry(picks, settings) is None
-    assert build_best_entry(picks, settings, brute=True) is None
+    for brute in (False, True):  # only a 2-pick entry fits
+        legs, st, _, _ = build_best_entry(picks, settings, brute=brute)
+        assert st[0] == 2 and len(legs) == 2
     legs, st, _, _ = build_best_entry(picks, _replace(settings, pp_max_per_game=3))
-    assert st == (3, "power") and len(legs) == 3
+    assert st[0] == 3 and len(legs) == 3
 
 
 def test_same_game_entry_still_needs_two_teams(settings):
@@ -203,3 +204,107 @@ def test_greedy_never_beats_brute_with_correlation(settings):
         assert len({p.team for p in legs}) >= 2 and len({p.player for p in legs}) == len(legs)
         assert max(Counter(p.game_id for p in legs).values()) <= settings.pp_max_per_game
         assert brute is not None and greedy[3] <= brute[3] + 1e-9
+
+
+def _many(n=14, games=6, lo=0.58, hi=0.68):
+    step = (hi - lo) / max(n - 1, 1)
+    return [Pick(f"P{i}", f"T{i % (2 * games)}", f"g{i % games}", "rush_yds", 50.5, "over", hi - i * step, i % 3 != 0)
+            for i in range(n)]
+
+
+@pytest.mark.parametrize("cap", [1, 2, 3])
+def test_top_entries_lead_with_the_builders_best_and_rank_by_growth(cap, settings):
+    from gridiron_edge.strategy.prizepicks import top_entries
+    s = _replace(settings, pp_max_per_game=cap)
+    picks = _many()
+    found = top_entries(picks, s)
+    best = build_best_entry(picks, s)
+    assert found and found[0][3] >= best[3] - 1e-12
+    assert {pk.player for pk in found[0][0]} == {pk.player for pk in best[0]}
+    growth = [e[3] for e in found]
+    assert growth == sorted(growth, reverse=True) and all(e[2] > 0 and e[3] > 0 for e in found)
+
+
+def test_top_entries_keep_distinct_alternatives_within_the_limits(settings):
+    from collections import Counter
+    from gridiron_edge.strategy.prizepicks import _valid, top_entries
+    s = _replace(settings, pp_max_per_game=2)
+    found = top_entries(_many(20), s, per_size=3, limit=10)
+    assert len(found) <= 10
+    sizes = Counter(len(e[0]) for e in found)
+    assert max(sizes.values()) <= 3 and any(v > 1 for v in sizes.values())
+    sets = [frozenset(pk.player for pk in e[0]) for e in found]
+    assert len(set(sets)) == len(sets)  # one structure per pick set
+    for i, a in enumerate(found):
+        assert _valid(a[0], 2)
+        for b in found[:i]:
+            n = len(a[0])
+            if n == len(b[0]) and n >= 4:
+                assert len(set(a[0]) & set(b[0])) <= n - 2  # real alternatives, not one swapped pick
+    assert len(top_entries(_many(20), s, per_size=1, limit=3)) == 3
+
+
+def test_top_entries_none_when_nothing_clears(settings):
+    from gridiron_edge.strategy.prizepicks import top_entries
+    weak = [Pick(f"P{i}", f"T{i}", f"g{i}", "x", 1.5, "over", 0.53, True) for i in range(8)]
+    assert top_entries(weak, settings) == []
+    one_team = [Pick(f"P{i}", "KC", f"g{i}", "x", 1.5, "over", 0.65, True) for i in range(6)]
+    assert top_entries(one_team, settings) == []
+
+
+def test_top_entries_brute_force_lead_with_the_brute_best(settings):
+    from gridiron_edge.strategy.prizepicks import top_entries
+    s = _replace(settings, pp_max_per_game=2)
+    picks = _many(9)
+    found, best = top_entries(picks, s, brute=True), build_best_entry(picks, s, brute=True)
+    assert found and found[0][3] == pytest.approx(best[3]) and set(found[0][0]) == set(best[0])
+
+
+def test_top_entries_offer_big_alternatives_when_strong_lines_bunch_in_two_games(settings):
+    """The 16 strongest lines are in two games: 5- and 6-pick alternatives still come from the rest."""
+    from collections import Counter
+    from gridiron_edge.strategy.prizepicks import top_entries
+    s = _replace(settings, pp_max_per_game=2)
+    strong = [Pick(f"s{i}", f"T{i % 4}", f"g{i % 2}", "x", 1.5, "over", 0.66 - i * 0.001, True) for i in range(16)]
+    rest = [Pick(f"w{i}", f"U{i}", f"g{2 + i % 6}", "x", 1.5, "over", 0.63, True) for i in range(12)]
+    sizes = Counter(len(e[0]) for e in top_entries(strong + rest, s, limit=15))
+    assert sizes[5] > 1 and sizes[6] > 1
+
+
+def test_builder_skips_a_structure_that_never_breaks_even(settings):
+    from gridiron_edge.strategy.prizepicks import PAYOUTS, top_entries
+    odd = {**PAYOUTS, (3, "power"): {3: 1.2}}
+    picks = _many(8)
+    assert all(e[1] != (3, "power") for e in top_entries(picks, settings, payouts=odd))
+
+
+@pytest.mark.parametrize("only", ["_shortlist", "_greedy"])
+def test_each_candidate_search_alone_still_finds_the_optimum(settings, monkeypatch, only):
+    """Under independent picks the greedy sets hold the optimum, and on slates that fit its window so
+    does the shortlist: switching the other one off must not change the best entry."""
+    import random
+    from gridiron_edge.strategy import prizepicks as pp
+    other = "_greedy" if only == "_shortlist" else "_shortlist"
+    monkeypatch.setattr(pp, other, lambda *a, **k: [])
+    s = _replace(settings, copula_rho=0.0)
+    rng = random.Random(11)
+    for trial in range(25):
+        picks = [Pick(f"P{i}", rng.choice(["KC", "BUF", "MIA"]), f"g{rng.randint(0, 5)}", "x", 1.5, "over",
+                      rng.uniform(0.52, 0.68), rng.random() < 0.7) for i in range(rng.randint(4, 10))]
+        brute, found = build_best_entry(picks, s, brute=True), build_best_entry(picks, s)
+        assert (brute is None) == (found is None)
+        if brute is not None:
+            assert found[3] == pytest.approx(brute[3], abs=1e-9), (trial, only)
+
+
+def test_greedy_alone_finds_the_optimum_past_the_shortlist_window(settings, monkeypatch):
+    """25 picks is past the shortlist's window for 6-pick sets: greedy still guarantees the optimum."""
+    import random
+    from gridiron_edge.strategy import prizepicks as pp
+    monkeypatch.setattr(pp, "_shortlist", lambda *a, **k: [])
+    s = _replace(settings, copula_rho=0.0, pp_max_per_game=1)
+    rng = random.Random(3)
+    picks = [Pick(f"P{i}", f"T{i}", f"g{i}", "x", 1.5, "over", rng.uniform(0.55, 0.68), True) for i in range(25)]
+    best = build_best_entry(picks, s, allowed=[(6, "power")])
+    top6 = sorted(picks, key=lambda pk: -pk.p)[:6]  # independent, one per game: the 6 strongest are optimal
+    assert set(best[0]) == set(top6)

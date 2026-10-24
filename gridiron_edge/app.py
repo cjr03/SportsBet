@@ -1,4 +1,4 @@
-"""The Textual app: focus-mode tabs (Home, Performance, Scores, Log, PrizePicks), command bar, scheduler workers."""
+"""The Textual app: focus-mode tabs (Home, Performance, Scores, Log), command bar, scheduler workers."""
 import json
 import math
 from collections.abc import Callable
@@ -26,7 +26,7 @@ from gridiron_edge.ui import prizepicks as pp_ui
 from gridiron_edge.ui.commands import COMMAND_WORDS, HELP, Command, CommandError, parse_command
 from gridiron_edge.ui.screens import AskScreen, ConfirmScreen, WhyScreen
 from gridiron_edge.ui.widgets import (
-    BalanceChart, BankrollHeader, EventLog, InfoLine, KpiTiles, OpenBetsList, PerfMoney, PerfTables, PickList,
+    BalanceChart, BankrollHeader, EventLog, InfoLine, KpiTiles, OpenBetsList, PerfMoney, PerfTables, PickList, PlayList,
     PlaceNowList, QuotaBar, ScoresPanel, Section, WatchList,
 )
 from gridiron_edge.ui import scores as scores_ui
@@ -50,27 +50,31 @@ _SETTING_WORDS = {
 }
 
 
-TABS = ("home", "performance", "scores", "log", "prizepicks")
+TABS = ("home", "performance", "scores", "log")
 
 
 def _money(cents: int) -> str:
     return d.money(cents)
 
 
-class PrizePicksPane(TabPane):
-    """Tab 5. Keys while a pick list has focus: Enter/space add or remove a pick, d explains it,
-    x clears YOUR ENTRY, c records an entry you placed on PrizePicks yourself, r loads new lines
-    (asks first with the cost, like typing pp refresh)."""
+class HomePane(TabPane):
+    """Tab 1: PLACE NOW, the PrizePicks boxes, OPEN BETS and WATCHING in one scrolling page. Keys on
+    SUGGESTED PLAYS: Enter/space open a play in YOUR ENTRY; on a pick list: Enter/space add or remove a
+    pick, d explains it; anywhere on the page: x clears YOUR ENTRY, c records an entry you placed on
+    PrizePicks yourself, r loads new lines (asks first with the cost, like typing pp refresh)."""
 
-    BINDINGS = [Binding("x", "app.pp_clear", "Clear entry"), Binding("c", "app.pp_confirm", "I placed this entry"),
+    BINDINGS = [Binding("x", "app.pp_clear", "Clear entry"), Binding("c", "app.pp_confirm", "Record YOUR ENTRY"),
                 Binding("r", "app.pp_refresh_key", "Load new lines")]
+
+    def on_descendant_focus(self, event: events.DescendantFocus) -> None:
+        self.app.keep_picks_in_view()
 
 
 class CommandInput(Input):
-    """The command bar. While it is empty, 1-5 switch tabs and Down jumps to the PLACE NOW list."""
+    """The command bar. While it is empty, 1-4 switch tabs and Down jumps into the lists on screen."""
 
     async def _on_key(self, event: events.Key) -> None:
-        if not self.value and event.character in ("1", "2", "3", "4", "5"):
+        if not self.value and event.character in ("1", "2", "3", "4"):
             event.stop()
             event.prevent_default()
             self.app.action_show_tab(TABS[int(event.character) - 1])
@@ -81,6 +85,10 @@ class CommandInput(Input):
             self.app.action_focus_list()
             return
         await super()._on_key(event)
+
+
+WATCHED_WHY = ("Watch-only: not texted, so we suggest no amount to bet. Any size below is what it would be once "
+               "this kind of bet is texted.")
 
 
 def _funds_error(e: InsufficientFunds) -> str:
@@ -94,6 +102,10 @@ _ERROR_WORDS = {
     "not pending": "That bet idea can't be confirmed any more (it was already placed, skipped or replaced).",
     "expired": "That bet idea has gone stale; wait for a fresh one.",
     "bet is not open": "That bet is already settled.",
+    "watched needs amount": ("That idea is on the watch list, so we suggest no amount: say how many contracts "
+                             "(confirm <id> <price> <contracts>), or press Enter on it under WATCHING."),
+    "watched pp needs amount": ("That PrizePicks idea is on the watch list, so we suggest no amount: press Enter on "
+                                "it under WATCHING and type the amount you put in."),
 }
 
 
@@ -118,7 +130,6 @@ class GridironApp(App):
         Binding("2", "show_tab('performance')", "Performance"),
         Binding("3", "show_tab('scores')", "Scores"),
         Binding("4", "show_tab('log')", "Log"),
-        Binding("5", "show_tab('prizepicks')", "PrizePicks"),
         Binding("colon,slash", "focus_command", "Type a command", show=False),
         Binding("escape", "focus_command", "Command bar", show=False),
     ]
@@ -130,20 +141,38 @@ class GridironApp(App):
         services.clock = clock  # the scheduler's view of "upcoming" follows the app clock
         self._active_jobs: set[tuple] = set()
         self._pp_view: pp_ui.PPView | None = None  # rebuilt with the other views, not every tick
-        self._pp_selected: list[pp_ui.PickKey] = []  # YOUR ENTRY on tab 5, in the order picked
+        self._pp_selected: list[pp_ui.PickKey] = []  # YOUR ENTRY on Home, in the order picked
         self._pp_eval: pp_ui.EntryEval | None = None
+        self._pp_plays: tuple[pp_ui.PPView, list[pp_ui.EntryEval]] | None = None  # worked out once per view
 
     def compose(self) -> ComposeResult:
         yield BankrollHeader()
         yield InfoLine(id="info-line")
         with TabbedContent(id="tabs", initial="home"):
-            with TabPane("1 Home", id="home"):
-                yield Section("PLACE NOW", PlaceNowList(id="place-now"), "place-empty", id="place-box")
+            with HomePane("1 Home", id="home"), VerticalScroll(id="home-scroll"):
+                yield Section("PLACE NOW (best first: most expected profit)", PlaceNowList(id="place-now"), "place-empty",
+                              id="place-box")
+                with Vertical(id="pp-summary-box") as box:
+                    box.border_title = "PRIZEPICKS"
+                    yield Static("", id="pp-summary")
+                with Vertical(id="pp-plays-box") as box:
+                    box.border_title = "SUGGESTED PLAYS (best first)"
+                    yield Static(pp_ui.PLAYS_EMPTY, id="pp-plays-empty", classes="empty")
+                    yield PlayList(id="pp-plays")
+                    yield Static("", id="pp-plays-note")
+                with Vertical(id="pp-entry-box") as box:
+                    box.border_title = "YOUR ENTRY"
+                    with VerticalScroll(id="pp-entry-scroll"):  # focusable: arrows scroll a long entry
+                        yield Static("", id="pp-entry")
+                    yield Static("", id="pp-entry-keys")
+                with Vertical(id="pp-scroll") as box:
+                    box.border_title = "ALL LINES (best first)"
+                    yield PickList(id="pp-board")
                 yield Section("OPEN BETS", OpenBetsList(id="open-bets"), "open-empty", "open-summary",
                               id="open-box")
-                yield Section("WATCHING (shown, not texted)", WatchList(id="watching"), "watch-empty",
+                yield Section("WATCHING (shown, not texted; best first: most profit per $1)", WatchList(id="watching"),
+                              "watch-empty",
                               "watch-summary", id="watch-box")
-                yield Static("", id="pp-status")
             with TabPane("2 Performance", id="performance"):
                 with Horizontal(id="perf-top"):
                     yield BalanceChart()
@@ -156,63 +185,60 @@ class GridironApp(App):
                 yield ScoresPanel()
             with TabPane("4 Log", id="log"):
                 yield EventLog()
-            with PrizePicksPane("5 PrizePicks", id="prizepicks"):
-                with Vertical(id="pp-summary-box") as box:
-                    box.border_title = "PRIZEPICKS"
-                    yield Static("", id="pp-summary")
-                with Vertical(id="pp-best-box") as box:
-                    box.border_title = "BEST PICKS NOW"
-                    yield Static("No pick clears its needed chance yet.", id="pp-best-empty", classes="empty")
-                    yield PickList(id="pp-best")
-                with Vertical(id="pp-entry-box") as box:
-                    box.border_title = "YOUR ENTRY"
-                    with VerticalScroll(id="pp-entry-scroll"):  # focusable: arrows scroll a long entry
-                        yield Static("", id="pp-entry")
-                    yield Static("", id="pp-entry-keys")
-                with Vertical(id="pp-scroll") as box:
-                    box.border_title = "ALL LINES"
-                    yield PickList(id="pp-board")
         yield Static("", id="status")
         with Horizontal(id="command-bar"):
-            yield CommandInput(id="cmd", placeholder="Type a command (try: help). Keys 1-5 switch tabs.",
+            yield CommandInput(id="cmd", placeholder="Type a command (try: help). Keys 1-4 switch tabs.",
                                suggester=SuggestFromList(COMMAND_WORDS))
         yield Footer()
 
     # -- navigation -----------------------------------------------------------
     def action_show_tab(self, tab: str) -> None:
+        # From the command bar, focus stays there so letters keep typing (Down goes into the lists)
         self.query_one("#tabs", TabbedContent).active = tab
-        if tab == "prizepicks":
-            # From the command bar, focus stays there so letters keep typing (Down goes into the picks).
-            # From a list (e.g. e on PLACE NOW), go straight into the picks so Enter/d/x/c work at once.
-            if not isinstance(self.focused, Input):
-                self._focus_pick_list()
-        elif isinstance(self.focused, PickList):
+        if tab != "home" and isinstance(self.focused, (PlayList, PickList)):
             self.action_focus_command()
 
     def _focus_pick_list(self) -> bool:
-        """Focus the first visible list with a line you can pick (highlighting that line), else ALL
-        LINES (to scroll it). True when some line can be picked."""
-        shown = [lst for lst in self.query(PickList) if lst.display and lst.parent.display]
+        """Focus the first visible list with a play or line you can pick (highlighting it), else ALL
+        LINES (to scroll it). True when something can be picked."""
+        shown = self._shown_pick_lists()
         lst = next((lst for lst in shown if lst.selectable), shown[-1] if shown else None)
         if lst is not None:
             lst.focus()
             lst.highlight_first()
         return lst is not None and lst.selectable
 
+    def _shown_pick_lists(self) -> list:
+        """SUGGESTED PLAYS and ALL LINES, top to bottom, where on screen."""
+        return [lst for lst in self.query("PlayList, PickList") if lst.display and lst.parent.display]
+
+    def keep_picks_in_view(self) -> None:
+        """With a pick list focused, scroll Home so it shows from its box down: SUGGESTED PLAYS, or for
+        ALL LINES the YOUR ENTRY box just above it (so the 'Press c' line stays on screen while picking)."""
+        focused = self.focused
+        if not isinstance(focused, (PlayList, PickList)):
+            return
+        top = self.query_one("#pp-plays-box" if isinstance(focused, PlayList) else "#pp-entry-box")
+        scroll = self.query_one("#home-scroll", VerticalScroll)
+        self.call_after_refresh(lambda: scroll.scroll_to_widget(top, top=True, animate=False))
+
     def action_focus_command(self) -> None:
         self.query_one("#cmd", Input).focus()
 
     def action_focus_list(self) -> None:
-        """Down in the empty command bar: into the PrizePicks lists on tab 5, else Home's PLACE NOW."""
-        if self.query_one("#tabs", TabbedContent).active == "prizepicks":
-            if not self._focus_pick_list():
-                self.log_event("info", pp_ui.nothing_to_pick_text(self._pp_view))
-            return
+        """Down in the empty command bar: into PLACE NOW when it has bets, else the PrizePicks lists."""
         self.action_show_tab("home")
         lst = self.query_one("#place-now", PlaceNowList)
-        (lst if lst.display and lst.option_count else self.query_one("#open-bets", OpenBetsList)).focus()
+        if lst.display and lst.option_count:
+            lst.focus()
+        elif not self._focus_pick_list():
+            for other in (self.query_one("#watching", WatchList), self.query_one("#open-bets", OpenBetsList)):
+                if other.display and other.option_count:
+                    other.focus()
+                    return
+            self.log_event("info", pp_ui.nothing_to_pick_text(self._pp_view))
 
-    # A shorter tab 5 below this many rows: BEST PICKS NOW steps aside while YOUR ENTRY has picks
+    # A shorter PrizePicks part of Home below this many rows: the plays list shrinks while YOUR ENTRY has picks
     PP_SHORT_ROWS = 45
 
     def on_resize(self, event: events.Resize) -> None:
@@ -306,14 +332,13 @@ class GridironApp(App):
 
     def _show_watching(self, board: list[Recommendation], now: datetime, games: dict, paused: dict) -> None:
         s = self.services
-        watch = home.watching(board, now, games)
-        shown = watch[:home.WATCH_LIMIT]
-        rows = [home.watch_cells(r, now, games, home.watch_reason(r, games, dict(s.gates), paused,
-                                                                  s.settings.middles_live), self.names)
-                for r in shown]
+        watch = home.watching(board, now, games)  # all of them: Home scrolls
+        rows = [(r.id, *home.watch_cells(r, now, games, home.watch_reason(r, games, dict(s.gates), paused,
+                                                                          s.settings.middles_live), self.names, rank))
+                for rank, r in enumerate(watch, 1)]  # best first: most profit per $1 (no amount is suggested)
         box = self.query_one("#watch-box", Section)
         box.body.set_rows(rows)
-        summary = home.watch_summary(len(shown), len(watch))
+        summary = home.watch_summary(len(watch))
         box.show_empty(summary if not watch else None)
         box.show_summary(summary if watch else None)
 
@@ -331,12 +356,11 @@ class GridironApp(App):
             books_at=newest(s.latest.get("quotes", [])), props_at=newest(s.latest.get("props", []))))
 
     def _show_pp(self, active: int, now: datetime) -> None:
-        """The Home PrizePicks status line and the PrizePicks tab."""
+        """The PrizePicks boxes on Home."""
         view = self._pp_view
         if view is None:
             return
         view.active = active
-        self.query_one("#pp-status", Static).update(Text(pp_ui.status_line(view, now, self.names)))
         summary, _, lines = pp_ui.board_sections(view, now, self.names)
         if self._pp_selected and len(summary) > 2:  # room for the entry: just where things stand
             summary = summary[-2:]
@@ -346,25 +370,33 @@ class GridironApp(App):
         for key in dropped:
             self.log_event("warn", pp_ui.dropped_text(key))
         chosen = set(kept)
-        best = pp_ui.best_rows(view, chosen, self.names)
-        self.query_one("#pp-best", PickList).set_rows(best)
-        self.query_one("#pp-best", PickList).display = bool(best)
-        self.query_one("#pp-best-empty", Static).update(pp_ui.best_empty_text(view))
-        self.query_one("#pp-best-empty").display = not best
-        self.query_one("#pp-board", PickList).set_rows(pp_ui.all_rows(view, chosen, now, self.names))
-        for box in ("#pp-best-box", "#pp-entry-box", "#pp-scroll"):
+        plays = self._plays(view)
+        self.query_one("#pp-plays", PlayList).set_rows([pp_ui.play_row_text(ev, i) for i, ev in enumerate(plays, 1)])
+        self.query_one("#pp-plays", PlayList).display = bool(plays)
+        self.query_one("#pp-plays-empty", Static).update(pp_ui.plays_empty_text(view))
+        self.query_one("#pp-plays-empty").display = not plays
+        note = pp_ui.plays_note(plays)
+        self.query_one("#pp-plays-note", Static).update(Text(note or ""))
+        self.query_one("#pp-plays-note").display = bool(note)
+        self.query_one("#pp-board", PickList).set_rows(pp_ui.all_rows(view, chosen, now, self.names, plays))
+        for box in ("#pp-plays-box", "#pp-entry-box", "#pp-scroll"):
             self.query_one(box).display = bool(lines)
         short = self.size.height < self.PP_SHORT_ROWS
-        self.query_one("#prizepicks").set_class(short, "-short")
-        if short and kept:  # the picks are in ALL LINES too; keep YOUR ENTRY and ALL LINES on screen
-            self.query_one("#pp-best-box").display = False
+        self.query_one("#home").set_class(short, "-short")
+        self.query_one("#home").set_class(bool(kept), "-picking")
         self._show_pp_entry(view)
-        if isinstance(self.focused, PickList) and not (self.focused.display and self.focused.parent.display):
-            shown = any(lst.display and lst.parent.display for lst in self.query(PickList))
-            if not shown:
+        focused = self.focused
+        if isinstance(focused, (PlayList, PickList)) and not (focused.display and focused.parent.display):
+            if not self._shown_pick_lists():
                 self.action_focus_command()
             else:
                 self._focus_pick_list()
+
+    def _plays(self, view: pp_ui.PPView) -> list[pp_ui.EntryEval]:
+        """The suggested plays for this view (worked out once: the view is rebuilt when data changes)."""
+        if self._pp_plays is None or self._pp_plays[0] is not view:
+            self._pp_plays = (view, pp_ui.suggested_plays(view))
+        return self._pp_plays[1]
 
     def _pp_picks(self, view: pp_ui.PPView) -> list:
         live = pp_ui.pickable(view)
@@ -393,7 +425,18 @@ class GridironApp(App):
         self.query_one("#pp-entry-keys", Static).update(Text(keys))
         self.query_one("#pp-entry-keys").display = bool(keys)
 
-    # -- PrizePicks tab keys: Enter/space toggle, d why, x clear, c record ---------------------------
+    # -- PrizePicks keys on Home: Enter/space open a play or toggle a pick, d why, x clear, c record -------
+    def on_play_list_load_requested(self, msg: PlayList.LoadRequested) -> None:
+        view = self._pp_view
+        plays = self._plays(view) if view is not None else []
+        if not 0 <= msg.index < len(plays):
+            return
+        ev = plays[msg.index]
+        self._pp_selected = [pp_ui.pick_key(ln) for ln in ev.picks]
+        self.log_event("info", pp_ui.opened_play_text(msg.index + 1, ev))
+        self._show_pp(view.active, self.clock())
+        self.keep_picks_in_view()
+
     def on_pick_list_toggle_requested(self, msg: PickList.ToggleRequested) -> None:
         view = self._pp_view
         if view is None:
@@ -415,12 +458,13 @@ class GridironApp(App):
             self._pp_selected.append(msg.key)
             self.log_event("info", pp_ui.added_text(ln, len(self._pp_selected)))
         self._show_pp(view.active, self.clock())
+        self.keep_picks_in_view()  # YOUR ENTRY grew or shrank above ALL LINES
 
     def on_pick_list_nothing_to_pick(self, msg: PickList.NothingToPick) -> None:
         self.log_event("info", pp_ui.nothing_to_pick_text(self._pp_view))
 
     def action_pp_refresh_key(self) -> None:
-        """Key r on tab 5: the same as typing pp refresh, but asks yes or no with the cost first."""
+        """Key r on Home: the same as typing pp refresh, but asks yes or no with the cost first."""
         games, text = self.services.pp_refresh_plan(self.clock())
         if not games:
             self.log_event("info", text)
@@ -499,7 +543,7 @@ class GridironApp(App):
         self.log_event("info", pp_ui.opened_text(rec.id))
         if self._pp_view is not None:
             self._show_pp(self._pp_view.active, self.clock())
-        self.action_show_tab("prizepicks")
+        self._focus_pick_list()  # straight into the picks so Enter/d/x/c work at once
 
     def _settled_today(self, now: datetime) -> list:
         day = now.astimezone(PT).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -549,7 +593,7 @@ class GridironApp(App):
             self._pp_view = s.pp_view(now)
         except Exception as e:  # never let the PrizePicks summary take the dashboard down
             self._pp_view = None
-            self.query_one("#pp-status", Static).update(Text(f"PrizePicks: could not show the lines ({e})."))
+            self.query_one("#pp-summary", Static).update(Text(f"PrizePicks: could not show the lines ({e})."))
         self.refresh_home()
         self._show_scores(now)
 
@@ -766,6 +810,37 @@ class GridironApp(App):
 
         self.push_screen(ConfirmScreen(rec, self.names), done)
 
+    # -- WATCHING keys: Enter or a click records an idea you placed anyway, d why ---------------------
+    def on_watch_list_confirm_requested(self, msg: WatchList.ConfirmRequested) -> None:
+        rec = self.services.lifecycle.get_rec(msg.rec_id)
+        if rec is None or rec.state != "LOGGED" or self.clock() >= rec.expires_at:
+            self.log_event("error", f"Watched idea #{msg.rec_id} can't be recorded any more (it went stale or "
+                                    "was already recorded).")
+            self.refresh_home()
+            return
+
+        def done(result: tuple[float | None, int | None, int | None] | None) -> None:
+            if result is None:
+                self.log_event("info", f"Watched idea #{rec.id} not recorded.")
+                return
+            try:
+                self._confirm(rec.id, *result)
+            except InsufficientFunds as e:
+                self.log_event("error", _funds_error(e))
+            except _USER_ERRORS as e:
+                self.log_event("error", error_text(e))
+            self.refresh_views()
+
+        self.push_screen(ConfirmScreen(rec, self.names, watched=True), done)
+
+    def on_watch_list_why_requested(self, msg: WatchList.WhyRequested) -> None:
+        rec = self.services.lifecycle.get_rec(msg.rec_id)
+        if rec is None:
+            return
+        st = self.services.settings
+        lines = d.why_lines(rec, self.clock(), self.names, st.kelly_fraction, st.cap_bet, settings=st)
+        self.push_screen(WhyScreen([WATCHED_WHY, *lines]))
+
     def on_place_now_list_skip_requested(self, msg: PlaceNowList.SkipRequested) -> None:
         try:
             self._skip(msg.rec_id)
@@ -773,7 +848,7 @@ class GridironApp(App):
             self.log_event("error", error_text(e))
         self.refresh_home()
 
-    def on_place_now_list_why_requested(self, msg: PlaceNowList.WhyRequested) -> None:
+    def on_place_now_list_why_requested(self, msg: PlaceNowList.WhyRequested | WatchList.WhyRequested) -> None:
         rec = self.services.lifecycle.get_rec(msg.rec_id)
         if rec is None:
             return
