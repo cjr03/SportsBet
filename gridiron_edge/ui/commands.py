@@ -23,7 +23,7 @@ COMMAND_WORDS: list[str] = [
     "bets", "bets open", "bets settled",
     "settle", "pp add", "pp refresh", "pp refresh yes", "quota",
     "notify test", "notify on", "notify off",
-    "set", "venues", "backtest", "fit blend", "report", "drift reset", "help",
+    "set", "venues", "backtest", "fit blend", "props check", "report", "drift reset", "help",
 ]
 
 # (what to type, what it does) for the help command, in plain English
@@ -44,6 +44,7 @@ HELP: list[tuple[str, str]] = [
     ("venues", "which betting sites are in use"),
     ("backtest <nfl|cfb> <yyyy>-<yyyy>", "test the model on past seasons"),
     ("fit blend", "recheck which kinds of bets our model is trusted to text"),
+    ("props check", "grade the logged player lines: does our projection beat the closing price?"),
     ("report", "how the bets have done so far"),
     ("drift reset <nfl|cfb> <ml|spread|total|prop|prizepicks> / drift reset all",
      "turn a paused kind of bet back on after our prices fell behind the market"),
@@ -179,6 +180,10 @@ def parse_command(text: str) -> Command:
             return Command("drift", {"segment": f"{lg} {typ}"})
         case "drift", _:
             raise _usage("drift reset <nfl|cfb> <ml|spread|total|prop|prizepicks>  or  drift reset all")
+        case "props", ["check"]:
+            return Command("props check", {})
+        case "props", _:
+            raise _usage("props check")
         case "fit", ["blend"]:
             return Command("fit", {"what": "blend"})
         case "fit", _:

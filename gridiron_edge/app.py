@@ -318,7 +318,8 @@ class GridironApp(App):
         place.body.set_recs(recs, now, games, self.names, details)
         place.show_empty(None if recs else home.empty_reason(
             now, odds_key=s.odds is not None and not s.odds.disabled, games=list(games.values()),
-            markets=list(markets.values()), gates=dict(s.gates), next_check=s.scheduler.next_check(now),
+            markets=list(markets.values()),
+            gates={} if s.settings.market_only_live else dict(s.gates), next_check=s.scheduler.next_check(now),
             names=self.names))
         views = [home.open_bet_view(b, games, markets, now, self.names, s._stat_lookup, payouts)
                  for b in s.lifecycle.open_bets()]
@@ -679,6 +680,9 @@ class GridironApp(App):
             case "fit":
                 self.log_event("info", "Rechecking which kinds of bets our model has earned...")
                 self.run_worker(self._fit_blend(), group="backtest")
+            case "props check":
+                for line in s.prop_check(now):
+                    self.log_event("info", line)
             case "report":
                 self._report()
             case "drift":

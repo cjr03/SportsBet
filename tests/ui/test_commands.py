@@ -28,6 +28,7 @@ from gridiron_edge.ui.commands import COMMAND_WORDS, Command, CommandError, pars
     ("venues", Command("venues", {})),
     ("backtest nfl 2018-2025", Command("backtest", {"league": "nfl", "start": 2018, "end": 2025})),
     ("fit blend", Command("fit", {"what": "blend"})),
+    ("props check", Command("props check", {})),
     ("report", Command("report", {})),
     ("drift reset nfl spread", Command("drift", {"segment": "nfl spread"})),
     ("drift reset all", Command("drift", {"segment": "all"})),

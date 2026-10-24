@@ -14,6 +14,7 @@ import polars as pl
 
 from gridiron_edge import pipeline
 from gridiron_edge.bets import report as report_mod
+from gridiron_edge.bets import prop_log
 from gridiron_edge.bets.lifecycle import Lifecycle
 from gridiron_edge.bets.report import build_report
 from gridiron_edge.bets.settle import Settler
@@ -931,6 +932,9 @@ class Services:
             except (TypeError, ValueError):
                 continue
             self.latest[key] = [i for i in items if now - _seen_at(i) < QUOTE_TTL]
+        kickoffs = {gid: g.kickoff for gid in {q.game_id for q in self.latest["props"]}
+                    if (g := self.registry.get(gid)) is not None}
+        prop_log.record(self.conn, self.latest["props"], kickoffs, now)  # lines pulled before the log existed
 
     # -- open positions ----------------------------------------------------
     def open_bet_games(self) -> set[str]:
@@ -1026,6 +1030,9 @@ class Services:
             self.scheduler.defer(job, now + PROPS_RETRY)
             return [("info", f"Player lines for {self._matchup(gid)}: skipped to keep credits in reserve.")]
         self._merge("props", "odds_api", props, now)
+        g = self.registry.get(gid)
+        if g is not None:  # history for the props check (the cache keeps only the latest pull)
+            prop_log.record(self.conn, props, {gid: g.kickoff}, now)
         pp = sum(q.book == "prizepicks" for q in props)
         rem = self.odds.budget.remaining()
         return [("api", f"Player lines for {self._matchup(gid)}: {pp:,} from PrizePicks, {len(props) - pp:,} from "
@@ -1464,6 +1471,15 @@ class Services:
 
     def notify_test(self, now: datetime):
         return self.notifier.send_text(NOTIFY_TEST_TEXT, now)
+
+    def prop_check(self, now: datetime) -> list[str]:
+        """Grade every logged player line whose game is played: does our projection beat the close?"""
+        weekly = self.latest.get("stats")
+        logged = prop_log.logged_count(self.conn)
+        if weekly is None or not isinstance(self.projector, PropProjector):
+            return [f"Player line check: {logged:,} lines logged; NFL stats aren't loaded yet, so none can be graded."]
+        lines = prop_log.graded_lines(self.conn, weekly, self.projector, now)
+        return prop_log.summary_lines(prop_log.grade(lines), logged)
 
     def quota_lines(self) -> list[str]:
         out = []

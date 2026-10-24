@@ -47,7 +47,7 @@ class Settings:
     nfl_max_disagree: float = 5.0
     cfb_max_disagree: float = 9.0
     qb_veto: bool = True  # NFL: no model weight when the depth-chart QB1 is not last game's starter
-    market_only_live: bool = False  # a gated league's market-only (no model) edges are texted, not observe-only
+    market_only_live: bool = True  # a gated league's market-only (no model) edges are texted, not observe-only
     # Kalshi game strikes are priced off the book line by the margin/total curve no further than this
     # (pts); beyond it the curve's tail is a guess, not a price
     game_max_shift_nfl: float = 7.0

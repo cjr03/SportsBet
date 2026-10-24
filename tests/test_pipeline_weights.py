@@ -87,7 +87,7 @@ def test_cfb_gated_ignores_model_even_when_it_disagrees(mk, settings):
 def test_market_only_rec_live_when_setting_on(mk, settings):
     m = mk("E1-H1", "E1", "ml", "H1", yes_ask=0.48, game_id="g1")
     snap = snap_with(quotes=h2h("g1", 1.80, 2.10), kalshi=[m], gates={("nfl", "ml"): True})
-    assert kalshi_game_candidates(snap, settings)[0].observe_only
+    assert kalshi_game_candidates(snap, replace(settings, market_only_live=False))[0].observe_only
     assert not kalshi_game_candidates(snap, replace(settings, market_only_live=True))[0].observe_only
     pred = Prediction("g1", 3.0, None, "t")  # the model contributes: the gate still applies
     with_model = replace(snap, predictions={"g1": pred}, quotes=snap.quotes + spreads("g1", -3.0))

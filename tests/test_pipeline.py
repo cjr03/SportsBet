@@ -95,7 +95,7 @@ def test_started_game_skipped(mk, settings):
 
 def test_observe_only_not_sized(mk, settings):
     snap = _ml_snap(mk, 0.48, gates={("nfl", "ml"): True})
-    recs = scan(snap, settings, StubProjector(), lambda m: "nfl")
+    recs = scan(snap, replace(settings, market_only_live=False),StubProjector(), lambda m: "nfl")
     assert len(recs) == 1 and recs[0].observe_only and recs[0].stake_cents == 0
 
 
