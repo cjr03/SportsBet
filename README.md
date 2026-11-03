@@ -49,7 +49,8 @@ it in the app so the ledger matches.
 - **PrizePicks (on Home):** loads lines for every game about 3 hours before kickoff and suggests
   the best 2- to 6-pick Power or Flex play of each size, ranked by long-run bankroll growth, each with
   a suggested buy-in from your bankroll limits. Same-game picks are scored at the worst case for how
-  they move together. You can also pick lines yourself and see the entry's chances.
+  they move together. You can also pick lines yourself and see the entry's chances: up to 6 picks, as
+  many from one game as you allow (`set pp_max_per_game 6`), and more than one stat on a player.
 - **Locked profit and middles:** Kalshi pairs that pay back at least what they cost whatever the score,
   checked against every final score.
 - **Risk controls:** quarter Kelly with per-bet, per-game, per-slate and daily caps; markets pause

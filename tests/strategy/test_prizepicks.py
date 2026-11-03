@@ -129,7 +129,8 @@ def test_same_game_entry_still_needs_two_teams(settings):
 def test_max_per_game_setting_validated():
     from gridiron_edge.config import Settings, apply_override
     assert apply_override(Settings(), "pp_max_per_game", "3").pp_max_per_game == 3
-    for bad in ("0", "4"):
+    assert apply_override(Settings(), "pp_max_per_game", "6").pp_max_per_game == 6  # a whole entry from one game
+    for bad in ("0", "7"):
         with pytest.raises(ValueError):
             apply_override(Settings(), "pp_max_per_game", bad)
 
@@ -308,3 +309,29 @@ def test_greedy_alone_finds_the_optimum_past_the_shortlist_window(settings, monk
     best = build_best_entry(picks, s, allowed=[(6, "power")])
     top6 = sorted(picks, key=lambda pk: -pk.p)[:6]  # independent, one per game: the 6 strongest are optimal
     assert set(best[0]) == set(top6)
+
+
+@pytest.mark.parametrize("m,rho", [(4, 0.3), (6, 0.3), (6, -0.3), (5, 0.9)])
+def test_big_same_game_blocks_are_sampled_close_to_the_exact_answer(m, rho):
+    """4-6 picks from one game: the fixed quasi-random sample matches scipy's exact joint CDFs by
+    inclusion-exclusion, and is the same every call."""
+    import itertools
+    import numpy as np
+    from scipy.stats import multivariate_normal, norm
+    from gridiron_edge.strategy.prizepicks import _block_distribution, _corr_matrix
+    legs = [Pick(f"p{i}", "A" if i % 2 else "B", "g", "rush_yds", 50.0, "over" if i % 3 else "under",
+                 0.55 + 0.03 * i, True) for i in range(m)]
+    got = _block_distribution(legs, rho)
+    a = [norm.ppf(pk.p) for pk in legs]
+    r = np.array(_corr_matrix(legs, rho))
+    joint = {sub: multivariate_normal(np.zeros(len(sub)), r[np.ix_(sub, sub)], allow_singular=True).cdf(
+        [a[i] for i in sub]) if sub else 1.0 for k in range(m + 1) for sub in itertools.combinations(range(m), k)}
+    exact = [0.0] * (m + 1)
+    for k in range(m + 1):
+        for hit in itertools.combinations(range(m), k):
+            rest = [i for i in range(m) if i not in hit]
+            exact[k] += sum((-1) ** e * joint[tuple(sorted(hit + more))]
+                            for e in range(len(rest) + 1) for more in itertools.combinations(rest, e))
+    assert sum(got) == pytest.approx(1.0)
+    assert got == pytest.approx(exact, abs=8e-3)
+    assert got == _block_distribution(legs, rho)

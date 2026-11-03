@@ -338,7 +338,7 @@ def one_game_text(view: PPView) -> str | None:
     k = len(games)
     has = f"Only {k} game{' has' if k == 1 else 's have'} lines"
     per_game = -(-need // k)
-    fix = f", or type: set pp_max_per_game {per_game}" if per_game <= 3 else "."
+    fix = f", or type: set pp_max_per_game {per_game}" if per_game <= MAX_PICKS else "."
     return (f"{has}, and an entry needs {need} picks with at most {cap} from one game. Wait for more games to "
             f"load{fix}")
 
@@ -389,8 +389,8 @@ def add_problem(chosen: list[PPLine], ln: PPLine, view: PPView, names: d.Names =
                 "picks from at least 2 different teams).")
     if len(chosen) >= MAX_PICKS:
         return f"An entry holds at most {MAX_PICKS} picks; remove one first (Enter on a picked line)."
-    if any(normalize_name(c.player) == normalize_name(ln.player) for c in chosen):
-        return f"{ln.player} is already in your entry; PrizePicks allows one pick per player."
+    if any(pick_key(c) == pick_key(ln) for c in chosen):
+        return f"{pick_words(ln)} is already in your entry (Enter on it removes it)."
     cap = view.settings.pp_max_per_game
     same = sum(c.game_id == ln.game_id for c in chosen)
     if same >= cap:
@@ -457,10 +457,16 @@ def evaluate_entry(picks: list[PPLine], view: PPView, names: d.Names = d.DEFAULT
                             f"{MAX_PICKS} picks.")
     if n > MAX_PICKS:
         out.problems.append(f"A PrizePicks entry holds at most {MAX_PICKS} picks; remove {n - MAX_PICKS}.")
-    players = Counter(normalize_name(ln.player) for ln in picks)
+    keys = Counter(pick_key(ln) for ln in picks)
     for ln in picks:
+        if keys[pick_key(ln)] > 1:
+            out.problems.append(f"{pick_words(ln)} is in your entry twice; remove one.")
+            keys[pick_key(ln)] = 0
+    players = Counter(normalize_name(ln.player) for ln in picks)
+    for ln in picks:  # several stats on one player: your call, but PrizePicks itself may not take it
         if players[normalize_name(ln.player)] > 1:
-            out.problems.append(f"{ln.player} is in your entry twice; PrizePicks allows one pick per player.")
+            out.warnings.append(f"{ln.player} is in your entry twice (two different stats); PrizePicks usually "
+                                "allows one pick per player, so check the site takes it.")
             players[normalize_name(ln.player)] = 0
     for gid, k in Counter(ln.game_id for ln in picks).items():
         if k > s.pp_max_per_game:

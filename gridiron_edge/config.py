@@ -82,7 +82,7 @@ class Settings:
     pp_payouts_json: str = ""
     pp_max_entries: int = 3
     pp_brute_force: bool = False
-    pp_max_per_game: int = 2  # picks from one game in an entry (1-3); same-game picks are correlated
+    pp_max_per_game: int = 2  # picks from one game in an entry (1-6); same-game picks are correlated
     # arbs: quotes older than this are not texted; smallest ROI worth legging into
     arb_stale_seconds: int = 90
     arb_min_roi: float = 0.01
@@ -202,8 +202,8 @@ def _validate(s: Settings) -> None:
         raise ValueError("arb_stale_seconds and pp_max_entries must be >= 0, clv_throttle_window >= 1")
     if len(s.quiet_hours) != 2 or not all(0 <= h <= 23 for h in s.quiet_hours):
         raise ValueError(f"quiet_hours must be two hours 0-23, got {s.quiet_hours}")
-    if not 1 <= s.pp_max_per_game <= 3:
-        raise ValueError(f"pp_max_per_game must be 1, 2 or 3, got {s.pp_max_per_game}")
+    if not 1 <= s.pp_max_per_game <= 6:
+        raise ValueError(f"pp_max_per_game must be 1 to 6, got {s.pp_max_per_game}")
     for st in s.pp_structures:
         parse_pp_structure(st)
     if s.pp_payouts_json:

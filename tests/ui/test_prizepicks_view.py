@@ -168,8 +168,10 @@ def test_entry_rules_give_plain_messages_not_errors():
     assert "3 picks from Patriots at Bears; we allow at most 2 from one game." in crowded.problems
     twice = ppv.evaluate_entry(entry(("A", 0.62, NE_CHI, "CHI", "pass_yds"), ("A", 0.62, NE_CHI, "CHI", "rush_yds"),
                                      ("C", 0.62, DAL_PHI, "PHI", "rush_yds")), v)
-    assert "A is in your entry twice; PrizePicks allows one pick per player." in twice.problems
-    for ev in (one, same_team, two, crowded, twice):
+    assert twice.ready  # two stats on one player: allowed, with a heads-up (PrizePicks may refuse it)
+    assert "Heads up: A is in your entry twice (two different stats); PrizePicks usually allows one pick per " \
+           "player, so check the site takes it." in ppv.entry_lines(twice, v)
+    for ev in (one, same_team, two, crowded):
         assert any(t.startswith("Can't record yet: ") for t in ppv.entry_lines(ev, v))
         assert ppv.entry_lines(ev, v)[-1].startswith("Fix the above to record it")
 
@@ -202,8 +204,9 @@ def test_entry_with_no_profit_suggests_nothing():
 def test_add_problem_and_reconcile():
     v = view([])
     picked = entry(*THREE[:2])
-    assert ppv.add_problem(picked, line("Caleb Williams", 0.6, stat="rush_yds"), v) == \
-        "Caleb Williams is already in your entry; PrizePicks allows one pick per player."
+    assert ppv.add_problem(picked[:1], line("Caleb Williams", 0.6, stat="rush_yds"), v) is None  # another stat: fine
+    assert ppv.add_problem(picked, picked[0], v) == \
+        "Caleb Williams MORE than 249.5 passing yards is already in your entry (Enter on it removes it)."
     assert ppv.add_problem(picked, line("New", 0.6), v) == \
         "Your entry already has 2 picks from Patriots at Bears; we allow at most 2 from one game."
     assert "no chance worked out" in ppv.add_problem([], line("X", None), v)
@@ -465,3 +468,19 @@ def test_suggested_plays_survive_a_payout_override_with_no_break_even():
     lines = [line("A", 0.64), line("B", 0.66, game=DAL_PHI, team="PHI"), line("C", 0.63, team="NE")]
     v = replace(sized(lines), settings=s)
     assert all(ev.structure != (3, "power") for ev in ppv.suggested_plays(v))
+
+
+def test_six_picks_from_one_game_build_an_entry_at_a_cap_of_six():
+    """You can play a whole 6-pick entry on one game (say, the only game left tonight) by raising the
+    per-game cap to 6; the add check and the worked-out entry both allow it."""
+    six = [line(f"Player {i}", 0.64, NE_CHI, team="CHI" if i % 2 else "NE", stat="rush_yds", point=50.5 + i)
+           for i in range(6)]
+    v = sized(six)
+    assert ppv.add_problem(six[:2], six[2], v) is not None  # the default cap of 2 still stops a third
+    v6 = replace(v, settings=replace(v.settings, pp_max_per_game=6))
+    assert all(ppv.add_problem(six[:k], six[k], v6) is None for k in range(6))
+    ev = ppv.evaluate_entry(six, v6)
+    assert ev.ready and ev.structure[0] == 6 and ev.linked
+    text = ppv.entry_lines(ev, v6)
+    assert text[-1].startswith("Press c after you place it on PrizePicks to record it")  # the amount is typed there
+    assert any(t.startswith("Suggested amount") for t in text)

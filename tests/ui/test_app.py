@@ -888,3 +888,28 @@ async def test_watched_pair_records_at_its_leg_prices_without_a_price_box(servic
         await pilot.pause()
         (bet,) = svc.lifecycle.open_bets()
         assert bet["rec_id"] == rec.id and bet["stake_cents"] == 475
+
+
+async def test_set_pp_max_per_game_takes_effect_on_home_at_once(services_mocked):
+    """Raising the per-game cap with `set` lets the next Enter add a third pick from the same game,
+    without waiting for a data refresh to rebuild the Home view."""
+    svc = services_mocked()
+    svc.ledger.deposit(100_000)
+    app = GridironApp(svc, clock=lambda: NOW)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await app.workers.wait_for_complete()
+        seed_pp6(svc, next(g for g in svc.registry.all_since(NOW - timedelta(days=1)) if g.home == "SEA"))
+        app.refresh_views()
+        await pilot.pause()
+        await submit(app, pilot, "set pp_max_per_game 6")
+        assert log_lines(app)[-1].endswith("Setting changed: most PrizePicks picks from one game is now 6.")
+        board = app.query_one("#pp-board", PickList)
+        board.focus()
+        await pilot.pause()
+        sea = [r.key for r in board.rows if r.key is not None and r.key[0] in ("Geno Smith", "Caleb Williams",
+                                                                                  "Kenneth Walker")]
+        for key in sea:
+            board.highlighted = [r.key for r in board.rows].index(key)
+            await pilot.press("enter")
+            await pilot.pause()
+        assert len(app._pp_selected) == 3, log_lines(app)[-3:]

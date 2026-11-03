@@ -8,7 +8,7 @@ from typing import Literal
 
 import numpy as np
 from scipy.optimize import brentq, minimize_scalar
-from scipy.stats import norm
+from scipy.stats import norm, qmc
 
 from gridiron_edge.config import Settings, parse_pp_payouts, parse_pp_structure
 
@@ -168,11 +168,28 @@ def _corr_matrix(block: list[Pick], rho: float) -> list[list[float]]:
     return r
 
 
+_QMC_POINTS = 2 ** 16  # fixed-seed Sobol points for blocks of more than 3 picks: deterministic, within ~1e-3
+_QMC_SEED = 7
+
+
+def _qmc_block_distribution(a: list[float], r: list[list[float]]) -> list[float]:
+    """Hit-count distribution of one block from a fixed quasi-random normal sample with correlation r:
+    the exact 3-pick integral does not extend to 4-6 picks from one game, so those are sampled."""
+    m = len(a)
+    z = qmc.MultivariateNormalQMC(mean=np.zeros(m), cov=np.array(r), seed=_QMC_SEED).random(_QMC_POINTS)
+    hits = (z < np.array(a)).sum(axis=1)
+    counts = np.bincount(hits, minlength=m + 1)[: m + 1]
+    return [float(c) / _QMC_POINTS for c in counts]
+
+
 def _block_distribution(block: list[Pick], rho: float) -> list[float]:
-    """Hit-count distribution of one game's picks, by inclusion-exclusion over joint hit CDFs."""
+    """Hit-count distribution of one game's picks, by inclusion-exclusion over joint hit CDFs (up to
+    3 picks; a fixed quasi-random sample beyond that)."""
     m = len(block)
     a = [norm.ppf(min(max(pk.p, 1e-9), 1 - 1e-9)) for pk in block]
     r = _corr_matrix(block, rho)
+    if m > 3:
+        return _qmc_block_distribution(a, r)
     all_hit = {(): 1.0}
     for size in range(1, m + 1):
         for sub in itertools.combinations(range(m), size):
